@@ -3,3 +3,4 @@ requests
 gunicorn
 pandas
 numpy
+openai>=1.50.0
