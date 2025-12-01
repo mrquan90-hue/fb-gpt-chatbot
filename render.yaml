@@ -5,7 +5,7 @@ services:
     region: oregon
     plan: free
     buildCommand: "pip install --no-cache-dir -r requirements.txt"
-    startCommand: "gunicorn src.app:app"
+    startCommand: "gunicorn app:app"
     envVars:
       - key: OPENAI_API_KEY
         sync: false
