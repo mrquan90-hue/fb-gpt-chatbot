@@ -4,6 +4,7 @@ import requests
 from flask import Flask, request
 import pandas as pd
 import re
+import time
 
 app = Flask(__name__)
 
@@ -45,6 +46,14 @@ def load_products():
 PRODUCTS = load_products()
 
 # =============================
+# ANTI-SPAM STORAGE
+# =============================
+LAST_MID = {}        # tránh xử lý lại message
+LAST_SENT_IMAGES = {}  # mỗi PSID chỉ gửi ảnh 1 lần trong 30 giây
+COOLDOWN = 30        # 30 giây tránh spam ảnh lại
+
+
+# =============================
 # HELPER: FILTER WATERMARK CN
 # =============================
 def has_chinese(text):
@@ -58,6 +67,7 @@ def clean_images(raw_images):
             if u and not has_chinese(u):
                 imgs.append(u)
     return list(dict.fromkeys(imgs))
+
 
 # =============================
 # FACEBOOK SEND API
@@ -81,6 +91,7 @@ def send_image(user_id, image_url):
     }
     requests.post(url, json=payload)
 
+
 def send_video(user_id, video_url):
     url = f"https://graph.facebook.com/v19.0/me/messages?access_token={PAGE_ACCESS_TOKEN}"
     payload = {
@@ -91,6 +102,7 @@ def send_video(user_id, video_url):
         }}
     }
     requests.post(url, json=payload)
+
 
 # =============================
 # SEARCH PRODUCT
@@ -106,9 +118,10 @@ def find_products_by_text(text):
 def get_product_group(ma_san_pham):
     return PRODUCTS[PRODUCTS["Mã sản phẩm"] == ma_san_pham]
 
-# =============================
+
+# ============================================================
 # WEBHOOK
-# =============================
+# ============================================================
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
     global BOT_ACTIVE
@@ -125,93 +138,116 @@ def webhook():
         return "OK", 200
 
     entry = data["entry"][0]
-    messaging = entry.get("messaging", [])
-    if not messaging:
-        return "OK", 200
+    events = entry.get("messaging", [])
 
-    message = messaging[0]
+    for message in events:
 
-    sender_id = message["sender"]["id"]
-    recipient_id = message["recipient"]["id"]
+        sender_id = message["sender"]["id"]
+        recipient_id = message["recipient"]["id"]
 
-    # =============================
-    # CHẶN echo (TIN CỦA PAGE TỰ GỬI)
-    # =============================
-    if "message" in message and message["message"].get("is_echo"):
-        print("[ECHO] Bỏ qua tin của chính page.")
-        return "OK", 200
+        # ====================================================
+        # 1) CHẶN ECHO ngay lập tức
+        # ====================================================
+        if "message" in message and message["message"].get("is_echo"):
+            print("[ECHO] Bỏ qua tin của chính page.")
+            continue  # KHÔNG return để xử lý event khác
 
-    # =============================
-    # EMERGENCY STOP – BOT TẮT NGAY
-    # =============================
-    msg = message.get("message", {})
-    text = msg.get("text", "").lower().strip()
+        # ====================================================
+        # 2) CHẶN delivery/read (KHÔNG BAO GIỜ trả lời)
+        # ====================================================
+        if "delivery" in message or "read" in message:
+            print("[DELIVERY/READ] Bỏ qua.")
+            continue
 
-    # Lệnh tắt bot
-    if text in ["tắt bot", "tat bot", "stop bot", "dừng bot"]:
-        if sender_id == ADMIN_PSID:
-            BOT_ACTIVE = False
-            save_status()
-            send_text(sender_id, "⛔ Bot đã được TẮT NGAY LẬP TỨC.")
-        else:
-            send_text(sender_id, "Bạn không có quyền tắt bot.")
-        return "OK", 200
+        # ====================================================
+        # 3) CHẶN TRÙNG MID để chống vòng lặp webhook retry
+        # ====================================================
+        msg_obj = message.get("message", {})
+        mid = msg_obj.get("mid", "")
+        if mid:
+            if LAST_MID.get(sender_id) == mid:
+                print("[DUPLICATE] Bỏ qua MID trùng.")
+                continue
+            LAST_MID[sender_id] = mid
 
-    # Lệnh bật bot
-    if text in ["bật bot", "bat bot", "start bot"]:
-        if sender_id == ADMIN_PSID:
-            BOT_ACTIVE = True
-            save_status()
-            send_text(sender_id, "▶ Bot đã BẬT lại.")
-        else:
-            send_text(sender_id, "Bạn không có quyền bật bot.")
-        return "OK", 200
+        # ====================================================
+        # 4) XỬ LÝ LỆNH TẮT BOT / BẬT BOT
+        # ====================================================
+        text = msg_obj.get("text", "").lower().strip()
 
-    # Nếu bot đang tắt → không phản hồi
-    if BOT_ACTIVE is False:
-        print("[STOP] Bot đang tắt. Không phản hồi.")
-        return "OK", 200
+        if text in ["tắt bot", "tat bot", "stop bot", "dừng bot"]:
+            if sender_id == ADMIN_PSID:
+                BOT_ACTIVE = False
+                save_status()
+                send_text(sender_id, "⛔ Bot đã TẮT NGAY LẬP TỨC.")
+            else:
+                send_text(sender_id, "Bạn không có quyền tắt bot.")
+            continue
 
-    # =============================
-    # XỬ LÝ TIN NHẮN KHÁCH
-    # =============================
-    if text:
-        results = find_products_by_text(text)
-        if results.empty:
-            send_text(sender_id, "Shop chưa có sản phẩm bạn tìm. Bạn mô tả rõ hơn giúp shop nhé ❤️")
-            return "OK", 200
+        if text in ["bật bot", "bat bot", "start bot"]:
+            if sender_id == ADMIN_PSID:
+                BOT_ACTIVE = True
+                save_status()
+                send_text(sender_id, "▶ Bot đã BẬT lại.")
+            else:
+                send_text(sender_id, "Bạn không có quyền bật bot.")
+            continue
 
-        # Lấy sản phẩm đầu tiên
-        product = results.iloc[0]
-        ma_sp = product["Mã sản phẩm"]
+        # ====================================================
+        # 5) BOT ĐANG TẮT → không trả lời
+        # ====================================================
+        if BOT_ACTIVE is False:
+            print("[STOP] Bot đang tắt, bỏ qua.")
+            continue
 
-        group = get_product_group(ma_sp)
+        # ====================================================
+        # 6) XỬ LÝ TIN NHẮN KHÁCH
+        # ====================================================
+        if text:
+            results = find_products_by_text(text)
+            if results.empty:
+                send_text(sender_id, "Shop chưa có sản phẩm bạn tìm. Bạn mô tả rõ hơn giúp shop nhé ❤️")
+                continue
 
-        ten_sp = product["Tên sản phẩm"]
-        mo_ta = product["Mô tả"]
-        gia_list = group["Giá bán"].unique()
+            product = results.iloc[0]
+            ma_sp = product["Mã sản phẩm"]
 
-        # Format giá
-        gia_text = ", ".join([f"{g}đ" for g in gia_list])
+            group = get_product_group(ma_sp)
 
-        send_text(sender_id, f"✨ *{ten_sp}*\nGiá: {gia_text}\n\n{mo_ta}")
+            ten_sp = product["Tên sản phẩm"]
+            mo_ta = product["Mô tả"]
+            gia_list = group["Giá bán"].unique()
 
-        # Gửi ảnh
-        all_imgs = []
-        for _, row in group.iterrows():
-            imgs1 = clean_images(row["Images"])
-            imgs2 = clean_images(row["Hình sản phẩm"])
-            all_imgs.extend(imgs1 + imgs2)
+            gia_text = ", ".join([f"{g}đ" for g in gia_list])
 
-        all_imgs = list(dict.fromkeys(all_imgs))  # unique
+            send_text(sender_id, f"✨ *{ten_sp}*\nGiá: {gia_text}\n\n{mo_ta}")
 
-        # gửi 5 ảnh đầu
-        for img in all_imgs[:5]:
-            send_image(sender_id, img)
+            # ====================================================
+            # GỬI ẢNH — NHƯNG CHỈ 1 LẦN TRONG 30 GIÂY
+            # ====================================================
+            now = time.time()
+            last_time = LAST_SENT_IMAGES.get(sender_id, 0)
 
-        send_text(sender_id, "Bạn muốn xem thêm ảnh hoặc xem video không ạ? ❤️")
+            if now - last_time > COOLDOWN:
+                LAST_SENT_IMAGES[sender_id] = now
+
+                all_imgs = []
+                for _, row in group.iterrows():
+                    imgs1 = clean_images(row["Images"])
+                    imgs2 = clean_images(row["Hình sản phẩm"])
+                    all_imgs.extend(imgs1 + imgs2)
+
+                all_imgs = list(dict.fromkeys(all_imgs))
+
+                for img in all_imgs[:5]:
+                    send_image(sender_id, img)
+            else:
+                print("[SPAM BLOCK] Không gửi ảnh vì vừa gửi <30s")
+
+            send_text(sender_id, "Bạn muốn xem thêm ảnh hoặc xem video không ạ? ❤️")
 
     return "OK", 200
+
 
 @app.route("/")
 def home():
