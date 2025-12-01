@@ -159,7 +159,7 @@ def send_video(psid: str, video_url: str):
                 "payload": {
                     "url": video_url,
                     "is_reusable": True,
-                },
+                }
             }
         },
     }
@@ -234,7 +234,7 @@ def extract_highlight(name: str, desc: str) -> str:
 
 
 # =============================
-# TÌM SẢN PHẨM
+# TÌM SẢN PHẨM (THEO CỘT MỚI)
 # =============================
 
 
@@ -245,6 +245,7 @@ def search_product_rows(df: pd.DataFrame, text: str) -> pd.DataFrame:
     - Mã mẫu mã
     - Tên sản phẩm
     - Keyword sản phẩm
+    - Keyword mẫu mã
     """
     if df.empty:
         return df
@@ -252,7 +253,7 @@ def search_product_rows(df: pd.DataFrame, text: str) -> pd.DataFrame:
     if not t:
         return df.iloc[0:0]
 
-    cols = ["Mã sản phẩm", "Mã mẫu mã", "Tên sản phẩm", "Keyword sản phẩm"]
+    cols = ["Mã sản phẩm", "Mã mẫu mã", "Tên sản phẩm", "Keyword sản phẩm", "Keyword mẫu mã"]
     mask = None
     for col in cols:
         if col in df.columns:
@@ -265,7 +266,7 @@ def search_product_rows(df: pd.DataFrame, text: str) -> pd.DataFrame:
 
     matched = df[mask]
 
-    # Nếu không thấy → thử tìm theo từ khoá đầu tiên
+    # Nếu không thấy → thử theo từ khoá đầu tiên
     if matched.empty:
         tokens = [w for w in re.split(r"\s+", t) if w]
         if not tokens:
@@ -298,17 +299,18 @@ def group_by_product(df: pd.DataFrame, row: pd.Series) -> pd.DataFrame:
 
 def get_product_images(group: pd.DataFrame):
     """
-    Ảnh chung của sản phẩm: lấy từ Hình sản phẩm + Images, bỏ trùng.
+    Ảnh chung của sản phẩm: lấy từ cột Images, bỏ trùng.
+    (Sheet mới không còn cột 'Hình sản phẩm')
     """
     urls = []
     seen = set()
+    if "Images" not in group.columns:
+        return []
     for _, r in group.iterrows():
-        for col in ["Hình sản phẩm", "Images"]:
-            if col in group.columns:
-                for u in parse_image_urls(r.get(col, "")):
-                    if u not in seen:
-                        seen.add(u)
-                        urls.append(u)
+        for u in parse_image_urls(r.get("Images", "")):
+            if u not in seen:
+                seen.add(u)
+                urls.append(u)
     return urls
 
 
@@ -316,16 +318,18 @@ def get_images_for_price(group: pd.DataFrame, price_value: str):
     """
     Ảnh theo từng mức giá: gom tất cả ảnh của các dòng có Giá bán = price_value.
     """
+    if "Giá bán" not in group.columns:
+        return []
     subset = group[group["Giá bán"] == price_value]
     urls = []
     seen = set()
+    if "Images" not in subset.columns:
+        return []
     for _, r in subset.iterrows():
-        for col in ["Hình sản phẩm", "Images"]:
-            if col in subset.columns:
-                for u in parse_image_urls(r.get(col, "")):
-                    if u not in seen:
-                        seen.add(u)
-                        urls.append(u)
+        for u in parse_image_urls(r.get("Images", "")):
+            if u not in seen:
+                seen.add(u)
+                urls.append(u)
     return urls
 
 
@@ -361,9 +365,10 @@ def handle_product_reply(psid: str, text: str):
     highlight = extract_highlight(name, desc)
 
     # Lấy danh sách giá
-    prices_raw = list(group["Giá bán"].unique())
-    prices = [p for p in prices_raw if str(p).strip() != ""]
-    if not prices:
+    if "Giá bán" in group.columns:
+        prices_raw = list(group["Giá bán"].unique())
+        prices = [p for p in prices_raw if str(p).strip() != ""]
+    else:
         prices = []
 
     # Ảnh chung của sản phẩm (5 ảnh đầu)
