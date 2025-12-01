@@ -6,7 +6,7 @@ import re
 from collections import defaultdict, deque
 
 import requests
-from flask import Flask, request, jsonify
+from flask import Flask, request
 from openai import OpenAI
 
 # ============================================
@@ -14,38 +14,35 @@ from openai import OpenAI
 # ============================================
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "YOUR_VERIFY_TOKEN")
 PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN", "YOUR_PAGE_ACCESS_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "YOUR_OPENAI_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "YOUR_OPENAI_API_KEY")
+
 SHEET_CSV_URL = os.getenv(
     "SHEET_CSV_URL",
     "https://docs.google.com/spreadsheets/d/18eI8Yn-WG8xN0YK8mWqgIOvn-USBhmXBH3sR2drvWus/export?format=csv"
 )
 
 client = OpenAI(api_key=OPENAI_API_KEY)
-
 app = Flask(__name__)
 
 # ============================================
-# GLOBAL
+# GLOBAL VARIABLES
 # ============================================
-PRODUCTS = {}                   # {product_id: [variant_rows]}
-LAST_LOAD = 0                   # time sheet load
-LOAD_TTL = 300                  # 5 phút reload
+PRODUCTS = {}
+LAST_LOAD = 0
+LOAD_TTL = 300  # 5 phút reload
 
 BOT_ENABLED = True
-
-RECENT_MIDS = deque(maxlen=300)  # anti-loop MID
-USER_CONTEXT = {}                # lưu lần tư vấn sản phẩm gần nhất
-
+RECENT_MIDS = deque(maxlen=300)
+USER_CONTEXT = {}   # chống double reply + lưu state
 
 # ============================================
-# UTIL
+# UTILS
 # ============================================
-def normalize(text: str) -> str:
+def normalize(text):
     return (text or "").lower().strip()
 
 
-def has_chinese(s: str) -> bool:
-    """Check watermark chữ TQ trong URL."""
+def has_chinese(s: str):
     if not s:
         return False
     for ch in s:
@@ -54,7 +51,7 @@ def has_chinese(s: str) -> bool:
     return False
 
 
-def split_images(cell: str):
+def split_images(cell):
     if not cell:
         return []
     parts = re.split(r"[\n,; ]+", cell.strip())
@@ -62,17 +59,19 @@ def split_images(cell: str):
 
 
 def filter_images(urls):
+    """Loại trùng + watermark chữ Trung."""
     seen = set()
     clean = []
     for u in urls:
+        if not u.startswith("http"):
+            continue
         if u in seen:
             continue
         seen.add(u)
-        if has_chinese(u):  # loại watermark chữ TQ
+        if has_chinese(u):
             continue
         clean.append(u)
     return clean
-
 
 # ============================================
 # FACEBOOK SEND API
@@ -85,7 +84,6 @@ def send_text(psid, text):
         "messaging_type": "RESPONSE"
     }
     params = {"access_token": PAGE_ACCESS_TOKEN}
-
     try:
         r = requests.post(url, json=payload, params=params, timeout=20)
         print("[SEND_TEXT]", r.status_code, r.text)
@@ -100,10 +98,7 @@ def send_image(psid, img_url):
         "message": {
             "attachment": {
                 "type": "image",
-                "payload": {
-                    "url": img_url,
-                    "is_reusable": False
-                }
+                "payload": {"url": img_url, "is_reusable": False}
             }
         }
     }
@@ -115,7 +110,6 @@ def send_image(psid, img_url):
     except Exception as e:
         print("[FB ERROR IMAGE]", e)
 
-
 # ============================================
 # LOAD SHEET
 # ============================================
@@ -123,10 +117,11 @@ def load_products(force=False):
     global PRODUCTS, LAST_LOAD
 
     now = time.time()
-    if not force and (now - LAST_LOAD < LOAD_TTL) and PRODUCTS:
+    if not force and PRODUCTS and (now - LAST_LOAD < LOAD_TTL):
         return
 
     print("[SHEET] Loading sheet...")
+
     try:
         resp = requests.get(SHEET_CSV_URL, timeout=30)
         resp.encoding = "utf-8"
@@ -142,12 +137,10 @@ def load_products(force=False):
 
         PRODUCTS = dict(tmp)
         LAST_LOAD = now
-
         print(f"[SHEET] Loaded {len(PRODUCTS)} products")
 
     except Exception as e:
         print("[SHEET ERROR]", e)
-
 
 # ============================================
 # PRODUCT SEARCH
@@ -158,7 +151,7 @@ def find_by_code(text):
 
     load_products()
 
-    # Tìm theo Mã sản phẩm
+    # Tìm theo mã sản phẩm
     for pid, rows in PRODUCTS.items():
         if normalize(pid) in tokens:
             return pid, rows
@@ -215,9 +208,8 @@ def find_best_product(text):
         return None, None
     return best_pid, best_rows
 
-
 # ============================================
-# PRICE GROUPING
+# PRICE
 # ============================================
 def group_by_price(rows):
     groups = defaultdict(lambda: {"colors": set(), "sizes": set()})
@@ -255,24 +247,20 @@ def format_price_output(groups):
             lines.append(f"{colors} giá: {price}.")
     return "\n".join(lines)
 
-
 # ============================================
-# GPT SUMMARY + CTA
+# GPT summary + CTA
 # ============================================
 def generate_summary_and_cta(name, desc, user_msg):
     prompt = f"""
-Bạn là nhân viên bán hàng.
-
-Dựa trên mô tả sản phẩm bên dưới, hãy viết:
-1) 2–3 câu nêu ưu điểm nổi bật, dễ hiểu, KHÔNG bịa.
-2) 1 câu CTA mềm, mời khách chọn mẫu.
+Hãy viết:
+1) 2–3 câu ưu điểm nổi bật từ mô tả
+2) 1 câu CTA
 
 Tên sản phẩm: {name}
 Mô tả: {desc}
-Tin nhắn khách: {user_msg}
+Tin khách: {user_msg}
 
-Trả về đúng định dạng:
-
+Định dạng:
 [ƯU ĐIỂM]
 ...
 [CTA]
@@ -292,18 +280,18 @@ Trả về đúng định dạng:
             cta = parts[1].strip()
             return advantages, cta
 
+        # fallback
         return (
-            "Sản phẩm có thiết kế đẹp, chất liệu dễ chịu và phù hợp nhiều hoàn cảnh.",
-            "Anh/chị ưng mẫu nào để shop giữ hàng và chốt đơn ạ?"
+            "Sản phẩm có thiết kế đẹp, chất liệu bền và phù hợp nhiều nhu cầu.",
+            "Anh/chị chọn giúp shop màu/size để em hỗ trợ ạ!"
         )
 
     except Exception as e:
         print("[GPT ERROR]", e)
         return (
-            "Sản phẩm có thiết kế ổn định và phù hợp nhiều nhu cầu sử dụng.",
-            "Anh/chị ưng mẫu nào để shop hỗ trợ chốt đơn giúp ạ?"
+            "Sản phẩm có thiết kế đẹp và sử dụng tiện lợi.",
+            "Anh/chị ưng mẫu nào shop chốt đơn giúp ạ!"
         )
-
 
 # ============================================
 # SEND PRODUCT CONSULT
@@ -313,10 +301,13 @@ def send_product_consult(psid, rows, user_text):
     name = base.get("Tên sản phẩm") or "Sản phẩm"
     desc = base.get("Mô tả") or ""
 
-    # 1 - Tên sản phẩm
     send_text(psid, name)
 
-    # 2 - Ảnh chung
+    # =======================
+    # GỬI ẢNH KHÔNG TRÙNG
+    # =======================
+    sent_images = set()
+
     all_urls = []
     for r in rows:
         all_urls.extend(split_images(r.get("Images") or ""))
@@ -324,28 +315,36 @@ def send_product_consult(psid, rows, user_text):
     all_urls = filter_images(all_urls)
 
     for img in all_urls:
+        if img in sent_images:
+            continue
+        sent_images.add(img)
         send_image(psid, img)
 
-    # 3 - Ưu điểm + CTA
+    # =======================
+    # ƯU ĐIỂM + CTA
+    # =======================
     advantages, cta = generate_summary_and_cta(name, desc, user_text)
 
-    # 4 - Giá
+    # =======================
+    # GIÁ
+    # =======================
     price_groups = group_by_price(rows)
     price_text = format_price_output(price_groups)
 
     final_msg = f"{advantages}\n\n{price_text}\n\n{cta}"
     send_text(psid, final_msg)
 
-
 # ============================================
 # HANDLE MESSAGE
 # ============================================
 def handle_message(psid, message):
+
     text = message.get("text")
     attachments = message.get("attachments")
 
-    # AI OFF
     global BOT_ENABLED
+
+    # ========== BOT ON/OFF ==========
     if text:
         t = normalize(text)
         if "tắt bot" in t:
@@ -354,43 +353,55 @@ def handle_message(psid, message):
             return
         if "bật bot" in t:
             BOT_ENABLED = True
-            send_text(psid, "Bot đã được bật lại.")
+            send_text(psid, "Bot đã bật lại.")
             return
 
     if not BOT_ENABLED:
         return
 
-    # Nếu khách gửi hình
+    # ========== Nếu khách gửi ảnh ==========
     if attachments:
-        send_text(psid, "Shop đã nhận được ảnh rồi ạ. Anh/chị mô tả giúp shop muốn tìm mẫu nào nhé!")
+        send_text(psid, "Shop đã nhận được ảnh ạ. Anh/chị mô tả nhu cầu giúp shop nhé!")
         return
 
+    # ========== Anti-empty ==========
     if not text:
-        send_text(psid, "Anh/chị nhắn giúp shop tên mẫu hoặc nhu cầu để em hỗ trợ ạ.")
+        send_text(psid, "Anh/chị mô tả giúp shop đang tìm gì để em hỗ trợ ạ.")
         return
 
-    # Tìm sản phẩm
+    # ============================================
+    # ANTI DOUBLE REPLY (fix gửi 2 lần)
+    # ============================================
+    now = time.time()
+    key = f"{psid}:{text}"
+    last = USER_CONTEXT.get("last_msg", {})
+
+    if last.get("key") == key and now - last.get("time", 0) < 3:
+        print("[SKIP] duplicate reply within 3s")
+        return
+
+    USER_CONTEXT["last_msg"] = {"key": key, "time": now}
+
+    # ============================================
+    # SEARCH PRODUCT
+    # ============================================
     pid, rows = find_best_product(text)
-    if not pid or not rows:
-        send_text(psid, "Shop chưa tìm thấy sản phẩm đúng nhu cầu. Anh/chị mô tả rõ hơn giúp shop ạ ❤️")
+    if not pid:
+        send_text(psid, "Shop chưa tìm thấy đúng mẫu. Anh/chị mô tả rõ hơn giúp shop ạ ❤️")
         return
 
     USER_CONTEXT[psid] = {"last_product": pid}
 
     send_product_consult(psid, rows, text)
 
-
 # ============================================
 # WEBHOOK
 # ============================================
 @app.route("/webhook", methods=["GET"])
 def verify():
-    token = request.args.get("hub.verify_token")
-    challenge = request.args.get("hub.challenge")
-
-    if token == VERIFY_TOKEN:
-        return challenge
-    return "Token không đúng", 403
+    if request.args.get("hub.verify_token") == VERIFY_TOKEN:
+        return request.args.get("hub.challenge")
+    return "Sai verify token", 403
 
 
 @app.route("/webhook", methods=["POST"])
@@ -404,17 +415,16 @@ def webhook():
     for entry in data.get("entry", []):
         for event in entry.get("messaging", []):
 
-            # ===== Skip delivery/read =====
+            # SKIP delivery/read
             if "delivery" in event or "read" in event:
                 print("[SKIP] delivery/read")
                 continue
 
-            # ===== message =====
             message = event.get("message")
             if not message:
                 continue
 
-            # ===== Skip echo =====
+            # SKIP echo
             if message.get("is_echo"):
                 print("[SKIP] echo")
                 continue
@@ -422,7 +432,7 @@ def webhook():
             psid = event["sender"]["id"]
             mid = message.get("mid")
 
-            # ===== Anti-loop MID =====
+            # ANTI-LOOP MID
             if mid in RECENT_MIDS:
                 print("[SKIP] duplicate MID")
                 continue
@@ -435,12 +445,9 @@ def webhook():
 
 @app.route("/")
 def home():
-    return "Chatbot đang chạy OK", 200
+    return "Chatbot OK", 200
 
 
-# ============================================
-# MAIN
-# ============================================
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 10000))
     app.run(host="0.0.0.0", port=port, debug=True)
