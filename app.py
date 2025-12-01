@@ -16,14 +16,18 @@ VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "YOUR_VERIFY_TOKEN")
 PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN", "YOUR_PAGE_ACCESS_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "YOUR_OPENAI_API_KEY")
 
-PAGE_ID = "516937221685203"   # ID Fanpage của bạn
+# ID fanpage của bạn
+PAGE_ID = "516937221685203"
 
+# Link CSV dữ liệu sản phẩm
 SHEET_CSV_URL = os.getenv(
     "SHEET_CSV_URL",
     "https://docs.google.com/spreadsheets/d/18eI8Yn-WG8xN0YK8mWqgIOvn-USBhmXBH3sR2drvWus/export?format=csv"
 )
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+# OpenAI client với timeout để tránh treo worker
+client = OpenAI(api_key=OPENAI_API_KEY, timeout=20.0)
+
 app = Flask(__name__)
 
 # ============================================
@@ -31,13 +35,16 @@ app = Flask(__name__)
 # ============================================
 PRODUCTS = {}
 LAST_LOAD = 0
-LOAD_TTL = 300
+LOAD_TTL = 300  # 5 phút cache sheet
 
 BOT_ENABLED = True
 
+# Lưu mid đã xử lý để tránh xử lý trùng (Facebook retry)
 RECENT_MIDS = deque(maxlen=500)
-RECENT_MESSAGES = deque(maxlen=500)
-USER_CONTEXT = {}
+
+# Lưu last message theo từng user để tránh trả lời 2 lần cùng nội dung trong 3s
+USER_CONTEXT = {}  # {psid: {"key": text, "time": timestamp}}
+
 
 # ============================================
 # UTILS
@@ -63,7 +70,11 @@ def split_images(cell):
 
 
 def filter_images(urls):
-    """Remove duplicate images + watermark Chinese."""
+    """
+    - Bỏ trùng
+    - Bỏ ảnh có watermark chữ Trung (trong URL có ký tự Chinese)
+    - Giữ domain Trung Quốc, ảnh hơi mờ vẫn giữ
+    """
     seen = set()
     clean = []
     for u in urls:
@@ -73,9 +84,11 @@ def filter_images(urls):
             continue
         seen.add(u)
         if has_chinese(u):
+            # Loại ảnh có chữ Trung Quốc trong URL (có thể là watermark)
             continue
         clean.append(u)
     return clean
+
 
 # ============================================
 # FACEBOOK SEND API
@@ -90,7 +103,7 @@ def send_text(psid, text):
     params = {"access_token": PAGE_ACCESS_TOKEN}
     try:
         r = requests.post(url, json=payload, params=params, timeout=20)
-        print("[SEND_TEXT]", r.status_code)
+        print("[SEND_TEXT]", r.status_code, getattr(r, "text", ""))
     except Exception as e:
         print("[FB ERROR TEXT]", e)
 
@@ -109,9 +122,10 @@ def send_image(psid, img_url):
     params = {"access_token": PAGE_ACCESS_TOKEN}
     try:
         r = requests.post(url, json=payload, params=params, timeout=20)
-        print("[SEND_IMAGE]", r.status_code)
+        print("[SEND_IMAGE]", r.status_code, getattr(r, "text", ""))
     except Exception as e:
         print("[FB ERROR IMAGE]", e)
+
 
 # ============================================
 # LOAD PRODUCTS
@@ -140,9 +154,9 @@ def load_products(force=False):
         PRODUCTS = dict(tmp)
         LAST_LOAD = now
         print(f"[SHEET] Loaded {len(PRODUCTS)} products")
-
     except Exception as e:
         print("[SHEET ERROR]", e)
+
 
 # ============================================
 # PRODUCT SEARCH
@@ -153,10 +167,12 @@ def find_by_code(text):
 
     load_products()
 
+    # 1) Tìm theo Mã sản phẩm
     for pid, rows in PRODUCTS.items():
         if normalize(pid) in tokens:
             return pid, rows
 
+    # 2) Tìm theo Mã mẫu mã
     for pid, rows in PRODUCTS.items():
         for r in rows:
             v = normalize(r.get("Mã mẫu mã") or "")
@@ -210,6 +226,7 @@ def find_best_product(text):
 
     return best_pid, best_rows
 
+
 # ============================================
 # PRICE GROUP
 # ============================================
@@ -231,19 +248,22 @@ def format_price_output(groups):
     if not groups:
         return "Hiện sản phẩm chưa có giá."
 
+    # 1 mức giá
     if len(groups) == 1:
         price = next(iter(groups.keys()))
         return f"Giá ưu đãi cho anh/chị hôm nay là: {price}."
 
+    # Nhiều mức giá
     lines = []
     for price, info in groups.items():
-        colors = ", ".join(sorted(info["colors"])) if info["colors"] else "Nhiều màu"
+        colors = ", ".join(sorted(c for c in info["colors"] if c)) or "Nhiều màu"
         if info["sizes"]:
             sizes = ", ".join(sorted(info["sizes"]))
             lines.append(f"{colors} (size {sizes}) giá {price}.")
         else:
             lines.append(f"{colors} giá {price}.")
     return "\n".join(lines)
+
 
 # ============================================
 # GPT SUMMARY + CTA
@@ -268,7 +288,7 @@ Tin khách: {user_msg}
         resp = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.5
+            temperature=0.5,
         )
         content = resp.choices[0].message.content
 
@@ -276,10 +296,12 @@ Tin khách: {user_msg}
         if len(parts) != 2:
             return (
                 "Sản phẩm có thiết kế đẹp và bền, phù hợp nhiều nhu cầu sử dụng.",
-                "Anh/chị chọn giúp shop mẫu ưng ý để em hỗ trợ ạ!"
+                "Anh/chị chọn giúp shop mẫu ưng ý để em hỗ trợ ạ!",
             )
 
-        advantages = re.sub(r"\[ƯU ĐIỂM\]", "", parts[0], flags=re.IGNORECASE).strip()
+        advantages = re.sub(
+            r"\[ƯU ĐIỂM\]", "", parts[0], flags=re.IGNORECASE
+        ).strip()
         cta = parts[1].strip()
         return advantages, cta
 
@@ -287,55 +309,73 @@ Tin khách: {user_msg}
         print("[GPT ERROR]", e)
         return (
             "Sản phẩm chất lượng tốt, mẫu mã hiện đại.",
-            "Anh/chị muốn chọn mẫu nào để shop chốt đơn giúp ạ?"
+            "Anh/chị muốn chọn mẫu nào để shop chốt đơn giúp ạ?",
         )
+
 
 # ============================================
 # SEND PRODUCT PACKAGE
 # ============================================
 def send_product_consult(psid, rows, user_text):
+    """
+    Cấu trúc:
+    1. Tên sản phẩm
+    2. Gửi tối đa 5 ảnh chung (đã lọc trùng + watermark Trung)
+    3. Ưu điểm nổi bật (2–3 câu)
+    4. Giá (gộp theo nhóm giá)
+    5. CTA
+    """
     base = rows[0]
     name = base.get("Tên sản phẩm") or "Sản phẩm"
     desc = base.get("Mô tả") or ""
 
+    # 1. Tên sản phẩm
     send_text(psid, name)
 
-    # IMAGE BLOCK — NO DUPLICATE
-    sent_images = set()
+    # 2. Ảnh chung sản phẩm (tối đa 5 ảnh)
     all_urls = []
     for r in rows:
         all_urls.extend(split_images(r.get("Images") or ""))
 
     all_urls = filter_images(all_urls)
 
+    # Giới hạn 5 ảnh để tránh spam
+    all_urls = all_urls[:5]
+
+    sent_images = set()
     for img in all_urls:
         if img in sent_images:
             continue
         sent_images.add(img)
         send_image(psid, img)
 
+    # 3–5. Ưu điểm + Giá + CTA
     advantages, cta = generate_summary_and_cta(name, desc, user_text)
-
     price_groups = group_by_price(rows)
     price_text = format_price_output(price_groups)
 
-    send_text(psid, f"{advantages}\n\n{price_text}\n\n{cta}")
+    final_text = f"{advantages}\n\n{price_text}\n\n{cta}"
+    send_text(psid, final_text)
+
 
 # ============================================
 # HANDLE MESSAGE
 # ============================================
 def handle_message(psid, message):
-    global BOT_ENABLED
+    global BOT_ENABLED, USER_CONTEXT
 
     text = message.get("text")
     attachments = message.get("attachments")
 
-    # ===== BOT ON/OFF ALWAYS EXECUTED =====
+    # ===== BOT ON/OFF luôn xử lý trước =====
     if text:
         t = normalize(text)
         if any(k in t for k in ["tắt bot", "tat bot", "dừng bot", "dung bot", "stop bot", "off bot"]):
             BOT_ENABLED = False
-            send_text(psid, "🔴 Bot đã TẮT. Em sẽ không tự trả lời nữa.\nĐể bật lại nhắn: Bật bot")
+            send_text(
+                psid,
+                "🔴 Bot đã TẮT. Em sẽ không tự trả lời nữa.\nĐể bật lại anh/chị nhắn: Bật bot",
+            )
             return
 
         if any(k in t for k in ["bật bot", "bat bot", "start bot", "on bot", "bat lai"]):
@@ -343,38 +383,46 @@ def handle_message(psid, message):
             send_text(psid, "🟢 Bot đã BẬT LẠI. Em sẵn sàng hỗ trợ khách!")
             return
 
-    # ===== BOT OFF: DO NOTHING =====
+    # ===== Nếu bot đang OFF -> bỏ qua =====
     if not BOT_ENABLED:
-        print("[BOT OFF] Message skipped")
+        print("[BOT OFF] skip message")
         return
 
-    # ===== ATTACHMENTS =====
+    # ===== Xử lý attachments (ảnh khách gửi) =====
     if attachments:
-        send_text(psid, "Shop đã nhận được ảnh ạ. Anh/chị mô tả nhu cầu giúp shop nhé!")
+        send_text(
+            psid,
+            "Shop đã nhận được ảnh ạ. Anh/chị mô tả thêm nhu cầu để em tư vấn đúng sản phẩm nhất nhé!",
+        )
         return
 
     if not text:
         send_text(psid, "Anh/chị mô tả giúp shop đang tìm gì để em hỗ trợ ạ.")
         return
 
-    # ===== ANTI DOUBLE REPLY (same text in 3s) =====
+    # ===== Anti double reply: cùng user, cùng text trong 3s =====
     now = time.time()
-    key = f"{psid}:{text}"
-    last = USER_CONTEXT.get("last_msg", {})
+    ctx = USER_CONTEXT.get(psid, {})
+    key = text  # có thể ghép thêm product_id nếu muốn chặt hơn
 
-    if last.get("key") == key and now - last.get("time", 0) < 3:
-        print("[SKIP] duplicate reply 3s")
+    if ctx.get("key") == key and now - ctx.get("time", 0) < 3:
+        print("[SKIP] duplicate text for same user in 3s")
         return
 
-    USER_CONTEXT["last_msg"] = {"key": key, "time": now}
+    USER_CONTEXT[psid] = {"key": key, "time": now}
 
-    # ===== FIND PRODUCT =====
+    # ===== Tìm sản phẩm phù hợp =====
     pid, rows = find_best_product(text)
     if not pid:
-        send_text(psid, "Shop chưa tìm thấy mẫu phù hợp. Anh/chị mô tả rõ hơn giúp shop ạ ❤️")
+        send_text(
+            psid,
+            "Shop chưa tìm thấy mẫu phù hợp. Anh/chị mô tả rõ hơn nhu cầu (loại sản phẩm, màu, size...) giúp shop ạ ❤️",
+        )
         return
 
+    # ===== Tư vấn sản phẩm =====
     send_product_consult(psid, rows, text)
+
 
 # ============================================
 # WEBHOOK
@@ -397,35 +445,36 @@ def webhook():
     for entry in data.get("entry", []):
         for event in entry.get("messaging", []):
 
-            # ===== FULL SKIP: delivery / read / reaction =====
+            # ===== Skip delivery / read / reaction hoàn toàn =====
             if "delivery" in event or "read" in event or "reaction" in event:
+                print("[SKIP] delivery/read/reaction")
                 return "OK", 200
 
-            # ===== message field check =====
             message = event.get("message")
             if not message:
                 return "OK", 200
 
             sender = event["sender"]["id"]
 
-            # ===== FULL SKIP: ANY EVENT from PAGE =====
+            # ===== Skip mọi event từ CHÍNH PAGE (kể cả không có is_echo) =====
             if sender == PAGE_ID:
                 print("[SKIP] sender is PAGE")
                 return "OK", 200
 
-            # ===== SKIP echo =====
+            # ===== Skip echo =====
             if message.get("is_echo"):
-                print("[SKIP] echo event")
+                print("[SKIP] is_echo message")
                 return "OK", 200
 
             psid = sender
             mid = message.get("mid")
 
-            # ===== SKIP duplicate MID =====
-            if mid in RECENT_MIDS:
-                print("[SKIP] duplicate MID")
+            # ===== Chặn trùng MID (Facebook retry) =====
+            if mid and mid in RECENT_MIDS:
+                print("[SKIP] duplicate MID (retry)")
                 return "OK", 200
-            RECENT_MIDS.append(mid)
+            if mid:
+                RECENT_MIDS.append(mid)
 
             handle_message(psid, message)
 
