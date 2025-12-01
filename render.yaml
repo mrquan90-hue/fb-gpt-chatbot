@@ -2,7 +2,16 @@ services:
   - type: web
     name: fb-gpt-chatbot
     env: python
+    region: oregon
     plan: free
-    buildCommand: "pip install -r requirements.txt"
-    startCommand: "gunicorn app:app"
-    autoDeploy: true
+    buildCommand: "pip install --no-cache-dir -r requirements.txt"
+    startCommand: "gunicorn src.app:app"
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: VERIFY_TOKEN
+        sync: false
+      - key: PAGE_ACCESS_TOKEN
+        sync: false
+      - key: SHEET_CSV_URL
+        sync: false
