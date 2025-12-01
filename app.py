@@ -1,13 +1,15 @@
-# ======= FB GPT CHATBOT - BẢN TỐI ƯU CHO SHOP THỜI TRANG =======
-# Hỗ trợ đa biến thể – bảng giá đẹp – gửi ảnh hoàn chỉnh
-# ======================================================
+# ==============================================
+#    FB GPT CHATBOT – BẢN CẤM BỊA SẢN PHẨM
+#    • Hỗ trợ ảnh + video
+#    • Đọc ảnh khách gửi (GPT Vision)
+# ==============================================
 
 import os
 import re
 import csv
 import io
 import requests
-from flask import Flask, request, jsonify
+from flask import Flask, request
 
 app = Flask(__name__)
 
@@ -18,86 +20,65 @@ SHEET_CSV_URL = os.getenv("SHEET_CSV_URL")
 
 OPENAI_URL = "https://api.openai.com/v1/chat/completions"
 
-
-# ======================================================
-# 1. ĐỌC GOOGLE SHEET (CSV)
-# ======================================================
+# ==============================================
+# 1. LOAD GOOGLE SHEET
+# ==============================================
 def load_products():
     try:
-        print(f"[Sheet] Fetching CSV: {SHEET_CSV_URL}")
         resp = requests.get(SHEET_CSV_URL, timeout=20)
         resp.encoding = "utf-8"
-
         csv_file = io.StringIO(resp.text)
         reader = csv.DictReader(csv_file)
         products = list(reader)
-
-        print(f"[Sheet] OK — Tải {len(products)} dòng")
+        print(f"[Sheet] Loaded {len(products)} products")
         return products
-
     except Exception as e:
-        print("[Sheet] ERROR:", e)
+        print("CSV ERROR:", e)
         return []
 
-
-# ======================================================
-# 2. XỬ LÝ ẢNH — bản nâng cấp mạnh
-# ======================================================
-def extract_images(cell_value: str):
-    """
-    Chuẩn hóa ảnh:
-    - Tách bởi dấu phẩy và xuống dòng
-    - Loại bỏ URL trùng
-    - Loại bỏ ảnh chứa chữ Trung Quốc
-    - Chỉ giữ .jpg/.png
-    """
-    if not cell_value:
+# ==============================================
+# 2. TÁCH ẢNH + VIDEO
+# ==============================================
+def extract_urls(cell):
+    if not cell:
         return []
-
-    text = cell_value.replace("\n", ",")
+    text = cell.replace("\n", ",")
     parts = [p.strip() for p in text.split(",") if p.strip()]
-
     urls = []
     seen = set()
-
-    for url in parts:
-        if not url.startswith("http"):
+    for u in parts:
+        if not u.startswith("http"):
             continue
-        if not (".jpg" in url or ".png" in url or ".webp" in url):
+        if not (".jpg" in u or ".png" in u or ".webp" in u or ".mp4" in u):
             continue
-        if re.search(r"[\u4e00-\u9fff]", url):
+        if re.search(r"[\u4e00-\u9fff]", u):
             continue
-        if url not in seen:
-            seen.add(url)
-            urls.append(url)
-
-    return urls
-
-
-def get_product_images(row: dict, max_images: int = 5):
-    """
-    Ưu tiên ảnh biến thể → ảnh sản phẩm
-    """
-    img1 = extract_images(row.get("Images", ""))
-    img2 = extract_images(row.get("Hình sản phẩm", ""))
-
-    urls = img1 + img2
-
-    # loại trùng lần cuối
-    unique = []
-    seen = set()
-    for u in urls:
         if u not in seen:
             seen.add(u)
-            unique.append(u)
+            urls.append(u)
+    return urls
 
-    return unique[:max_images]
+def get_images(row, limit=5):
+    img1 = extract_urls(row.get("Images"))
+    img2 = extract_urls(row.get("Hình sản phẩm"))
+    all_imgs = img1 + img2
+    # loại trùng
+    uniq = []
+    seen = set()
+    for x in all_imgs:
+        if x not in seen:
+            seen.add(x)
+            uniq.append(x)
+    return uniq[:limit]
 
+def get_videos(row, limit=1):
+    vids = extract_urls(row.get("Videos"))
+    return vids[:limit]
 
-# ======================================================
-# 3. TÌM SẢN PHẨM
-# ======================================================
-SEARCH_FIELDS = [
+# ==============================================
+# 3. TÌM SẢN PHẨM – KHÔNG BAO GIỜ BỊA!
+# ==============================================
+FIELDS = [
     "Mã sản phẩm",
     "Mã mẫu mã",
     "Mã mẫu mã mới",
@@ -108,184 +89,256 @@ SEARCH_FIELDS = [
     "Thuộc tính sản phẩm",
 ]
 
-
-def search_products(query: str, products: list, limit: int = 10):
+def search_products(query, products):
     q = query.lower()
     matches = []
 
-    for row in products:
-        combined = " ".join((row.get(f, "") for f in SEARCH_FIELDS))
-        if q in combined.lower():
-            matches.append(row)
-            if len(matches) >= limit:
-                break
+    # Match trực tiếp
+    for r in products:
+        combined = " ".join(r.get(f, "") for f in FIELDS).lower()
+        if q in combined:
+            matches.append(r)
 
+    # nếu không có → phân tách từ khóa
     if not matches:
         tokens = q.split()
-        for row in products:
-            combined = " ".join((row.get(f, "") for f in SEARCH_FIELDS)).lower()
+        for r in products:
+            combined = " ".join(r.get(f, "") for f in FIELDS).lower()
             if all(t in combined for t in tokens[:2]):
-                matches.append(row)
-                if len(matches) >= limit:
-                    break
+                matches.append(r)
 
     return matches
-
-
-# ======================================================
-# 4. TẠO BẢNG GIÁ ĐẸP — không dùng dấu |
-# ======================================================
-def build_price_list(rows):
-    """
-    Xuất bảng giá gọn gàng:
-    - Mã mẫu
-    - Giá
-    - Thuộc tính
-    """
+# ==============================================
+# 4. FORMAT BẢNG GIÁ – KHÔNG SỬ DỤNG DẤU |
+# ==============================================
+def format_price_list(rows):
     lines = []
     for r in rows:
         code = r.get("Mã mẫu mã mới") or r.get("Mã mẫu mã")
         price = r.get("Giá bán", "")
         attr = r.get("Thuộc tính sản phẩm") or r.get("Thuộc tính")
-
-        line = f"- Mã mẫu: {code}, Giá: {price}đ, Thuộc tính: {attr}"
-        lines.append(line)
-
+        lines.append(f"- Mã mẫu: {code}, Giá: {price}đ, Thuộc tính: {attr}")
     return "\n".join(lines)
 
 
-# ======================================================
-# 5. GPT TƯ VẤN
-# ======================================================
-def call_gpt(user_message: str, matched_products: list):
-    price_table = build_price_list(matched_products)
+# ==============================================
+# 5. GPT – CẤM BỊA SẢN PHẨM
+# ==============================================
+def call_gpt_text(user_query, matched_rows, all_products):
+    """
+    matched_rows: danh sách biến thể sản phẩm
+    """
 
-    product_summary = (
-        f"Có {len(matched_products)} biến thể phù hợp:\n{price_table}\n"
-        if matched_products else "Không tìm thấy sản phẩm phù hợp."
-    )
+    # Nếu tìm được sản phẩm
+    if matched_rows:
+        product_name = matched_rows[0].get("Tên sản phẩm", "Sản phẩm")
+        price_table = format_price_list(matched_rows)
 
-    system_prompt = (
-        "Bạn là chatbot bán hàng thời trang. Nói chuyện thân thiện, rõ ràng. "
-        "Luôn đưa bảng giá ngắn gọn, dễ hiểu. "
-        "Không dùng dấu |. "
-        "Chỉ dùng dấu phẩy và xuống dòng.\n\n"
-        "Nếu khách cung cấp đầy đủ thông tin → xuất dòng ##ORDER## theo format:\n"
-        "##ORDER##|<mã sản phẩm>|<mã mẫu>|<số lượng>|<tên>|<sđt>|<địa chỉ>|<ghi chú>\n"
-    )
+        system = (
+            "Bạn là chatbot bán hàng thời trang của shop. "
+            "TUYỆT ĐỐI KHÔNG ĐƯỢC BỊA SẢN PHẨM. "
+            "Chỉ tư vấn dựa trên dữ liệu shop cung cấp. "
+            "Nếu sản phẩm khách hỏi không có → phải nói không có sản phẩm đó. "
+            "Nếu nhiều biến thể → phải gửi bảng giá gọn đẹp (dùng dấu phẩy và xuống dòng). "
+            "Khi khách muốn xem ảnh → shop sẽ gửi ảnh ngay sau text.\n"
+        )
 
-    user_msg = f"SẢN PHẨM TÌM THẤY:\n{product_summary}\n\nKHÁCH HỎI:\n{user_message}"
+        user_msg = (
+            f"KHÁCH HỎI: {user_query}\n"
+            f"SẢN PHẨM ĐÚNG TRONG SHOP: {product_name}\n"
+            f"CÁC BIẾN THỂ:\n{price_table}"
+        )
+
+    else:
+        # Không tìm thấy sản phẩm → gợi ý sản phẩm liên quan SHOP CÓ
+        names = list({p.get('Tên sản phẩm', '') for p in all_products})
+        suggestion = "\n".join(f"- {name}" for name in names[:10])
+
+        system = (
+            "Bạn là chatbot bán hàng của shop. Không tìm thấy sản phẩm khách hỏi. "
+            "KHÔNG BAO GIỜ ĐƯỢC BỊA SẢN PHẨM. "
+            "Chỉ được phép gợi ý những sản phẩm shop thực sự có."
+        )
+
+        user_msg = (
+            f"KHÁCH HỎI: {user_query}\n\n"
+            f"Shop KHÔNG CÓ sản phẩm này.\n"
+            f"Các sản phẩm khác shop có:\n{suggestion}"
+        )
 
     headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
     payload = {
         "model": "gpt-4o-mini",
         "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_msg},
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_msg}
         ],
-        "temperature": 0.5,
+        "temperature": 0.4
     }
 
     try:
-        r = requests.post(OPENAI_URL, json=payload, headers=headers, timeout=20).json()
+        r = requests.post(OPENAI_URL, json=payload, headers=headers, timeout=30).json()
         return r["choices"][0]["message"]["content"]
     except Exception as e:
-        print("[GPT ERROR]:", e)
-        return "Shop đang xử lý, bạn chờ 1 chút giúp shop nhé ❤️"
+        print("GPT ERROR:", e)
+        return "Shop đang xử lý yêu cầu, bạn chờ 1 chút nhé ❤️"
 
 
-def split_answer_and_order(answer: str):
-    order_line = None
-    visible = []
+# ==============================================
+# 6. GPT VISION – ĐỌC ẢNH KHÁCH GỬI
+# ==============================================
+def call_gpt_vision(image_url, all_products):
+    """
+    GPT phân tích hình → gợi ý sản phẩm shop có
+    """
+    product_list = "\n".join(
+        [f"- {p.get('Tên sản phẩm')} ({p.get('Mã sản phẩm')})" for p in all_products[:50]]
+    )
 
-    for line in answer.splitlines():
-        if line.startswith("##ORDER##"):
-            order_line = line.strip()
-        else:
-            visible.append(line)
+    system = (
+        "Bạn là chatbot bán hàng thời trang. "
+        "Bạn sẽ xem ảnh khách gửi, mô tả sản phẩm trong ảnh, "
+        "và tìm sản phẩm tương tự trong danh sách shop có. "
+        "TUYỆT ĐỐI KHÔNG BỊA SẢN PHẨM."
+    )
 
-    return "\n".join(visible), order_line
-
-
-# ======================================================
-# 6. GỬI TEXT + ẢNH FACEBOOK
-# ======================================================
-def send_text(recipient, text):
-    url = "https://graph.facebook.com/v18.0/me/messages"
+    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
     payload = {
-        "recipient": {"id": recipient},
-        "message": {"text": text},
+        "model": "gpt-4o-mini",
+        "messages": [
+            {"role": "system", "content": system},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": f"Đây là danh sách sản phẩm shop có:\n{product_list}"},
+                    {
+                        "type": "input_image",
+                        "image_url": image_url
+                    }
+                ]
+            }
+        ],
     }
-    requests.post(url, params={"access_token": PAGE_ACCESS_TOKEN}, json=payload)
+
+    try:
+        r = requests.post(OPENAI_URL, json=payload, headers=headers).json()
+        return r["choices"][0]["message"]["content"]
+    except:
+        return "Shop nhận được ảnh rồi, nhưng chưa xem rõ. Bạn gửi lại giúp shop ảnh rõ nét hơn nhé."
 
 
-def send_image(recipient, url_image):
+# ==============================================
+# 7. FACEBOOK SEND API
+# ==============================================
+def send_text(psid, text):
     url = "https://graph.facebook.com/v18.0/me/messages"
-    payload = {
-        "recipient": {"id": recipient},
+    body = {
+        "recipient": {"id": psid},
+        "message": {"text": text}
+    }
+    requests.post(url, params={"access_token": PAGE_ACCESS_TOKEN}, json=body)
+
+
+def send_image(psid, image_url):
+    url = "https://graph.facebook.com/v18.0/me/messages"
+    body = {
+        "recipient": {"id": psid},
         "message": {
             "attachment": {
                 "type": "image",
-                "payload": {"url": url_image, "is_reusable": True},
+                "payload": {
+                    "url": image_url,
+                    "is_reusable": True
+                }
             }
-        },
+        }
     }
-    requests.post(url, params={"access_token": PAGE_ACCESS_TOKEN}, json=payload)
+    requests.post(url, params={"access_token": PAGE_ACCESS_TOKEN}, json=body)
 
 
-# ======================================================
-# 7. WEBHOOK FACEBOOK
-# ======================================================
+def send_video(psid, video_url):
+    url = "https://graph.facebook.com/v18.0/me/messages"
+    body = {
+        "recipient": {"id": psid},
+        "message": {
+            "attachment": {
+                "type": "video",
+                "payload": {
+                    "url": video_url,
+                    "is_reusable": True
+                }
+            }
+        }
+    }
+    requests.post(url, params={"access_token": PAGE_ACCESS_TOKEN}, json=body)
+
+
+# ==============================================
+# 8. XỬ LÝ WEBHOOK FACEBOOK
+# ==============================================
 @app.route("/webhook", methods=["GET"])
-def webhook_verify():
+def verify():
     if request.args.get("hub.verify_token") == VERIFY_TOKEN:
         return request.args["hub.challenge"]
     return "Verification failed", 403
 
 
 @app.route("/webhook", methods=["POST"])
-def webhook_handle():
+def webhook():
     data = request.json
     print("[Webhook]", data)
 
     products = load_products()
 
     for entry in data.get("entry", []):
-        for event in entry.get("messaging", []):
-            if "message" in event and "text" in event["message"]:
+        for msg in entry.get("messaging", []):
 
-                user_message = event["message"]["text"]
-                psid = event["sender"]["id"]
+            psid = msg["sender"]["id"]
+
+            # ========== TRƯỜNG HỢP ẢNH KHÁCH GỬI ==========
+            if "attachments" in msg.get("message", {}):
+                att = msg["message"]["attachments"][0]
+                if att["type"] == "image":
+                    img_url = att["payload"]["url"]
+                    reply = call_gpt_vision(img_url, products)
+                    send_text(psid, reply)
+                    return "OK", 200
+
+            # ========== TRƯỜNG HỢP VĂN BẢN ==========
+            if "text" in msg.get("message", {}):
+                user_text = msg["message"]["text"]
 
                 # Tìm sản phẩm
-                matched = search_products(user_message, products)
+                matched = search_products(user_text, products)
 
-                # Gửi ảnh nếu có đúng 1 sản phẩm
+                # Nếu có 1 sản phẩm → gửi ảnh trước
                 if len(matched) == 1:
-                    imgs = get_product_images(matched[0])
-                    for img in imgs:
-                        send_image(psid, img)
+                    imgs = get_images(matched[0])
+                    vids = get_videos(matched[0])
 
-                # Gửi tư vấn AI
-                gpt_answer = call_gpt(user_message, matched)
-                visible, order_line = split_answer_and_order(gpt_answer)
-                send_text(psid, visible)
+                    for i in imgs:
+                        send_image(psid, i)
 
-                # Nếu phát hiện đơn hàng
-                if order_line:
-                    print("[ORDER]", order_line)
+                    for v in vids:
+                        send_video(psid, v)
+
+                # Gọi GPT
+                reply = call_gpt_text(user_text, matched, products)
+                send_text(psid, reply)
 
     return "OK", 200
 
 
-# ======================================================
-# 8. HEALTHCHECK
-# ======================================================
+# ==============================================
+# 9. HEALTHCHECK
+# ==============================================
 @app.route("/")
 def home():
-    return "GPT Messenger bot is running", 200
+    return "Messenger GPT Bot is running OK", 200
 
 
-# ======================================================
+# ==============================================
+# 10. RUN
+# ==============================================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
