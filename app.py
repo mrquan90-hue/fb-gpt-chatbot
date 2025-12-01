@@ -4,6 +4,7 @@ import csv
 import io
 import re
 from collections import defaultdict, deque
+import threading
 
 import requests
 from flask import Flask, request
@@ -32,7 +33,10 @@ LAST_LOAD = 0
 LOAD_TTL = 300  # 5 phút
 
 BOT_ENABLED = True           # trạng thái ON/OFF
-RECENT_MIDS = deque(maxlen=300)  # chống lặp MID
+RECENT_MIDS = deque(maxlen=500)  # tăng kích thước chống lặp MID
+RECENT_MIDS_LOCK = threading.Lock()  # khóa để thread-safe
+PROCESSED_MIDS = set()       # MID đã xử lý (tránh retry)
+PROCESSED_MIDS_LOCK = threading.Lock()
 USER_CONTEXT = {}            # chống double-reply + context
 
 # ============================================
@@ -271,7 +275,8 @@ Tin khách: {user_msg}
         resp = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.5
+            temperature=0.5,
+            timeout=30.0  # thêm timeout
         )
         content = resp.choices[0].message.content
 
@@ -330,27 +335,70 @@ def send_product_consult(psid, rows, user_text):
     send_text(psid, final_msg)
 
 # ============================================
+# XỬ LÝ LỆNH TỪ PAGE (cho phép tắt/bật bot từ Page)
+# ============================================
+def handle_page_command(psid, text):
+    """Xử lý lệnh từ Page (không phải từ khách)"""
+    global BOT_ENABLED
+    
+    t = normalize(text)
+    
+    off_keywords = [
+        "tắt bot", "tat bot",
+        "dừng bot", "dung bot",
+        "stop bot", "off bot",
+        "tắt chatbot", "tat chatbot"
+    ]
+    on_keywords = [
+        "bật bot", "bat bot",
+        "bật lại bot", "bat lai bot",
+        "start bot", "on bot",
+        "mở bot", "mo bot"
+    ]
+    
+    if any(k in t for k in off_keywords):
+        BOT_ENABLED = False
+        print(f"[BOT] switched OFF by PAGE (psid={psid}), text={text}")
+        send_text(psid, "✅ Bot đã TẠM DỪNG và sẽ không tự trả lời nữa.\nKhi cần bật lại, anh/chị nhắn: \"Bật bot\" giúp shop ạ.")
+        return True
+        
+    if any(k in t for k in on_keywords):
+        BOT_ENABLED = True
+        print(f"[BOT] switched ON by PAGE (psid={psid}), text={text}")
+        send_text(psid, "✅ Bot đã BẬT LẠI, em sẽ hỗ trợ khách tự động nhé.")
+        return True
+    
+    return False
+
+# ============================================
 # HANDLE MESSAGE (có ON/OFF)
 # ============================================
-def handle_message(psid, message):
+def handle_message(psid, message, is_from_page=False):
     global BOT_ENABLED
 
     text = message.get("text")
     attachments = message.get("attachments")
 
-    # 1) LỆNH BẬT/TẮT BOT – luôn chạy, dù BOT đang ON hay OFF
+    # 1) Nếu là tin từ Page, kiểm tra lệnh tắt/bật bot
+    if is_from_page and text:
+        if handle_page_command(psid, text):
+            return
+
+    # 2) Xử lý lệnh từ khách (chỉ khi bot đang ON)
     if text:
         t = normalize(text)
 
         off_keywords = [
             "tắt bot", "tat bot",
             "dừng bot", "dung bot",
-            "stop bot", "off bot"
+            "stop bot", "off bot",
+            "tắt chatbot", "tat chatbot"
         ]
         on_keywords = [
             "bật bot", "bat bot",
             "bật lại bot", "bat lai bot",
-            "start bot", "on bot"
+            "start bot", "on bot",
+            "mở bot", "mo bot"
         ]
 
         if any(k in t for k in off_keywords):
@@ -365,22 +413,22 @@ def handle_message(psid, message):
             send_text(psid, "✅ Bot đã BẬT LẠI, em sẽ hỗ trợ khách tự động nhé.")
             return
 
-    # 2) Nếu bot đang OFF -> chỉ log rồi thoát, KHÔNG trả lời
+    # 3) Nếu bot đang OFF -> chỉ log rồi thoát, KHÔNG trả lời
     if not BOT_ENABLED:
         print("[BOT OFF] ignore message from", psid, "text=", text)
         return
 
-    # 3) Khách gửi ảnh
+    # 4) Khách gửi ảnh
     if attachments:
         send_text(psid, "Shop đã nhận được ảnh ạ. Anh/chị mô tả nhu cầu giúp shop nhé!")
         return
 
-    # 4) Không có text
+    # 5) Không có text
     if not text:
         send_text(psid, "Anh/chị mô tả giúp shop đang tìm gì để em hỗ trợ ạ.")
         return
 
-    # 5) Anti double reply theo cùng 1 tin trong 3 giây
+    # 6) Anti double reply theo cùng 1 tin trong 3 giây
     now = time.time()
     key = f"{psid}:{text}"
     last = USER_CONTEXT.get("last_msg", {})
@@ -389,7 +437,7 @@ def handle_message(psid, message):
         return
     USER_CONTEXT["last_msg"] = {"key": key, "time": now}
 
-    # 6) Tìm sản phẩm và tư vấn
+    # 7) Tìm sản phẩm và tư vấn
     pid, rows = find_best_product(text)
     if not pid:
         send_text(psid, "Shop chưa tìm thấy đúng mẫu. Anh/chị mô tả rõ hơn giúp shop ạ ❤️")
@@ -418,6 +466,25 @@ def webhook():
 
     for entry in data.get("entry", []):
         for event in entry.get("messaging", []):
+            
+            # Kiểm tra sender ID để biết là tin từ Page hay từ khách
+            sender_id = event.get("sender", {}).get("id", "")
+            recipient_id = event.get("recipient", {}).get("id", "")
+            
+            # Nếu sender là Page ID và recipient là User ID -> tin Page gửi cho User
+            # Trong trường hợp này, chúng ta cần xử lý lệnh từ Page
+            is_from_page = False
+            page_id = "516937221685203"  # Page ID từ log
+            
+            if sender_id == page_id:
+                # Tin Page gửi cho User
+                is_from_page = True
+            elif recipient_id == page_id:
+                # Tin User gửi cho Page
+                is_from_page = False
+            else:
+                # Không xác định, mặc định là từ khách
+                is_from_page = False
 
             # Bỏ qua delivery/read
             if "delivery" in event or "read" in event:
@@ -428,23 +495,52 @@ def webhook():
             if not message:
                 continue
 
-            # Bỏ qua echo (tin do Page tự gửi ra)
-            if message.get("is_echo"):
-                print("[SKIP] echo")
+            # KHÔNG bỏ qua echo nếu là tin từ Page gửi lệnh
+            # Chỉ bỏ qua echo thông thường (tin do bot tự gửi)
+            if message.get("is_echo") and not is_from_page:
+                print("[SKIP] echo (non-command)")
                 continue
 
             psid = event["sender"]["id"]
             mid = message.get("mid")
 
-            # Anti-loop theo MID
-            if mid in RECENT_MIDS:
-                print("[SKIP] duplicate MID")
-                continue
-            RECENT_MIDS.append(mid)
+            # Anti-loop theo MID với thread-safe lock
+            with PROCESSED_MIDS_LOCK:
+                if mid in PROCESSED_MIDS:
+                    print("[SKIP] duplicate MID (already processed)")
+                    continue
+                PROCESSED_MIDS.add(mid)
+                
+            # Giới hạn số lượng MID lưu trữ
+            with PROCESSED_MIDS_LOCK:
+                if len(PROCESSED_MIDS) > 1000:
+                    # Giữ lại 500 phần tử gần nhất
+                    items = list(PROCESSED_MIDS)
+                    PROCESSED_MIDS.clear()
+                    PROCESSED_MIDS.update(items[-500:])
 
-            handle_message(psid, message)
+            # Thêm vào RECENT_MIDS để chống retry
+            with RECENT_MIDS_LOCK:
+                RECENT_MIDS.append(mid)
+
+            # Xử lý tin nhắn
+            handle_message(psid, message, is_from_page)
 
     return "OK", 200
+
+# ============================================
+# CLEANUP THREAD
+# ============================================
+def cleanup_processed_mids():
+    """Dọn dẹp PROCESSED_MIDS định kỳ để tránh memory leak"""
+    while True:
+        time.sleep(3600)  # Mỗi giờ dọn dẹp 1 lần
+        with PROCESSED_MIDS_LOCK:
+            if len(PROCESSED_MIDS) > 500:
+                items = list(PROCESSED_MIDS)
+                PROCESSED_MIDS.clear()
+                PROCESSED_MIDS.update(items[-500:])
+                print(f"[CLEANUP] Reduced PROCESSED_MIDS from {len(items)} to 500")
 
 # ============================================
 # HOME
@@ -455,5 +551,9 @@ def home():
 
 
 if __name__ == "__main__":
+    # Khởi chạy thread dọn dẹp
+    cleanup_thread = threading.Thread(target=cleanup_processed_mids, daemon=True)
+    cleanup_thread.start()
+    
     port = int(os.getenv("PORT", 10000))
-    app.run(host="0.0.0.0", port=port, debug=True)
+    app.run(host="0.0.0.0", port=port, debug=False)  # Đặt debug=False cho production
