@@ -1,6 +1,7 @@
 import os
 import time
 import re
+import io
 import requests
 import pandas as pd
 from flask import Flask, request
@@ -11,11 +12,12 @@ PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN", "")
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "")
 
 # =========================
-# 1. TRẠNG THÁI BOT + ANTI LOOP
+# 1. TRẠNG THÁI BOT + ANTI LOOP + CONTEXT
 # =========================
 BOT_ENABLED = True                 # lệnh "tắt bot" / "bật bot"
 PROCESSED_MIDS = set()            # chống xử lý trùng do Facebook retry
 LAST_SENT_MEDIA = {}              # {user_id: set("product-key")}
+USER_CONTEXT = {}                 # {user_id: {"current_ms": "MS000018"}}
 
 # =========================
 # 2. LOAD GOOGLE SHEET
@@ -35,7 +37,8 @@ def load_sheet(force=False):
     try:
         resp = requests.get(SHEET_CSV_URL, timeout=20)
         resp.encoding = "utf-8"
-        df_local = pd.read_csv(pd.compat.StringIO(resp.text)) if hasattr(pd.compat, "StringIO") else pd.read_csv(SHEET_CSV_URL)
+        f = io.StringIO(resp.text)
+        df_local = pd.read_csv(f)
         df = df_local
         LAST_LOAD = now
         print(f"[Sheet] Loaded {len(df)} rows")
@@ -54,7 +57,7 @@ def fb_send(payload):
         print("[SEND] Bot đang tắt, không gửi gì.")
         return
 
-    url = f"https://graph.facebook.com/v19.0/me/messages"
+    url = "https://graph.facebook.com/v19.0/me/messages"
     params = {"access_token": PAGE_ACCESS_TOKEN}
     try:
         r = requests.post(url, json=payload, params=params, timeout=20)
@@ -108,9 +111,7 @@ def is_echo_event(event):
 
 def is_delivery_or_read(event):
     """
-    Đây chính là loại event đang spam trong log:
-    - có key 'delivery' hoặc 'read'
-    => TUYỆT ĐỐI không được xử lý như message.
+    Bỏ qua hoàn toàn event delivery / read – KHÔNG ĐƯỢC TRẢ LỜI.
     """
     return ("delivery" in event) or ("read" in event)
 
@@ -130,15 +131,21 @@ def is_processed_mid(mid):
     PROCESSED_MIDS.add(mid)
     # giữ set không quá to
     if len(PROCESSED_MIDS) > 2000:
-        # xóa bớt (cách đơn giản: reset luôn)
         PROCESSED_MIDS.clear()
         PROCESSED_MIDS.add(mid)
     return False
 
 
 # =========================
-# 5. LOGIC SẢN PHẨM (ĐƠN GIẢN – CHỦ YẾU TEST ANTI-LOOP)
+# 5. LOGIC SẢN PHẨM + CONTEXT
 # =========================
+PRICE_PATTERNS = [
+    "bao nhiêu", "bao nhieu", "giá", "gia",
+    "nhiêu tiền", "nhieu tien", "bn tien", "bn tiền",
+    "bn vậy", "bn v", "giá sao", "gia sao"
+]
+
+
 def extract_ms_from_text(text):
     """
     Tìm mã sản phẩm dạng MSxxxx trong câu chat.
@@ -163,7 +170,7 @@ def find_product_by_code(ms_code):
 def get_clean_images(rows):
     """
     Lấy ảnh từ cột Images, loại trùng, loại URL quá ngắn.
-    Không đụng đến watermark cho đơn giản – ưu tiên fix loop trước.
+    (Lọc watermark chi tiết có thể thêm sau – hiện ưu tiên ổn định.)
     """
     if "Images" not in rows.columns:
         return []
@@ -184,18 +191,83 @@ def get_clean_images(rows):
     return clean
 
 
+def reply_price_only(user_id, rows, ms_code):
+    """
+    Khi khách hỏi 'bao nhiêu tiền' sau khi đã tư vấn 1 sản phẩm.
+    Không gửi lại ảnh, chỉ trả lời giá cho sản phẩm current_ms.
+    """
+    # Đọc danh sách giá
+    if "Giá bán" not in rows.columns:
+        send_text(user_id, f"Hiện em chưa có thông tin giá cho mã {ms_code}, anh/chị cho em xin thêm chút thời gian tra cứu nhé.")
+        return
+
+    prices = rows["Giá bán"].dropna().unique()
+    try:
+        # nếu giá là số, format cho đẹp
+        prices_fmt = []
+        for p in prices:
+            try:
+                v = float(str(p).replace(".", "").replace(",", ""))
+                prices_fmt.append(f"{v:,.0f}đ")
+            except Exception:
+                prices_fmt.append(str(p))
+    except Exception:
+        prices_fmt = [str(p) for p in prices]
+
+    if len(prices) == 0:
+        send_text(user_id, f"Hiện sản phẩm {ms_code} chưa có giá niêm yết trên hệ thống.")
+    elif len(prices) == 1:
+        send_text(user_id, f"Mã {ms_code} hiện đang có giá: {prices_fmt[0]} ạ.")
+    else:
+        # nhóm theo giá, kèm màu/size
+        msg_lines = [f"Bảng giá chi tiết cho mã {ms_code}:"]
+        for price in prices:
+            sub = rows[rows["Giá bán"] == price]
+            colors = sub["màu (Thuộc tính)"].fillna("").unique() if "màu (Thuộc tính)" in sub.columns else []
+            sizes = sub["size (Thuộc tính)"].fillna("").unique() if "size (Thuộc tính)" in sub.columns else []
+            colors_txt = ", ".join([c for c in colors if c]) or "Nhiều màu"
+            sizes_txt = ", ".join([s for s in sizes if s]) or "Nhiều size"
+
+            try:
+                v = float(str(price).replace(".", "").replace(",", ""))
+                price_txt = f"{v:,.0f}đ"
+            except Exception:
+                price_txt = str(price)
+
+            msg_lines.append(f"- {colors_txt} ({sizes_txt}) → {price_txt}")
+        send_text(user_id, "\n".join(msg_lines))
+
+
 def consult_product(user_id, rows, ms_code):
+    """
+    Tư vấn sản phẩm lần đầu: tên + 5 ảnh + gợi ý hỏi thêm.
+    Đồng thời GHI NHỚ mã sản phẩm vào USER_CONTEXT.
+    """
+    global USER_CONTEXT
+
     name = rows["Tên sản phẩm"].iloc[0] if "Tên sản phẩm" in rows.columns else ms_code
 
-    send_text(user_id, f"🔎 {name}")
+    # 1. Ghi nhớ context sản phẩm
+    USER_CONTEXT[user_id] = {
+        "current_ms": ms_code,
+        "last_ts": time.time()
+    }
+    print(f"[CONTEXT] {user_id} -> {ms_code}")
 
+    # 2. Gửi tên sản phẩm
+    send_text(user_id, f"🔎 {name} (mã {ms_code})")
+
+    # 3. Gửi tối đa 5 ảnh
     imgs = get_clean_images(rows)
-    # gửi tối đa 5 ảnh 1 lần
     for img in imgs[:5]:
         send_image(user_id, img, product_key=ms_code)
         time.sleep(0.3)
 
-    send_text(user_id, "Anh/chị cần tư vấn thêm gì về sản phẩm này không ạ?")
+    # 4. Gợi ý hỏi thêm
+    send_text(
+        user_id,
+        "Anh/chị cần em báo giá chi tiết, tư vấn màu/size hay xem thêm hình sản phẩm nào ạ?"
+    )
 
 
 # =========================
@@ -224,7 +296,7 @@ def webhook():
 
     for entry in data.get("entry", []):
         for event in entry.get("messaging", []):
-            # 0. BỎ QUA HOÀN TOÀN delivery / read (ĐÂY LÀ LÝ DO BỊ SPAM TRONG LOG)
+            # 0. BỎ QUA HOÀN TOÀN delivery / read
             if is_delivery_or_read(event):
                 print("[SKIP] delivery/read event")
                 continue
@@ -251,7 +323,6 @@ def webhook():
 
             if t_norm in ["tắt bot", "tat bot", "dừng bot", "dung bot", "stop bot", "off bot"]:
                 BOT_ENABLED = False
-                # NOTE: lệnh này vẫn gửi 1 tin xác nhận rồi từ đó im luôn
                 fb_send({
                     "recipient": {"id": sender_id},
                     "message": {"text": "⚠️ Bot đã tắt. Em sẽ không tự động trả lời nữa."}
@@ -273,24 +344,52 @@ def webhook():
                 print("[SKIP] bot is OFF, ignore message from", sender_id)
                 continue
 
-            # 5. LOGIC TƯ VẤN CƠ BẢN (đơn giản, ưu tiên ổn định)
+            # 5. LOGIC TƯ VẤN
             load_sheet()
 
             if not text:
                 send_text(sender_id, "Anh/chị mô tả giúp shop đang tìm mã sản phẩm nào ạ?")
                 continue
 
+            lower_text = text.lower()
+
+            # 5.1. Nếu KHÁCH HỎI GIÁ / BAO NHIÊU và đã có CONTEXT sản phẩm
+            has_price_question = any(p in lower_text for p in PRICE_PATTERNS)
+            ctx = USER_CONTEXT.get(sender_id)
+
+            if has_price_question and ctx and ctx.get("current_ms"):
+                ms_code = ctx["current_ms"]
+                prod_rows = find_product_by_code(ms_code)
+                if prod_rows is not None:
+                    reply_price_only(sender_id, prod_rows, ms_code)
+                else:
+                    send_text(sender_id, f"Em đang bị thiếu dữ liệu mã {ms_code}, anh/chị cho em xin lại mã sản phẩm được không ạ?")
+                continue
+
+            # 5.2. Nếu KHÁCH GỬI MÃ SẢN PHẨM MỚI → CHUYỂN CONTEXT
             ms_code = extract_ms_from_text(text)
-            if not ms_code:
-                send_text(sender_id, "Anh/chị vui lòng gửi mã sản phẩm (dạng MSxxxxx) để em tra cứu nhanh nhất ạ.")
+            if ms_code:
+                prod_rows = find_product_by_code(ms_code)
+                if prod_rows is None:
+                    send_text(sender_id, f"Shop không tìm thấy sản phẩm với mã {ms_code}. Anh/chị kiểm tra lại giúp em nhé.")
+                else:
+                    consult_product(sender_id, prod_rows, ms_code)
                 continue
 
-            prod_rows = find_product_by_code(ms_code)
-            if prod_rows is None:
-                send_text(sender_id, f"Shop không tìm thấy sản phẩm với mã {ms_code}. Anh/chị kiểm tra lại giúp em nhé.")
-                continue
-
-            consult_product(sender_id, prod_rows, ms_code)
+            # 5.3. Không có mã, không có context giá → hỏi khách gửi mã
+            if ctx and ctx.get("current_ms"):
+                # đã có context nhưng câu hỏi không rõ → gợi ý lại
+                ms_code = ctx["current_ms"]
+                send_text(
+                    sender_id,
+                    f"Hiện em đang tư vấn cho anh/chị sản phẩm mã {ms_code}. "
+                    f"Anh/chị muốn hỏi thêm về giá, màu, size hay hình ảnh ạ?"
+                )
+            else:
+                send_text(
+                    sender_id,
+                    "Anh/chị vui lòng gửi mã sản phẩm (dạng MSxxxxx) hoặc mô tả rõ hơn tên sản phẩm để em hỗ trợ nhanh nhất ạ."
+                )
 
     return "ok", 200
 
