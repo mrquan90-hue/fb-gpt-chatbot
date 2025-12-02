@@ -4,12 +4,20 @@ import re
 import io
 import requests
 import pandas as pd
+import openai
 from flask import Flask, request
 
 app = Flask(__name__)
 
+# =========================
+# 0. CẤU HÌNH
+# =========================
 PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN", "")
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+
+openai.api_key = OPENAI_API_KEY
 
 # =========================
 # 1. TRẠNG THÁI BOT + ANTI LOOP + CONTEXT
@@ -139,21 +147,8 @@ def is_processed_mid(mid):
 
 
 # =========================
-# 5. XỬ LÝ SẢN PHẨM & INTENT
+# 5. XỬ LÝ SẢN PHẨM & GROUNDING
 # =========================
-PRICE_KEYWORDS = [
-    "bao nhiêu", "bao nhieu", "giá", "gia",
-    "nhiêu tiền", "nhieu tien", "bn tien", "bn tiền",
-    "bn vậy", "bn v", "giá sao", "gia sao"
-]
-
-COLOR_KEYWORDS = ["màu", "mau", "color"]
-SIZE_KEYWORDS = ["size", "sz", "siz", "cỡ", "co", "sai"]
-IMAGE_KEYWORDS = ["ảnh", "hình", "hinh", "picture", "pic", "photo"]
-VIDEO_KEYWORDS = ["video", "clip", "reels", "tiktok"]
-DESC_KEYWORDS = ["mô tả", "chi tiết", "chi tiet", "chất liệu", "chat lieu", "vải gì", "vai gi"]
-
-
 def normalize_text(text: str) -> str:
     return (text or "").strip().lower()
 
@@ -188,7 +183,6 @@ def search_products_by_text(text, limit=5):
         return None
     tokens = [t for t in re.split(r"\s+", text) if len(t) >= 3]
     if not tokens:
-        # nếu câu quá ngắn, trả vài sản phẩm đầu
         base = df
     else:
         mask = None
@@ -218,7 +212,7 @@ def search_products_by_text(text, limit=5):
 def get_clean_images(rows):
     """
     Lấy ảnh từ cột Images, loại trùng.
-    Không đụng đến watermark cho đơn giản, ưu tiên trả lời đúng sản phẩm.
+    (Không lọc watermark ở đây – ưu tiên ổn định.)
     """
     if "Images" not in rows.columns:
         return []
@@ -239,136 +233,139 @@ def get_clean_images(rows):
     return clean
 
 
-def short_description(row_group):
+def build_product_summary(rows, ms_code):
     """
-    Lấy đoạn mô tả ngắn gọn từ cột Mô tả.
+    Tạo 1 dict gọn gàng chứa thông tin sản phẩm để gửi cho GPT.
     """
-    if "Mô tả" not in row_group.columns:
-        return ""
-    desc = str(row_group["Mô tả"].fillna("").iloc[0])
-    desc = desc.strip()
-    if not desc:
-        return ""
-    # lấy 2 câu đầu
-    parts = re.split(r"[.!?]\s+", desc)
-    if len(parts) > 2:
-        return ". ".join(parts[:2]) + "..."
-    return desc
+    row0 = rows.iloc[0]
 
+    def col(name):
+        return str(row0[name]) if name in rows.columns else ""
 
-def reply_price(user_id, rows, ms_code):
-    """
-    Trả lời giá dựa trên nhóm biến thể cùng mã sản phẩm.
-    """
-    if "Giá bán" not in rows.columns:
-        send_text(user_id, f"Hiện em chưa có thông tin giá cho mã {ms_code}, anh/chị cho em xin thêm chút thời gian tra cứu nhé.")
-        return
+    name = col("Tên sản phẩm")
+    desc = col("Mô tả")
+    brand = col("Thương hiệu")
+    category = col("Danh mục")
+    material = col("Chất liệu")
+    supplier = col("Nhà cung cấp")
 
-    prices = rows["Giá bán"].dropna().unique()
-    if len(prices) == 0:
-        send_text(user_id, f"Hiện sản phẩm {ms_code} chưa có giá niêm yết trên hệ thống.")
-        return
+    # Giá theo biến thể
+    price_info = []
+    if "Giá bán" in rows.columns:
+        # group by Giá bán
+        for price, sub in rows.groupby("Giá bán"):
+            colors = []
+            sizes = []
+            if "màu (Thuộc tính)" in sub.columns:
+                colors = [c for c in sub["màu (Thuộc tính)"].fillna("").unique() if c]
+            if "size (Thuộc tính)" in sub.columns:
+                sizes = [s for s in sub["size (Thuộc tính)"].fillna("").unique() if s]
+            price_info.append({
+                "price_raw": str(price),
+                "colors": colors,
+                "sizes": sizes,
+                "variants_count": len(sub)
+            })
 
-    # Thử parse số để format đẹp
-    def fmt_price(x):
-        s = str(x).replace(".", "").replace(",", "")
-        try:
-            v = float(s)
-            return f"{v:,.0f}đ"
-        except Exception:
-            return str(x)
-
-    if len(prices) == 1:
-        p_txt = fmt_price(prices[0])
-        send_text(
-            user_id,
-            f"Mã {ms_code} hiện đang có giá ưu đãi: {p_txt} anh/chị nhé. "
-            f"Nếu lấy từ 2 sản phẩm trở lên, em có thể xin thêm ưu đãi cho mình ạ. ❤️"
-        )
-    else:
-        # nhóm theo giá -> list màu/size cho từng giá
-        msg_lines = [f"Bảng giá chi tiết cho mã {ms_code}:"]
-        for price in prices:
-            sub = rows[rows["Giá bán"] == price]
-            colors = sub["màu (Thuộc tính)"].fillna("").unique() if "màu (Thuộc tính)" in sub.columns else []
-            sizes = sub["size (Thuộc tính)"].fillna("").unique() if "size (Thuộc tính)" in sub.columns else []
-            colors_txt = ", ".join([c for c in colors if c]) or "Nhiều màu"
-            sizes_txt = ", ".join([s for s in sizes if s]) or "Nhiều size"
-            price_txt = fmt_price(price)
-            msg_lines.append(f"- {colors_txt} ({sizes_txt}) → {price_txt}")
-        msg_lines.append("\nAnh/chị chốt giúp em màu, size và số lượng để em lên đơn ạ. ❤️")
-        send_text(user_id, "\n".join(msg_lines))
-
-
-def reply_colors(user_id, rows, ms_code):
-    if "màu (Thuộc tính)" not in rows.columns:
-        send_text(user_id, "Mẫu này hiện chưa cập nhật đủ thông tin màu, anh/chị cho em xin lại link sản phẩm hoặc mô tả để em kiểm tra kỹ hơn ạ.")
-        return
-    colors = [c for c in rows["màu (Thuộc tính)"].fillna("").unique() if c]
-    if not colors:
-        send_text(user_id, "Mẫu này hiện đang có 1 số màu cơ bản, anh/chị cho em biết anh/chị thích tông màu gì (sáng/tối/trung tính) để em gợi ý ạ?")
-        return
-    send_text(
-        user_id,
-        "Mẫu này hiện đang có các màu:\n- " + "\n- ".join(colors) +
-        "\n\nAnh/chị thích màu nào, em gửi thêm hình thực tế cho mình xem nhé. ❤️"
-    )
-
-
-def reply_sizes(user_id, rows, ms_code):
-    if "size (Thuộc tính)" not in rows.columns:
-        send_text(user_id, "Hiện hệ thống chưa cập nhật size chi tiết, anh/chị cho em biết chiều cao/cân nặng, em tư vấn theo form chuẩn giúp mình ạ.")
-        return
-    sizes = [s for s in rows["size (Thuộc tính)"].fillna("").unique() if s]
-    if not sizes:
-        send_text(user_id, "Mẫu này form freesize, phù hợp nhiều dáng người. Anh/chị cho em xin chiều cao/cân nặng để em check kỹ hơn cho mình nhé.")
-        return
-    send_text(
-        user_id,
-        "Size hiện có của mẫu này:\n- " + "\n- ".join(sizes) +
-        "\n\nAnh/chị hay mặc size gì để em tư vấn đúng form cho mình ạ?"
-    )
-
-
-def reply_more_images(user_id, rows, ms_code):
+    # list ảnh (chung)
     imgs = get_clean_images(rows)
-    if not imgs:
-        send_text(user_id, "Hiện mẫu này chưa có thêm hình chi tiết trên hệ thống, anh/chị cho em xin Zalo để gửi thêm hình thực tế nhé.")
-        return
-    count = 0
-    for img in imgs:
-        send_image(user_id, img, product_key=ms_code)
-        count += 1
-        time.sleep(0.3)
-        if count >= 8:   # giới hạn thêm tối đa 8 ảnh
-            break
-    send_text(user_id, "Em đã gửi thêm hình thực tế rồi ạ. Anh/chị xem giúp em thấy ok không, em tư vấn thêm màu/size cho mình nhé. ❤️")
+
+    summary = {
+        "code": ms_code,
+        "name": name,
+        "description": desc,
+        "brand": brand,
+        "category": category,
+        "material": material,
+        "supplier": supplier,
+        "price_variants": price_info,
+        "images_count": len(imgs),
+        "has_images": len(imgs) > 0,
+    }
+    return summary
 
 
-def reply_description(user_id, rows, ms_code):
-    name = rows["Tên sản phẩm"].iloc[0] if "Tên sản phẩm" in rows.columns else ms_code
-    desc = short_description(rows)
-    material = ""
-    if "Chất liệu" in rows.columns:
-        v = str(rows["Chất liệu"].fillna("").iloc[0]).strip()
-        if v:
-            material = v
-    parts = [f"📌 *{name}* (mã {ms_code})"]
-    if material:
-        parts.append(f"- Chất liệu: {material}")
-    if desc:
-        parts.append(f"- Mô tả nhanh: {desc}")
-    else:
-        parts.append("- Mẫu này form đẹp, dễ mặc, phù hợp đi chơi, đi làm hoặc mặc hàng ngày.")
-    parts.append("\nAnh/chị cần em tư vấn thêm về độ dày, độ co giãn hay cảm giác mặc lên người không ạ?")
-    send_text(user_id, "\n".join(parts))
+SHOP_POLICIES_TEXT = """
+- Hệ thống hiện KHÔNG chứa thông tin chi tiết về phí vận chuyển, thời gian giao hàng, đổi trả, bảo hành, quà tặng, giá sỉ...
+- Khi khách hỏi về các nội dung trên, hãy trả lời một cách TRUNG LẬP:
+  + Giải thích rằng chính sách cụ thể phụ thuộc từng chương trình và thời điểm.
+  + Gợi ý khách để lại số điện thoại, hoặc chờ nhân viên tư vấn chi tiết.
+- TUYỆT ĐỐI KHÔNG được tự bịa ra con số cụ thể như "đổi trả 7 ngày", "bảo hành 3 tháng", "freeship toàn quốc"... nếu những con số này KHÔNG có trong dữ liệu sản phẩm.
+"""
+
+SYSTEM_INSTRUCTION = """
+Bạn là trợ lý bán hàng online nói tiếng Việt, tư vấn qua Facebook Messenger.
+
+NGUYÊN TẮC BẮT BUỘC:
+- Chỉ sử dụng thông tin trong 'product_data' và 'shop_policies'.
+- KHÔNG được bịa đặt giá, tính năng, chất liệu, kích thước, thời gian giao hàng, chính sách đổi trả, bảo hành, quà tặng, giá sỉ...
+- Nếu khách hỏi thông tin mà dữ liệu không có, hãy nói rõ là hệ thống chưa có thông tin chính xác và gợi ý khách để lại SĐT hoặc chờ nhân viên tư vấn thêm.
+- Luôn trả lời NGẮN GỌN, TỰ NHIÊN, GIỐNG NGƯỜI THẬT BÁN HÀNG.
+- Giữ giọng lịch sự, thân thiện, xưng hô "em" – "anh/chị" hoặc "cô/chú" tùy ngữ cảnh trong câu hỏi của khách.
+
+VỀ SẢN PHẨM:
+- Chỉ tư vấn dựa trên sản phẩm hiện tại (product_data['code']), không tự nhảy sang sản phẩm khác.
+- Nếu product_data có nhiều mức giá, hãy giải thích ngắn gọn theo nhóm màu/size nếu có.
+- Nếu khách hỏi về độ phù hợp (tuổi, dáng người, mục đích sử dụng...), hãy dựa trên mô tả, chất liệu, danh mục để phân tích hợp lý, nhưng KHÔNG được khẳng định những gì trái với dữ liệu.
+
+VỀ NGỮ ĐIỆU:
+- Ưu tiên trả lời đúng trọng tâm câu hỏi của khách.
+- Có thể gợi ý nhẹ nhàng thêm 1–2 ý nếu cần, nhưng không lan man.
+- Cuối câu có thể kèm 1 câu CTA nhẹ: mời khách chọn màu/size, để lại SĐT, hoặc cho biết thêm nhu cầu.
+"""
 
 
-def consult_product_first_time(user_id, rows, ms_code):
-    """Tư vấn lần đầu khi khách gửi mã sản phẩm."""
+def call_gpt_for_product(user_message, product_summary, conversation_hint=None):
+    """
+    Gọi GPT để tư vấn như người thật, dựa trên dữ liệu sản phẩm.
+    Không bịa thông tin.
+    """
+    if not OPENAI_API_KEY:
+        # Không có key thì trả lời fallback
+        return "Hiện hệ thống AI đang tạm thời quá tải, anh/chị cho em xin mã sản phẩm và câu hỏi chi tiết, em sẽ nhờ nhân viên hỗ trợ thêm ạ."
+
+    messages = [
+        {"role": "system", "content": SYSTEM_INSTRUCTION},
+        {
+            "role": "system",
+            "content": "Dưới đây là chính sách tổng quát của shop (chỉ mang tính định hướng, không chứa con số cụ thể):\n"
+                       + SHOP_POLICIES_TEXT
+        },
+        {
+            "role": "system",
+            "content": "Dưới đây là dữ liệu sản phẩm (product_data) mà bạn được phép sử dụng:\n"
+                       + str(product_summary)
+        },
+    ]
+
+    if conversation_hint:
+        messages.append({
+            "role": "user",
+            "content": f"Ngữ cảnh trước đó trong cuộc hội thoại với khách: {conversation_hint}"
+        })
+
+    messages.append({
+        "role": "user",
+        "content": f"Khách vừa hỏi: \"{user_message}\".\n"
+                   f"Hãy trả lời đúng trọng tâm, dựa trên product_data, không bịa đặt."
+    })
+
+    try:
+        resp = openai.ChatCompletion.create(
+            model=OPENAI_MODEL,
+            messages=messages,
+            temperature=0.4,
+        )
+        answer = resp["choices"][0]["message"]["content"].strip()
+        return answer
+    except Exception as e:
+        print("[OPENAI ERROR]", e)
+        return "Hiện tại hệ thống tư vấn tự động đang bận. Anh/chị cho em xin mã sản phẩm và câu hỏi, em sẽ nhờ nhân viên hỗ trợ thêm ạ."
+
+
+def consult_product_first_time(user_id, rows, ms_code, user_message):
+    """Tư vấn lần đầu khi khách gửi mã sản phẩm: gửi ảnh + câu GPT."""
     global USER_CONTEXT
-
-    name = rows["Tên sản phẩm"].iloc[0] if "Tên sản phẩm" in rows.columns else ms_code
 
     # 1. Ghi context
     USER_CONTEXT[user_id] = {
@@ -377,45 +374,22 @@ def consult_product_first_time(user_id, rows, ms_code):
     }
     print(f"[CONTEXT] {user_id} -> {ms_code}")
 
-    # 2. Gửi tên + mô tả ngắn
-    desc = short_description(rows)
-    text = f"🔎 *{name}* (mã {ms_code})"
-    if desc:
-        text += f"\n\nƯu điểm nổi bật:\n- {desc}"
-    send_text(user_id, text)
+    # 2. Chuẩn bị summary
+    product_summary = build_product_summary(rows, ms_code)
 
-    # 3. Gửi tối đa 5 ảnh chung
+    # 3. Gọi GPT để trả lời lần đầu (giới thiệu sản phẩm + gợi ý hỏi thêm)
+    reply = call_gpt_for_product(
+        user_message=user_message,
+        product_summary=product_summary,
+        conversation_hint="Khách vừa gửi mã sản phẩm này, hãy giới thiệu ngắn gọn về sản phẩm và gợi ý khách hỏi thêm về màu, size, giá hoặc tính phù hợp."
+    )
+    send_text(user_id, reply)
+
+    # 4. Gửi tối đa 5 ảnh chung (1 lần duy nhất mỗi sản phẩm / user)
     imgs = get_clean_images(rows)
     for img in imgs[:5]:
         send_image(user_id, img, product_key=ms_code)
         time.sleep(0.3)
-
-    # 4. Hỏi tiếp
-    send_text(
-        user_id,
-        "Anh/chị muốn em tư vấn thêm về *giá, màu, size hay chất liệu* ạ?"
-    )
-
-
-def detect_intent(text: str):
-    """
-    Trả về intent đơn giản: price / color / size / image / video / desc / none
-    """
-    t = normalize_text(text)
-
-    if any(k in t for k in PRICE_KEYWORDS):
-        return "price"
-    if any(k in t for k in COLOR_KEYWORDS):
-        return "color"
-    if any(k in t for k in SIZE_KEYWORDS):
-        return "size"
-    if any(k in t for k in IMAGE_KEYWORDS):
-        return "image"
-    if any(k in t for k in VIDEO_KEYWORDS):
-        return "video"
-    if any(k in t for k in DESC_KEYWORDS):
-        return "desc"
-    return "none"
 
 
 # =========================
@@ -510,43 +484,21 @@ def webhook():
                 if rows is None:
                     send_text(sender_id, f"Shop không tìm thấy sản phẩm với mã {ms_code_in_text}. Anh/chị kiểm tra lại giúp em nhé.")
                 else:
-                    consult_product_first_time(sender_id, rows, ms_code_in_text)
+                    consult_product_first_time(sender_id, rows, ms_code_in_text, user_message=text)
                 continue
 
-            # Nếu không có mã mới → dùng intent + context
-            intent = detect_intent(text)
-
+            # Nếu có context sản phẩm hiện tại -> tư vấn tiếp bằng GPT trên sản phẩm đó
             if current_ms and current_rows is not None:
-                # Đã có sản phẩm đang tư vấn
-                if intent == "price":
-                    reply_price(sender_id, current_rows, current_ms)
-                    continue
-                elif intent == "color":
-                    reply_colors(sender_id, current_rows, current_ms)
-                    continue
-                elif intent == "size":
-                    reply_sizes(sender_id, current_rows, current_ms)
-                    continue
-                elif intent == "image":
-                    reply_more_images(sender_id, current_rows, current_ms)
-                    continue
-                elif intent == "desc":
-                    reply_description(sender_id, current_rows, current_ms)
-                    continue
-                elif intent == "video":
-                    send_text(sender_id, "Hiện tại hệ thống chưa có video sẵn cho mẫu này. Anh/chị có thể xem hình chi tiết trước, nếu cần em sẽ gửi thêm video qua Zalo nhé.")
-                    continue
-                else:
-                    # câu hỏi chung chung nhưng đã có sản phẩm
-                    send_text(
-                        sender_id,
-                        f"Hiện em đang tư vấn cho anh/chị sản phẩm mã {current_ms}. "
-                        f"Anh/chị muốn hỏi thêm về *giá, màu, size, hình ảnh hay chất liệu* ạ?"
-                    )
-                    continue
+                product_summary = build_product_summary(current_rows, current_ms)
+                reply = call_gpt_for_product(
+                    user_message=text,
+                    product_summary=product_summary,
+                    conversation_hint=f"Hiện đang tư vấn sản phẩm mã {current_ms} cho khách."
+                )
+                send_text(sender_id, reply)
+                continue
 
-            # Nếu chưa có context sản phẩm nào
-            # -> thử search theo nội dung khách hỏi
+            # Nếu chưa có context sản phẩm nào -> thử search theo nội dung khách hỏi
             results = search_products_by_text(text, limit=5)
             if results is not None and len(results) > 0 and "Mã sản phẩm" in results.columns and "Tên sản phẩm" in results.columns:
                 lines = ["Em gợi ý một số sản phẩm phù hợp với anh/chị:"]
@@ -560,7 +512,7 @@ def webhook():
                 send_text(
                     sender_id,
                     "Hiện tại em chưa xác định được sản phẩm anh/chị cần. "
-                    "Anh/chị có thể gửi *mã sản phẩm* (MSxxxxx) hoặc chụp màn hình/bài viết mà anh/chị đang xem giúp em nhé."
+                    "Anh/chị có thể gửi *mã sản phẩm* (MSxxxxx) hoặc mô tả rõ hơn tên sản phẩm/bài viết anh/chị đang xem giúp em nhé."
                 )
 
     return "ok", 200
