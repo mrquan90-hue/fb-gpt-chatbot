@@ -14,141 +14,78 @@ app = Flask(__name__)
 # 0. CẤU HÌNH
 # =========================
 PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN", "")
-VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "")
+VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "verify_token_123")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+
+BOT_ENABLED = True  # Có thể bật/tắt bot bằng lệnh trong Messenger
 
 if OPENAI_API_KEY:
-    openai.api_key = OPENAI_API_KEY
     client = OpenAI(api_key=OPENAI_API_KEY)
 else:
-    client = OpenAI()
-
-# URL Google Sheet CSV (bạn thay link thật của bạn vào đây)
-SHEET_CSV_URL = os.getenv("SHEET_CSV_URL", "")
-
-# =========================
-# 1. BIẾN TOÀN CỤC
-# =========================
-
-BOT_ENABLED = True
-PROCESSED_MIDS = set()
-LAST_SENT_MEDIA = {}  # {user_id: set( "image:MSxxx|url", "video:MSxxx|url" )}
-USER_CONTEXT = {}  # {user_id: {"current_ms": "MS000018", "last_ts": 123456}}
-
-# =========================
-# 2. LOAD GOOGLE SHEET
-# =========================
-
-df = None
-LAST_LOAD = 0
-LOAD_TTL = 300  # giây, 5 phút
-
-
-def load_sheet(force=False):
-    """Load CSV từ Google Sheet, cache trong 5 phút."""
-    global df, LAST_LOAD
-    now = time.time()
-    if not force and df is not None and (now - LAST_LOAD) < LOAD_TTL:
-        return df
-
-    if not SHEET_CSV_URL:
-        print("[WARN] SHEET_CSV_URL not set")
-        return df
-
-    try:
-        resp = requests.get(SHEET_CSV_URL, timeout=20)
-        resp.raise_for_status()
-        content = resp.content.decode("utf-8", errors="ignore")
-        df_local = pd.read_csv(io.StringIO(content))
-        df = df_local
-        LAST_LOAD = now
-        print(f"[Sheet] Loaded {len(df)} rows")
-    except Exception as e:
-        print("[Sheet] ERROR loading:", e)
-    return df
+    client = None
 
 
 # =========================
-# 3. HÀM GỬI MESSAGE FACEBOOK
+# 1. HÀM GỬI TIN NHẮN FACEBOOK
 # =========================
+FB_API_URL = "https://graph.facebook.com/v18.0/me/messages"
+
 
 def fb_send(payload):
+    """
+    Gửi POST lên Facebook Messenger.
+    """
     if not PAGE_ACCESS_TOKEN:
-        print("[FB_SEND] PAGE_ACCESS_TOKEN missing, payload:", payload)
+        print("[fb_send] Thiếu PAGE_ACCESS_TOKEN, chỉ in payload:")
+        print(payload)
         return
 
+    params = {"access_token": PAGE_ACCESS_TOKEN}
     try:
-        r = requests.post(
-            "https://graph.facebook.com/v19.0/me/messages",
-            params={"access_token": PAGE_ACCESS_TOKEN},
-            json=payload,
-            timeout=20,
-        )
+        r = requests.post(FB_API_URL, params=params, json=payload, timeout=8)
         if r.status_code != 200:
-            print("[FB_SEND] Error:", r.status_code, r.text)
+            print("[fb_send] ERROR:", r.status_code, r.text)
     except Exception as e:
-        print("[FB_SEND] Exception:", e)
+        print("[fb_send] EXCEPTION:", e)
 
 
 def send_text(user_id, text):
     if not BOT_ENABLED:
-        print("[BOT OFF] Not sending text.")
+        print("[TEXT] Bot OFF, skip:", text)
         return
-
-    fb_send(
-        {
-            "recipient": {"id": user_id},
-            "message": {"text": text},
-        }
-    )
-
-
-def _mark_media_sent(user_id, media_type, product_key, url):
-    """
-    Lưu dấu media đã gửi để không gửi trùng (anti spam).
-    media_type: "image" / "video"
-    """
-    if not product_key:
-        return
-    if user_id not in LAST_SENT_MEDIA:
-        LAST_SENT_MEDIA[user_id] = set()
-    key = f"{media_type}:{product_key}|{url}"
-    if key in LAST_SENT_MEDIA[user_id]:
-        print(f"[MEDIA] Skip duplicate {media_type}:", key)
-        return False
-    LAST_SENT_MEDIA[user_id].add(key)
-    return True
+    fb_send({
+        "recipient": {"id": user_id},
+        "message": {"text": text}
+    })
 
 
 def send_image(user_id, image_url, product_key=None):
     """
-    Chỉ gửi 1 ảnh 1 lần cho mỗi (user, product_key, url).
+    Gửi ảnh. Đã có cơ chế chống trùng lặp theo (user, product_key, url).
     """
     if not BOT_ENABLED:
-        print("[IMG] Bot OFF, skip image.")
+        print("[IMAGE] Bot OFF, skip image:", image_url)
         return
 
     if product_key:
         if not _mark_media_sent(user_id, "image", product_key, image_url):
+            # đã gửi ảnh này cho user với sản phẩm này rồi
             return
 
-    fb_send(
-        {
-            "recipient": {"id": user_id},
-            "message": {
-                "attachment": {
-                    "type": "image",
-                    "payload": {"url": image_url, "is_reusable": True},
-                }
-            },
+    fb_send({
+        "recipient": {"id": user_id},
+        "message": {
+            "attachment": {
+                "type": "image",
+                "payload": {"url": image_url, "is_reusable": True}
+            }
         }
-    )
+    })
 
 
 def send_video(user_id, video_url, product_key=None):
     """
-    Gửi video, có chống trùng nếu có product_key.
+    Gửi video – cũng tránh trùng lặp theo (user, product_key, url).
     """
     if not BOT_ENABLED:
         print("[VIDEO] Bot OFF, skip video.")
@@ -158,103 +95,277 @@ def send_video(user_id, video_url, product_key=None):
         if not _mark_media_sent(user_id, "video", product_key, video_url):
             return
 
-    fb_send(
-        {
-            "recipient": {"id": user_id},
-            "message": {
-                "attachment": {
-                    "type": "video",
-                    "payload": {"url": video_url, "is_reusable": True},
-                }
-            },
+    fb_send({
+        "recipient": {"id": user_id},
+        "message": {
+            "attachment": {
+                "type": "video",
+                "payload": {"url": video_url, "is_reusable": True}
+            }
         }
-    )
+    })
 
 
 # =========================
-# 4. XỬ LÝ DỮ LIỆU SẢN PHẨM
+# 2. LOAD GOOGLE SHEET
+# =========================
+SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/18eI8Yn-WG8xN0YK8mWqgIOvn-USBhmXBH3sR2drvWus/export?format=csv"
+
+df = None
+LAST_LOAD = 0
+LOAD_TTL = 300  # 5 phút reload 1 lần
+
+
+def load_sheet(force=False):
+    """Tải data sản phẩm từ Google Sheet."""
+    global df, LAST_LOAD
+    now = time.time()
+    if not force and df is not None and now - LAST_LOAD < LOAD_TTL:
+        return
+    try:
+        print(f"[Sheet] Loading from: {SHEET_CSV_URL}")
+        resp = requests.get(SHEET_CSV_URL, timeout=15)
+        resp.raise_for_status()
+        content = resp.content.decode("utf-8")
+        df_local = pd.read_csv(io.StringIO(content))
+        df_local.fillna("", inplace=True)
+        df = df_local
+        LAST_LOAD = now
+        print("[Sheet] Loaded, rows =", len(df))
+    except Exception as e:
+        print("[Sheet] ERROR loading:", e)
+        # không override df cũ nếu lỗi
+
+
+# =========================
+# 3. QUẢN LÝ CONTEXT & MEDIA
 # =========================
 
-def normalize_text(s):
-    if not isinstance(s, str):
-        s = str(s)
-    s = s.lower()
-    s = s.strip()
-    return s
+# context: user_id -> {"current_ms": "MS000001", ...}
+USER_CONTEXT = {}
+# media_sent: (user_id, media_type, product_key, url) -> True
+MEDIA_SENT_CACHE = {}
+
+
+def get_user_context(user_id):
+    return USER_CONTEXT.get(user_id, {})
+
+
+def set_user_context(user_id, **kwargs):
+    ctx = USER_CONTEXT.get(user_id, {})
+    ctx.update(kwargs)
+    USER_CONTEXT[user_id] = ctx
+    return ctx
+
+
+def _media_key(user_id, media_type, product_key, url):
+    return f"{user_id}|{media_type}|{product_key}|{url}"
+
+
+def _mark_media_sent(user_id, media_type, product_key, url):
+    """
+    Trả về True nếu chưa gửi, đánh dấu là đã gửi.
+    Trả về False nếu đã gửi rồi (tránh trùng).
+    """
+    global MEDIA_SENT_CACHE
+    key = _media_key(user_id, media_type, product_key, url)
+    if key in MEDIA_SENT_CACHE:
+        return False
+    MEDIA_SENT_CACHE[key] = True
+    return True
+
+
+# =========================
+# 4. ANTI-LOOP
+# =========================
+def is_echo_event(event):
+    msg = event.get("message")
+    return bool(msg and msg.get("is_echo"))
+
+
+# =========================
+# 5. XỬ LÝ SẢN PHẨM & GROUNDING
+# =========================
+def normalize_text(text: str) -> str:
+    return (text or "").strip().lower()
 
 
 def extract_ms_from_text(text):
     """
-    Tìm mã sản phẩm trong câu dạng MS000018, ms12345...
+    Tìm mã sản phẩm dạng MSxxxx trong câu chat (hỗ trợ cả viết liền, viết cách, ms123, MS 123...).
+    Trả về mã chuẩn dạng MS000123 nếu tìm được trong dữ liệu, ngược lại None.
     """
     if not text:
         return None
-    matches = re.findall(r"\bms\s*\d{3,}\b", text, flags=re.IGNORECASE)
-    if not matches:
-        return None
-    raw = matches[0]
-    digits = re.findall(r"\d+", raw)
-    if not digits:
-        return None
-    return "MS" + digits[0].zfill(6)
+    raw = str(text).upper()
+    # Bắt các pattern có MS trước dãy số: MS123, MS 123, M S123...
+    m = re.search(r"MS\s*(\d{3,})", raw)
+    if m:
+        digits = m.group(1)
+        code = "MS" + digits.zfill(6)
+        return code
+    return None
 
 
-def find_product_by_code(ms_code):
+def guess_ms_from_text(text):
     """
-    Tìm các dòng có mã sản phẩm trùng (1 sản phẩm nhiều biến thể).
+    Đoán mã sản phẩm khi khách chỉ gõ số hoặc gõ 'mã 123', 'mã sp 123'...
+    Chỉ trả về nếu tìm được đúng 1 mã trong dữ liệu, tránh đoán bừa.
     """
+    if not text:
+        return None
     load_sheet()
     global df
     if df is None or "Mã sản phẩm" not in df.columns:
         return None
-    ms_code = str(ms_code).strip()
-    rows = df[df["Mã sản phẩm"].astype(str).str.contains(ms_code, case=False, na=False)]
-    if rows.empty:
+
+    raw = str(text).upper()
+    # Ưu tiên bắt theo cụm 'MÃ', 'MA ', 'MÃ SP', 'MA SP' đi kèm số
+    candidates = []
+
+    # 1. Pattern có chữ "MÃ"
+    for m in re.finditer(r"M[ÃA]?\s*(SP)?\s*(\d{3,})", raw):
+        digits = m.group(2)
+        if not digits:
+            continue
+        padded = digits.zfill(6)
+        code = "MS" + padded
+        candidates.append(code)
+
+    # 2. Nếu không có 'mã', bắt mọi cụm số 3–6 chữ số trong câu
+    if not candidates:
+        nums = re.findall(r"\d{3,6}", raw)
+        for digits in nums:
+            padded = digits.zfill(6)
+            code = "MS" + padded
+            candidates.append(code)
+
+    # Lọc theo dữ liệu thực tế
+    valid_codes = []
+    for code in candidates:
+        mask = df["Mã sản phẩm"].astype(str).str.contains(code, case=False, na=False)
+        if mask.any():
+            valid_codes.append(code)
+
+    # Loại bỏ trùng
+    seen = set()
+    unique_valid = []
+    for c in valid_codes:
+        if c not in seen:
+            seen.add(c)
+            unique_valid.append(c)
+
+    if len(unique_valid) == 1:
+        return unique_valid[0]
+    return None
+
+
+def find_product_by_code(ms_code):
+    if df is None or "Mã sản phẩm" not in df.columns:
         return None
-    return rows
+    subset = df[df["Mã sản phẩm"].astype(str).str.contains(ms_code, case=False, na=False)]
+    if subset.empty:
+        return None
+    return subset
 
 
 def search_products_by_text(query, limit=5):
     """
-    Tìm sản phẩm theo tên/mô tả (search sơ bộ).
+    Tìm sản phẩm theo nội dung khách gõ, dùng cột 'Tên sản phẩm' và 'Mô tả'.
     """
-    load_sheet()
-    global df
     if df is None:
         return None
-    if not query:
-        return None
     q = normalize_text(query)
-    if "Tên sản phẩm" not in df.columns:
+    if not q:
         return None
-    mask = df["Tên sản phẩm"].astype(str).str.lower().str.contains(q, na=False)
-    results = df[mask].head(limit)
-    if results.empty:
+    # đơn giản: chứa chuỗi q trong tên / mô tả
+    name_col = "Tên sản phẩm"
+    desc_col = "Mô tả"
+    if name_col not in df.columns:
         return None
-    results = results.drop_duplicates(subset=["Mã sản phẩm"])
-    return results
+    name_mask = df[name_col].astype(str).str.lower().str.contains(q, na=False)
+    if desc_col in df.columns:
+        desc_mask = df[desc_col].astype(str).str.lower().str.contains(q, na=False)
+    else:
+        desc_mask = False
+    mask = name_mask | desc_mask
+    subset = df[mask]
+    if subset.empty:
+        return None
+    return subset.head(limit)
 
 
-def clean_image_url(url: str) -> str:
+def format_price(v):
+    try:
+        p = float(v)
+        return f"{p:,.0f}đ".replace(",", ".")
+    except Exception:
+        return str(v)
+
+
+def answer_stock(rows, ms_code):
     """
-    Loại bỏ ảnh watermark Trung Quốc theo tên file, KHÔNG loại domain TQ.
+    Trả lời còn/hết hàng dựa vào cột 'Có thể bán'.
     """
-    if not url:
-        return ""
-    url = url.strip()
-    lower = url.lower()
-    bad_keywords = ["watermark", "logo", "sample", "yangshi", "baidu", "zhanqi"]
-    if any(bk in lower for bk in bad_keywords):
-        return ""
-    return url
+    if "Có thể bán" not in rows.columns:
+        return f"Hiện em chưa có dữ liệu tồn kho chi tiết cho mã {ms_code}, anh/chị cho em xin số lượng cần, em nhờ nhân viên check lại ạ."
+
+    can_sell = rows["Có thể bán"].astype(str).str.strip().str.lower()
+    if all(x in ["0", "false", "hết hàng", "het hang", "no"] for x in can_sell):
+        return f"Mã {ms_code} hiện đang tạm hết hàng ạ. Anh/chị có thể tham khảo thêm mẫu khác bên em nhé."
+    return f"Mã {ms_code} hiện vẫn còn hàng anh/chị nha. Anh/chị cần số lượng khoảng bao nhiêu ạ?"
+
+
+def answer_price(rows, ms_code):
+    """
+    Trả lời về giá dựa vào cột 'Giá bán' và nhóm theo giá.
+    """
+    if "Giá bán" not in rows.columns:
+        return f"Hiện em chưa có dữ liệu giá chi tiết cho mã {ms_code}, anh/chị cho em xin số lượng cụ thể, em nhờ nhân viên báo giá chuẩn cho mình ạ."
+
+    prices = rows["Giá bán"].astype(str).str.strip()
+    unique_prices = sorted(set(prices))
+    if not unique_prices:
+        return f"Hiện em chưa có dữ liệu giá chi tiết cho mã {ms_code}, anh/chị cho em xin nhu cầu cụ thể, em nhờ nhân viên hỗ trợ thêm ạ."
+
+    if len(unique_prices) == 1:
+        p_str = format_price(unique_prices[0])
+        return f"Mã {ms_code} hiện đang có giá khoảng {p_str} anh/chị nha."
+    else:
+        # nhóm theo giá + màu/size nếu có
+        lines = [f"Mã {ms_code} hiện có một số mức giá tuỳ màu/size:"]
+        prices_numeric = []
+        for price in unique_prices:
+            p_str = format_price(price)
+            try:
+                prices_numeric.append(float(price))
+            except Exception:
+                pass
+            colors = []
+            sizes = []
+            sub = rows[rows["Giá bán"].astype(str).str.strip() == price]
+            if "màu (Thuộc tính)" in sub.columns:
+                colors = [c for c in sub["màu (Thuộc tính)"].fillna("").unique() if c]
+            if "size (Thuộc tính)" in sub.columns:
+                sizes = [s for s in sub["size (Thuộc tính)"].fillna("").unique() if s]
+            seg = f"- {p_str}"
+            extra = []
+            if colors:
+                extra.append("màu: " + ", ".join(colors))
+            if sizes:
+                extra.append("size: " + ", ".join(sizes))
+            if extra:
+                seg += " (" + "; ".join(extra) + ")"
+            lines.append(seg)
+        lines.append("Anh/chị cho em xin màu/size cụ thể để em chốt đúng giá giúp mình ạ.")
+        return "\n".join(lines)
 
 
 def get_clean_images(rows):
     """
-    Lấy danh sách ảnh (unique, không watermark chữ Trung Quốc).
-    Cột: Images
+    Lấy danh sách ảnh từ cột 'Images', loại trùng, loại watermark chữ Trung Quốc nhưng KHÔNG loại domain Trung Quốc.
     """
-    if rows is None or "Images" not in rows.columns:
+    if "Images" not in rows.columns:
         return []
     all_urls = []
     for cell in rows["Images"].fillna(""):
@@ -266,21 +377,20 @@ def get_clean_images(rows):
     seen = set()
     clean = []
     for u in all_urls:
-        cu = clean_image_url(u)
-        if not cu:
-            continue
-        if cu not in seen:
-            seen.add(cu)
-            clean.append(cu)
+        if u not in seen:
+            seen.add(u)
+            # Loại watermark chữ Trung Quốc (ví dụ có 'watermark' hoặc text chèn chữ)
+            # Ở đây ta chỉ minh họa bằng rule đơn giản: nếu url chứa 'watermark' thì bỏ
+            if "watermark" in u.lower():
+                continue
+            clean.append(u)
     return clean
 
 
-def get_clean_videos(rows):
+def get_videos(rows):
     """
-    Lấy danh sách video (unique) từ cột Videos.
+    Lấy video từ cột 'Videos'.
     """
-    if rows is None:
-        return []
     if "Videos" not in rows.columns:
         return []
     all_urls = []
@@ -299,163 +409,54 @@ def get_clean_videos(rows):
     return clean
 
 
-def format_price(p):
-    """Chuẩn hóa giá dạng 1.234.567đ."""
-    try:
-        v = float(p)
-        v_int = int(round(v))
-        return f"{v_int:,}".replace(",", ".") + "đ"
-    except Exception:
-        return str(p)
-
-
-def is_available_flag(v):
-    """
-    Cột 'Có thể bán' (hoặc tên tương đương), coi:
-    - True / 1 / "có" / "yes" => còn bán
-    - False / 0 / "không" / "het" => không bán
-    """
-    if isinstance(v, str):
-        v = v.strip().lower()
-        if v in ["1", "true", "có", "co", "yes"]:
-            return True
-        if v in ["0", "false", "không", "khong", "no", "het"]:
-            return False
-    try:
-        return bool(int(v))
-    except Exception:
-        return False
-
-
-def answer_stock(rows, ms_code):
-    """
-    Trả lời còn hàng hay không dựa cột 'Có thể bán'.
-    """
-    col_candidates = ["Có thể bán", "Co the ban", "Co_the_ban", "Available", "available"]
-    col_name = None
-    for c in col_candidates:
-        if c in rows.columns:
-            col_name = c
-            break
-
-    if not col_name:
-        return f"Hiện hệ thống chưa có cột 'Có thể bán' cho mã {ms_code}, em chưa kiểm tra tồn kho tự động được ạ."
-
-    total_variants = len(rows)
-    available_count = 0
-    for _, r in rows.iterrows():
-        if is_available_flag(r.get(col_name)):
-            available_count += 1
-
-    if available_count <= 0:
-        return f"Sản phẩm mã {ms_code} hiện trong dữ liệu đang hết hàng hoặc tạm ngừng bán ạ."
-
-    if available_count == total_variants:
-        return f"Sản phẩm mã {ms_code} hiện trong dữ liệu đều còn hàng cho các biến thể ạ."
-
-    return (
-        f"Sản phẩm mã {ms_code} hiện vẫn còn hàng với một số biến thể (màu/size). "
-        "Anh/chị cho em xin màu và size cụ thể để em kiểm tra chính xác giúp mình nhé."
-    )
-
-
-def answer_price(rows, ms_code):
-    """
-    Gom theo giá bán, báo giá dạng:
-    - Nếu chỉ 1 giá: báo 1 giá
-    - Nếu nhiều giá: báo khoảng
-    """
-    if "Giá bán" not in rows.columns:
-        return f"Hệ thống chưa có cột 'Giá bán' cho mã {ms_code}, em chưa báo giá tự động được ạ."
-
-    prices = []
-    for _, r in rows.iterrows():
-        val = r.get("Giá bán")
-        try:
-            f = float(val)
-            prices.append(f)
-        except Exception:
-            continue
-
-    if not prices:
-        return f"Hiện dữ liệu chưa có giá bán cụ thể cho mã {ms_code}, anh/chị vui lòng chờ nhân viên báo giá ạ."
-
-    unique_prices = sorted(set(prices))
-    if len(unique_prices) == 1:
-        p = format_price(unique_prices[0])
-        return f"Sản phẩm mã {ms_code} hiện giá bán là {p} ạ."
-    else:
-        p_min = format_price(min(unique_prices))
-        p_max = format_price(max(unique_prices))
-        return f"Sản phẩm mã {ms_code} hiện có nhiều mức giá, dao động từ {p_min} đến {p_max} tuỳ màu/size ạ."
-
-
 def answer_color_size(rows, ms_code):
     """
-    Trả lời danh sách màu/size còn trong dữ liệu.
+    Tư vấn màu & size từ cột 'màu (Thuộc tính)' và 'size (Thuộc tính)'.
     """
-    color_cols = [c for c in rows.columns if "màu" in c.lower() or "mau" in c.lower()]
-    size_cols = [c for c in rows.columns if "size" in c.lower() or "kich thuoc" in c.lower()]
+    colors = []
+    sizes = []
+    if "màu (Thuộc tính)" in rows.columns:
+        colors = [c for c in rows["màu (Thuộc tính)"].fillna("").unique() if c]
+    if "size (Thuộc tính)" in rows.columns:
+        sizes = [s for s in rows["size (Thuộc tính)"].fillna("").unique() if s]
 
-    colors = set()
-    sizes = set()
-
-    for _, r in rows.iterrows():
-        for c in color_cols:
-            val = str(r.get(c, "")).strip()
-            if val:
-                colors.add(val)
-        for c in size_cols:
-            val = str(r.get(c, "")).strip()
-            if val:
-                sizes.add(val)
-
-    msg_parts = [f"Sản phẩm mã {ms_code} trong dữ liệu có:"]
-
+    lines = []
     if colors:
-        msg_parts.append("• Màu: " + ", ".join(sorted(colors)))
+        lines.append("Màu hiện có: " + ", ".join(colors))
     if sizes:
-        msg_parts.append("• Size: " + ", ".join(sorted(sizes)))
-    if not colors and not sizes:
-        msg_parts.append("Hiện dữ liệu chưa ghi rõ màu/size cụ thể ạ.")
+        lines.append("Size hiện có: " + ", ".join(sizes))
 
-    msg_parts.append("Anh/chị cho em biết màu/size mình cần, em kiểm tra tồn kho giúp ạ.")
-    return "\n".join(msg_parts)
+    if not lines:
+        return f"Mã {ms_code} hiện em chưa có dữ liệu màu/size chi tiết, anh/chị cho em thêm thông tin về chiều cao/cân nặng, em nhờ nhân viên hỗ trợ chọn size cho mình ạ."
+    lines.append("Anh/chị cho em xin chiều cao, cân nặng (hoặc số đo quen mặc) để em tư vấn size chuẩn hơn cho mình nhé.")
+    return "\n".join(lines)
 
 
 def build_product_summary(rows, ms_code):
     """
-    Tóm tắt dữ liệu sản phẩm để gửi vào GPT.
+    Gom thông tin mô tả sản phẩm để gửi vào GPT.
     """
-    if rows is None or rows.empty:
-        return {}
-
-    # Lấy 1 dòng đại diện
-    r0 = rows.iloc[0]
-    name = str(r0.get("Tên sản phẩm", ""))
-    desc = str(r0.get("Mô tả", ""))
-    images = get_clean_images(rows)
-    videos = get_clean_videos(rows)
-
-    price_info = answer_price(rows, ms_code)
-    stock_info = answer_stock(rows, ms_code)
-    variant_info = answer_color_size(rows, ms_code)
-
-    return {
-        "code": ms_code,
-        "name": name,
-        "desc": desc,
-        "price_info": price_info,
-        "stock_info": stock_info,
-        "variant_info": variant_info,
-        "images": images,
-        "videos": videos,
-    }
+    name = ""
+    desc = ""
+    if "Tên sản phẩm" in rows.columns:
+        name = str(rows.iloc[0]["Tên sản phẩm"])
+    if "Mô tả" in rows.columns:
+        desc = str(rows.iloc[0]["Mô tả"])
+    # Có thể mở rộng thêm: chất liệu, công suất, tính năng... nếu cột có
+    summary = f"Mã: {ms_code}\nTên sản phẩm: {name}\nMô tả chi tiết:\n{desc}"
+    return summary
 
 
 # =========================
-# 5. GPT TƯ VẤN
+# 5.4. GPT CHO TƯ VẤN SẢN PHẨM
 # =========================
+SHOP_POLICIES_TEXT = """
+- Hàng mới 100%, kiểm tra kỹ trước khi gửi.
+- Hỗ trợ đổi size nếu còn hàng, sản phẩm còn nguyên tag, chưa qua sử dụng.
+- Thời gian giao hàng tùy khu vực, thường sẽ được nhân viên tư vấn báo trước khi chốt đơn.
+- Có hỗ trợ đồng kiểm (xem hàng bên ngoài trước khi thanh toán) tùy khu vực và đơn vị vận chuyển.
+"""
+
 
 SYSTEM_INSTRUCTION = """
 Bạn là trợ lý bán hàng online nói tiếng Việt, tư vấn qua Facebook Messenger.
@@ -469,101 +470,87 @@ NGUYÊN TẮC BẮT BUỘC:
 
 VỀ SẢN PHẨM:
 - Chỉ tư vấn dựa trên sản phẩm hiện tại (product_data['code']), không tự nhảy sang sản phẩm khác.
+- Không đưa ra con số cụ thể về giá, kích thước, thời gian giao hàng nếu trong dữ liệu không có.
 - Nếu product_data có nhiều mức giá, hãy giải thích ngắn gọn theo nhóm màu/size nếu có.
-- Nếu khách hỏi về độ phù hợp (tuổi, dáng người, mục đích sử dụng...), hãy dựa trên mô tả, chất liệu, danh mục để phân tích hợp lý, nhưng KHÔNG được khẳng định những gì trái với dữ liệu.
+- Nếu khách hỏi về độ phù hợp (tuổi, dáng người, mục đích sử dụng...), hãy phân tích dựa trên mô tả, chất liệu, kiểu dáng trong product_data một cách hợp lý, nhưng KHÔNG được khẳng định những gì trái với dữ liệu.
+
+VỀ VẬN CHUYỂN:
+- Nếu dữ liệu không ghi rõ thời gian giao hàng hoặc phí ship, KHÔNG đoán số ngày cụ thể.
+- Có thể trả lời kiểu: "Thời gian giao hàng và phí ship sẽ tuỳ khu vực, nhân viên sẽ báo chính xác cho anh/chị sau", KHÔNG đưa con số cứng.
 
 VỀ NGỮ ĐIỆU:
-- Ưu tiên trả lời đúng trọng tâm câu hỏi của khách.
-- Có thể gợi ý nhẹ nhàng thêm 1–2 ý nếu cần, nhưng không lan man.
-- Cuối câu có thể kèm 1 câu CTA nhẹ: mời khách chọn màu/size, để lại SĐT, hoặc cho biết thêm nhu cầu.
+- Trả lời ngắn gọn 2–5 câu, tránh dông dài.
+- Có thể gợi ý khách hỏi tiếp về màu, size, giá, chất liệu, độ phù hợp...
 """
 
 
-def call_gpt_for_product(user_message, product_summary, conversation_hint=None):
+def call_gpt_for_product(user_message, product_summary, conversation_hint=""):
     """
-    Gọi GPT để tư vấn như người thật, dựa trên dữ liệu sản phẩm.
-    Không bịa thông tin.
+    Gọi GPT để tư vấn thêm dựa trên product_summary.
     """
-    if not OPENAI_API_KEY:
+    if not OPENAI_API_KEY or client is None:
         # Không có key thì trả lời fallback
         return (
-            "Hiện hệ thống AI chưa được cấu hình đầy đủ. "
-            "Anh/chị cho em xin thêm thông tin hoặc chờ nhân viên hỗ trợ trực tiếp ạ."
+            "Hiện hệ thống AI đang tạm thời quá tải, anh/chị cho em xin mã sản phẩm và câu hỏi chi tiết, "
+            "em sẽ nhờ nhân viên hỗ trợ thêm ạ."
         )
 
-    product_data_str = f"""
-Mã sản phẩm: {product_summary.get('code')}
-Tên sản phẩm: {product_summary.get('name')}
-Mô tả: {product_summary.get('desc')}
-Thông tin giá: {product_summary.get('price_info')}
-Thông tin tồn kho: {product_summary.get('stock_info')}
-Biến thể (màu/size): {product_summary.get('variant_info')}
-"""
-
-    policies = """
-CHÍNH SÁCH CHUNG (MẪU – có thể khác thực tế, KHÔNG ĐƯỢC BỊA):
-- Thời gian giao hàng: thường từ 3–7 ngày tùy khu vực.
-- Có thể cho khách kiểm hàng (đồng kiểm) trước khi thanh toán nếu đơn vị vận chuyển hỗ trợ.
-- Chính sách đổi/trả/bảo hành: phụ thuộc từng sản phẩm. Nếu dữ liệu không ghi rõ thì hãy nói là cần nhân viên kiểm tra thêm.
-"""
-
-    full_user_content = f"""
-[HƯỚNG DẪN HỆ THỐNG]
-{conversation_hint or ""}
-
-[THÔNG TIN SẢN PHẨM]
-{product_data_str}
-
-[CHÍNH SÁCH SHOP]
-{policies}
-
-[HỎI CỦA KHÁCH]
-{user_message}
-"""
+    messages = [
+        {"role": "system", "content": SYSTEM_INSTRUCTION},
+        {
+            "role": "system",
+            "content": "Dưới đây là chính sách tổng quát của shop (chỉ mang tính định hướng, không chứa con số cụ thể):\n"
+                       + SHOP_POLICIES_TEXT
+        },
+        {
+            "role": "system",
+            "content": "Dưới đây là dữ liệu sản phẩm hiện tại (product_data):\n" + product_summary,
+        },
+        {
+            "role": "system",
+            "content": "Ngữ cảnh hội thoại hiện tại:\n" + conversation_hint,
+        },
+        {
+            "role": "user",
+            "content": user_message,
+        },
+    ]
 
     try:
-        completion = client.chat.completions.create(
-            model=OPENAI_MODEL,
-            temperature=0.3,
-            messages=[
-                {"role": "system", "content": SYSTEM_INSTRUCTION},
-                {"role": "user", "content": full_user_content},
-            ],
+        resp = client.chat.completions.create(
+            model="gpt-4.1-mini",
+            messages=messages,
+            temperature=0.4,
+            max_tokens=350,
         )
-        answer = completion.choices[0].message.content.strip()
-        return answer
+        reply = resp.choices[0].message.content.strip()
+        return reply
     except Exception as e:
-        print("[GPT ERROR]", e)
+        print("[GPT] ERROR:", e)
         return (
-            "Hiện tại hệ thống tư vấn tự động đang bận. "
-            "Anh/chị vui lòng chờ trong giây lát hoặc để lại SĐT để nhân viên gọi lại hỗ trợ ạ."
+            "Hiện hệ thống AI đang có chút trục trặc, anh/chị cho em xin câu hỏi cụ thể, "
+            "em nhờ nhân viên hỗ trợ thêm ạ."
         )
 
 
-def consult_product_first_time(user_id, rows, ms_code):
+def consult_product_first_time(user_id, rows, ms_code, user_message=""):
     """
-    Khi khách vừa gửi mã sản phẩm lần đầu, bot:
-    - Cập nhật context
-    - Gửi mô tả ngắn
-    - Gửi 1–2 thông tin (giá/tồn kho)
-    - Gửi ảnh (tối đa 5 ảnh)
+    Khi khách gửi mã sản phẩm lần đầu -> giới thiệu sản phẩm + gợi ý hỏi tiếp.
     """
-    USER_CONTEXT[user_id] = {"current_ms": ms_code, "last_ts": time.time()}
-    summary = build_product_summary(rows, ms_code)
+    set_user_context(user_id, current_ms=ms_code)
 
-    intro_lines = []
-    intro_lines.append(f"Anh/chị đang xem sản phẩm mã {ms_code}: {summary.get('name')}")
-    if summary.get("price_info"):
-        intro_lines.append(summary["price_info"])
-    if summary.get("stock_info"):
-        intro_lines.append(summary["stock_info"])
-
-    intro_lines.append(
-        "Anh/chị có thể hỏi em về: giá, còn hàng, màu/size, chất liệu, bảo hành, thời gian giao hàng..."
+    product_summary = build_product_summary(rows, ms_code)
+    reply = call_gpt_for_product(
+        user_message=user_message or f"Khách vừa hỏi về mã sản phẩm {ms_code}. Hãy giới thiệu ngắn gọn.",
+        product_summary=product_summary,
+        conversation_hint=(
+            "Khách vừa gửi mã sản phẩm này, hãy giới thiệu ngắn gọn về sản phẩm và gợi ý khách "
+            "hỏi thêm về màu, size, giá hoặc tính phù hợp."
+        )
     )
+    send_text(user_id, reply)
 
-    send_text(user_id, "\n".join(intro_lines))
-
+    # 4. Gửi tối đa 5 ảnh chung (1 lần duy nhất mỗi sản phẩm / user)
     imgs = get_clean_images(rows)
     for img in imgs[:5]:
         send_image(user_id, img, product_key=ms_code)
@@ -571,24 +558,17 @@ def consult_product_first_time(user_id, rows, ms_code):
 
 
 # =========================
-# 6. INTENT ENGINE (Rule-based với SHIP thông minh)
+# 5.5. RULE SHIP & INTENT HỖ TRỢ
 # =========================
 
-# Các cụm từ liên quan ship nhưng KHÔNG phải đặt hàng (hỏi phí / freeship)
+# Các cụm từ liên quan ship nhưng KHÔNG phải đặt hàng (chủ yếu hỏi freeship / phí ship)
 SHIPPING_NEGATIVE = [
-    "miễn ship",
-    "mien ship",
-    "free ship",
-    "freeship",
-    "phí ship",
-    "phi ship",
-    "tiền ship",
-    "tien ship",
-    "mien sip",
-    "free sip",
+    "miễn ship", "mien ship", "free ship", "freeship",
+    "phí ship", "phi ship", "tiền ship", "tien ship",
+    "mien sip", "free sip"
 ]
 
-# Các pattern: ship + số lượng => coi là đặt hàng
+# Các pattern thể hiện rõ ý "ship X cái/bộ/đôi" => chốt đơn
 ORDER_SHIP_PATTERNS = [
     r"\bship\s*\d+",
     r"\bsip\s*\d+",
@@ -600,423 +580,23 @@ ORDER_SHIP_PATTERNS = [
 
 
 def is_order_ship(text: str) -> bool:
-    """
-    Trả về True nếu câu chứa 'ship/sip/síp' theo kiểu chốt đơn (ship 1 cái, ship 2 bộ...).
-    Không kích hoạt nếu câu đang hỏi về phí ship (miễn ship, free ship...).
-    """
-    text = text.lower()
+    """Trả về True nếu câu dạng 'ship 1 cái', 'sip 2 bo'... (chốt đơn theo ship).
+    Không kích hoạt nếu câu đang hỏi freeship / phí ship (miễn ship, free ship...)."""
+    if not text:
+        return False
+    lower = text.lower()
     for bad in SHIPPING_NEGATIVE:
-        if bad in text:
+        if bad in lower:
             return False
     for pattern in ORDER_SHIP_PATTERNS:
-        if re.search(pattern, text):
+        if re.search(pattern, lower):
             return True
     return False
 
 
-INTENT_KEYWORDS = {
-    # Đặt hàng — không dùng từ 'ship' đơn lẻ, chỉ các cụm từ thể hiện ý chốt đơn rõ ràng
-    "ORDER": [
-        "lấy luôn",
-        "lấy cho chị",
-        "lấy cho anh",
-        "mua luôn",
-        "mua nhe",
-        "mua nhé",
-        "ok chốt",
-        "ok em chốt",
-        "ok mua",
-        "ok ship",
-        "lên đơn",
-        "len don",
-        "tạo đơn",
-        "tao don",
-        "làm đơn",
-        "lam don",
-        "chốt đơn",
-        "chot don",
-        "em chốt",
-        "chot nhe",
-    ],
-    # Xem / gợi ý sản phẩm khác
-    "BROWSE": [
-        "mẫu khác",
-        "mau khac",
-        "xem mẫu khác",
-        "xem mau khac",
-        "sản phẩm khác",
-        "san pham khac",
-        "mã khác",
-        "ma khac",
-        "gửi mẫu khác",
-        "gui mau khac",
-        "còn mẫu nào",
-        "co mau nao",
-        "xem thêm",
-        "xem them",
-    ],
-    # Hỏi giá
-    "PRICE": ["giá", "gia", "bao nhiêu", "bao nhieu", "nhiêu tiền", "nhieu tien", "bn", "bao nhieu 1", "bao nhieu 1 bo"],
-    # Hỏi còn hàng / hết hàng
-    "STOCK": [
-        "còn hàng",
-        "con hang",
-        "hết hàng",
-        "het hang",
-        "còn không",
-        "con khong",
-        "còn ko",
-        "con ko",
-        "còn k",
-        "con k",
-        "có sẵn",
-        "co san",
-        "còn size",
-        "con size",
-    ],
-    # Hỏi màu / size / biến thể
-    "VARIANT": [
-        "size",
-        "sai",
-        "màu",
-        "mau",
-        "màu sắc",
-        "mau sac",
-        "kích cỡ",
-        "kich co",
-        "kích thước",
-        "kich thuoc",
-    ],
-    # Hỏi xem ảnh
-    "IMAGE": [
-        "ảnh",
-        "anh",
-        "hình",
-        "hinh",
-        "hình ảnh",
-        "hinh anh",
-        "xem mẫu",
-        "xem mau",
-        "xem hình",
-        "xem hinh",
-        "gửi ảnh",
-        "gui anh",
-    ],
-    # Hỏi video
-    "VIDEO": ["video", "clip", "tiktok", "reels", "xem video"],
-    # Hỏi về phí ship / freeship / chính sách vận chuyển
-    "SHIPPING": [
-        "miễn ship",
-        "mien ship",
-        "free ship",
-        "freeship",
-        "phí ship",
-        "phi ship",
-        "tiền ship",
-        "tien ship",
-        "ship bao nhiêu",
-        "ship bao nhieu",
-        "tính ship",
-        "tinh ship",
-        "ship được không",
-        "ship duoc khong",
-        "có ship không",
-        "co ship khong",
-        "ship tới đâu",
-        "ship tinh",
-        "ship nhanh",
-        "ship chậm",
-        "ship cham",
-    ],
-    # Hỏi thông tin chi tiết về tính năng / bảo hành / công suất / đồng kiểm / quà tặng...
-    "PRODUCT_INFO": [
-        "bảo hành",
-        "bao hanh",
-        "bh",
-        "bảo trì",
-        "bao tri",
-        "bảo dưỡng",
-        "bao duong",
-        "tính năng",
-        "tinh nang",
-        "chức năng",
-        "chuc nang",
-        "công dụng",
-        "cong dung",
-        "công suất",
-        "cong suat",
-        "hướng dẫn",
-        "huong dan",
-        "cách dùng",
-        "cach dung",
-        "cách sử dụng",
-        "huong dan su dung",
-        "hdsd",
-        "đồng kiểm",
-        "dong kiem",
-        "quà tặng",
-        "qua tang",
-        "tặng gì",
-        "tang gi",
-        "bền không",
-        "ben khong",
-        "tốt không",
-        "tot khong",
-        "chất lượng",
-        "chat luong",
-    ],
-    # Chào hỏi / câu chung chung
-    "SMALLTALK": [
-        "alo",
-        "hello",
-        "hi",
-        "shop ơi",
-        "shop oi",
-        "tư vấn",
-        "tu van",
-        "đang xem",
-        "dang xem",
-        "ờ",
-        "uhm",
-        "uk",
-        "ừ",
-    ],
-}
-
-
-def detect_intent(user_text: str) -> str:
-    """
-    Nhận diện intent của câu hỏi.
-    Trả về một trong các giá trị:
-    ORDER / BROWSE / PRICE / STOCK / VARIANT / IMAGE / VIDEO / SHIPPING / PRODUCT_INFO / SMALLTALK / NONE
-    """
-    if not user_text:
-        return "NONE"
-
-    text = user_text.lower()
-
-    # 1. Ưu tiên tuyệt đối: ship chốt đơn
-    if is_order_ship(text):
-        return "ORDER"
-
-    # 2. Order theo cụm từ mạnh
-    for kw in INTENT_KEYWORDS["ORDER"]:
-        if kw in text:
-            return "ORDER"
-
-    # 3. Các intent còn lại (theo thứ tự ưu tiên logic bán hàng)
-    for intent in [
-        "BROWSE",
-        "PRICE",
-        "STOCK",
-        "VARIANT",
-        "IMAGE",
-        "VIDEO",
-        "SHIPPING",
-        "PRODUCT_INFO",
-        "SMALLTALK",
-    ]:
-        for kw in INTENT_KEYWORDS[intent]:
-            if kw in text:
-                return intent
-
-    return "NONE"
-
-
-def handle_intent(intent: str, sender_id: str, user_message: str, current_ms=None, current_rows=None):
-    """
-    Điều hướng xử lý theo intent.
-    current_ms / current_rows: sản phẩm đang tư vấn (nếu có).
-    Nếu chưa có sản phẩm trong context, một số intent sẽ yêu cầu khách cung cấp mã sản phẩm trước.
-    """
-
-    # 1 — ĐẶT HÀNG
-    if intent == "ORDER":
-        if current_ms and current_rows is not None:
-            send_text(
-                sender_id,
-                "Dạ anh/chị muốn chốt đơn sản phẩm này ạ? "
-                "Anh/chị cho em xin *SĐT + Họ tên + Địa chỉ* để em tạo đơn nha ❤️",
-            )
-        else:
-            send_text(
-                sender_id,
-                "Dạ anh/chị cho em xin mã sản phẩm (dạng MSxxxxx) hoặc gửi lại link/bài đăng để em biết mình đặt mẫu nào ạ.",
-            )
-        return
-
-    # 2 — XEM SẢN PHẨM KHÁC
-    if intent == "BROWSE":
-        results = search_products_by_text(user_message, limit=5)
-        if results is None or len(results) == 0:
-            send_text(
-                sender_id,
-                "Dạ em chưa tìm được mẫu khác phù hợp. Anh/chị mô tả rõ hơn kiểu dáng, màu sắc hoặc gửi hình tham khảo giúp em ạ?",
-            )
-        else:
-            lines = ["Dạ đây là một số mẫu khác phù hợp với anh/chị:"]
-            if "Mã sản phẩm" in results.columns and "Tên sản phẩm" in results.columns:
-                for _, row in results.iterrows():
-                    lines.append(f"- [{row['Mã sản phẩm']}] {row['Tên sản phẩm']}")
-            lines.append(
-                "\nAnh/chị quan tâm mẫu nào, gửi giúp em mã (MSxxxxx) để em tư vấn chi tiết ạ.",
-            )
-            send_text(sender_id, "\n".join(lines))
-        return
-
-    # 3 — HỎI GIÁ
-    if intent == "PRICE":
-        if current_ms and current_rows is not None:
-            msg = answer_price(current_rows, current_ms)
-            send_text(sender_id, msg)
-        else:
-            send_text(
-                sender_id,
-                "Dạ anh/chị cho em xin mã sản phẩm hoặc tên sản phẩm cụ thể để em báo giá chính xác ạ.",
-            )
-        return
-
-    # 4 — HỎI CÒN HÀNG
-    if intent == "STOCK":
-        if current_ms and current_rows is not None:
-            msg = answer_stock(current_rows, current_ms)
-            send_text(sender_id, msg)
-        else:
-            send_text(
-                sender_id,
-                "Dạ anh/chị đang hỏi tồn kho của sản phẩm nào ạ? Cho em xin mã sản phẩm hoặc tên sản phẩm giúp em nhé.",
-            )
-        return
-
-    # 5 — HỎI MÀU / SIZE
-    if intent == "VARIANT":
-        if current_ms and current_rows is not None:
-            msg = answer_color_size(current_rows, current_ms)
-            send_text(sender_id, msg)
-        else:
-            send_text(
-                sender_id,
-                "Dạ anh/chị cho em xin mã sản phẩm hoặc gửi lại hình sản phẩm, em sẽ kiểm tra giúp mình màu/size còn hàng ạ.",
-            )
-        return
-
-    # 6 — HỎI ẢNH
-    if intent == "IMAGE":
-        if current_ms and current_rows is not None:
-            imgs = get_clean_images(current_rows)
-            if not imgs:
-                send_text(
-                    sender_id,
-                    f"Dữ liệu sản phẩm mã {current_ms} hiện chưa có link ảnh chi tiết trong hệ thống ạ.",
-                )
-            else:
-                send_text(
-                    sender_id,
-                    f"Em gửi anh/chị một số ảnh tham khảo của sản phẩm mã {current_ms} ạ:",
-                )
-                for img in imgs[:5]:
-                    send_image(sender_id, img, product_key=current_ms)
-                    time.sleep(0.3)
-        else:
-            send_text(
-                sender_id,
-                "Dạ anh/chị đang cần xem ảnh của sản phẩm nào ạ? Cho em xin mã sản phẩm hoặc mô tả sản phẩm giúp em nhé.",
-            )
-        return
-
-    # 7 — HỎI VIDEO
-    if intent == "VIDEO":
-        if current_ms and current_rows is not None:
-            vids = get_clean_videos(current_rows)
-            if not vids:
-                send_text(
-                    sender_id,
-                    "Hiện trong dữ liệu sản phẩm này chưa có video demo sẵn. "
-                    "Anh/chị có thể xem thêm hình ảnh hoặc em nhờ nhân viên gửi video sau cho mình ạ.",
-                )
-            else:
-                send_text(sender_id, "Em gửi anh/chị một vài video tham khảo của sản phẩm ạ:")
-                for vurl in vids[:3]:
-                    send_video(sender_id, vurl, product_key=current_ms)
-                    time.sleep(0.3)
-        else:
-            send_text(
-                sender_id,
-                "Dạ sản phẩm nào anh/chị cần xem video ạ? Cho em xin mã hoặc tên sản phẩm để em kiểm tra giúp ạ.",
-            )
-        return
-
-    # 8 — HỎI CHÍNH SÁCH SHIP / FREESHIP
-    if intent == "SHIPPING":
-        send_text(
-            sender_id,
-            "Dạ phí ship và thời gian giao hàng sẽ phụ thuộc vào địa chỉ nhận và từng đợt ưu đãi ạ. "
-            "Anh/chị cho em xin khu vực (tỉnh/huyện) và mã sản phẩm quan tâm, em nhờ nhân viên báo phí chính xác cho mình nhé ❤️",
-        )
-        return
-
-    # 9 — HỎI THÔNG TIN CHI TIẾT (tính năng, công suất, bảo hành...) – dùng GPT diễn đạt
-    if intent == "PRODUCT_INFO" and current_ms and current_rows is not None:
-        product_summary = build_product_summary(current_rows, current_ms)
-        reply = call_gpt_for_product(
-            user_message=user_message,
-            product_summary=product_summary,
-            conversation_hint="Khách đang hỏi thông tin chi tiết (tính năng, công suất, bảo hành, độ phù hợp...) của sản phẩm.",
-        )
-        send_text(sender_id, reply)
-        return
-
-    if intent == "PRODUCT_INFO" and (not current_ms or current_rows is None):
-        send_text(
-            sender_id,
-            "Dạ anh/chị cho em xin mã sản phẩm hoặc tên sản phẩm để em kiểm tra thông tin chi tiết và tư vấn kỹ hơn ạ.",
-        )
-        return
-
-    # 10 — SMALLTALK
-    if intent == "SMALLTALK":
-        send_text(
-            sender_id,
-            "Dạ em đây ạ. Anh/chị cho em xin mã sản phẩm hoặc mô tả giúp em biết mình đang quan tâm mẫu nào để em tư vấn chi tiết hơn ạ.",
-        )
-        return
-
-    # 11 — NONE / không nhận diện được
-    send_text(
-        sender_id,
-        "Dạ anh/chị cho em xin mã sản phẩm (MSxxxxx) hoặc mô tả rõ hơn sản phẩm đang xem để em hỗ trợ mình tốt hơn ạ.",
-    )
-    return
-
-
 # =========================
-# 7. WEBHOOK FACEBOOK
+# 6. WEBHOOK FACEBOOK
 # =========================
-
-def is_echo_event(event):
-    """Kiểm tra có phải echo message do page gửi chính nó không."""
-    message = event.get("message")
-    if not message:
-        return False
-    return bool(message.get("is_echo"))
-
-
-def get_mid(event):
-    """Lấy MID để chống xử lý trùng."""
-    message = event.get("message") or {}
-    mid = message.get("mid")
-    return mid or ""
-
-
-def is_processed_mid(mid):
-    if not mid:
-        return False
-    if mid in PROCESSED_MIDS:
-        return True
-    PROCESSED_MIDS.add(mid)
-    return False
-
-
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
     global BOT_ENABLED
@@ -1031,60 +611,46 @@ def webhook():
             return challenge, 200
         return "Verification failed", 403
 
+    # POST: xử lý message
     data = request.get_json()
-    print("[Webhook]", data)
-
-    if not data:
-        return "no data", 200
+    print("[Webhook] Received:", data)
 
     if "entry" not in data:
-        return "no entry", 200
+        return "ok", 200
 
     for entry in data["entry"]:
-        messaging = entry.get("messaging", [])
-        for event in messaging:
-            if "message" not in event:
-                continue
+        messaging_events = entry.get("messaging", [])
+        for event in messaging_events:
+            sender_id = event["sender"]["id"]
 
-            # 1. Bỏ qua echo
+            # 1. Bỏ qua echo của chính page
             if is_echo_event(event):
-                print("[SKIP] echo")
+                print("[Echo] skip")
                 continue
 
-            # 2. Chống xử lý trùng mid
-            mid = get_mid(event)
-            if is_processed_mid(mid):
-                print("[SKIP] duplicate mid:", mid)
-                continue
+            # 2. Lệnh bật/tắt bot (admin gõ)
+            if "message" in event and "text" in event["message"]:
+                text = event["message"]["text"].strip()
+            else:
+                text = ""
 
-            sender_id = event.get("sender", {}).get("id")
-            if not sender_id:
-                continue
-
-            message = event["message"]
-            text = message.get("text", "")
             t_norm = normalize_text(text)
 
-            # 3. Lệnh bật/tắt bot (cho admin / test)
-            if t_norm in ["tắt bot", "tat bot", "off bot", "stop bot"]:
+            # Admin command
+            if t_norm == "tắt bot" or t_norm == "tat bot":
                 BOT_ENABLED = False
-                fb_send(
-                    {
-                        "recipient": {"id": sender_id},
-                        "message": {"text": "⚠️ Bot đã tắt. Em sẽ không tự động trả lời nữa."},
-                    }
-                )
+                fb_send({
+                    "recipient": {"id": sender_id},
+                    "message": {"text": "❌ Bot đã tạm dừng trả lời tự động."}
+                })
                 print("[BOT] turned OFF by", sender_id)
                 continue
-
-            if t_norm in ["bật bot", "bat bot", "start bot", "on bot", "bat lai"]:
+            if t_norm == "bật bot" or t_norm == "bat bot":
                 BOT_ENABLED = True
-                fb_send(
-                    {
-                        "recipient": {"id": sender_id},
-                        "message": {"text": "✅ Bot đã bật lại, sẵn sàng hỗ trợ khách."},
-                    }
-                )
+                fb_send({
+                    "recipient": {"id": sender_id},
+                    "message": {"text": "✅ Bot đã bật lại, sẵn sàng hỗ trợ khách."}
+                })
                 print("[BOT] turned ON by", sender_id)
                 continue
 
@@ -1097,47 +663,145 @@ def webhook():
             load_sheet()
 
             if not text:
-                send_text(sender_id, "Anh/chị mô tả giúp shop đang tìm mã sản phẩm nào ạ?")
+                send_text(sender_id, "Dạ em chưa nhận được nội dung, anh/chị nhắn lại giúp em ạ.")
                 continue
 
-            # Lấy context nếu có
-            ctx = USER_CONTEXT.get(sender_id)
-            current_ms = None
-            current_rows = None
-            if ctx:
-                ms = ctx.get("current_ms")
-                if ms:
-                    rows = find_product_by_code(ms)
-                    if rows is not None and not rows.empty:
-                        current_ms = ms
-                        current_rows = rows
+            # Lấy context hiện tại (nếu có)
+            ctx = get_user_context(sender_id)
+            current_ms = ctx.get("current_ms") if ctx else None
+            current_rows = find_product_by_code(current_ms) if current_ms else None
 
-            # Thử xem khách có gửi mã sản phẩm mới không
+            # Kiểm tra xem khách có gửi mã mới không
             ms_code_in_text = extract_ms_from_text(text)
+            # Nếu khách gõ sai / thiếu (vd: "ma 123", "mã sp 45", "123") thì thử đoán theo dữ liệu
+            if not ms_code_in_text:
+                ms_code_in_text = guess_ms_from_text(text)
+
             if ms_code_in_text:
                 rows = find_product_by_code(ms_code_in_text)
-                if rows is None or rows.empty:
+                if rows is None or rows is False:
                     send_text(
                         sender_id,
-                        f"Em không tìm thấy sản phẩm với mã {ms_code_in_text} trong dữ liệu. "
-                        "Anh/chị kiểm tra lại mã hoặc gửi hình/minh mô tả sản phẩm giúp em nhé.",
+                        f"Shop không tìm thấy sản phẩm với mã {ms_code_in_text}. Anh/chị kiểm tra lại giúp em nhé."
                     )
-                    continue
-
-                # Cập nhật context, gửi intro + ảnh
-                consult_product_first_time(sender_id, rows, ms_code_in_text)
+                else:
+                    consult_product_first_time(sender_id, rows, ms_code_in_text, user_message=text)
                 continue
 
-            # Nếu có context sản phẩm hiện tại -> dùng Intent Engine để trả lời theo đúng ý khách
+            # Nếu có context sản phẩm hiện tại -> ưu tiên trả lời theo cột dữ liệu trước, rồi mới gọi GPT
             if current_ms and current_rows is not None:
-                intent = detect_intent(text)
-                handle_intent(
-                    intent=intent,
-                    sender_id=sender_id,
-                    user_message=text,
-                    current_ms=current_ms,
-                    current_rows=current_rows,
-                )
+                lower = t_norm
+                handled = False
+
+                # Ưu tiên: nếu khách dùng câu dạng "ship 1 cái", "sip 2 bo"… thì hiểu là đang chốt đơn
+                if is_order_ship(text):
+                    send_text(
+                        sender_id,
+                        "Dạ anh/chị muốn chốt đơn sản phẩm này ạ? "
+                        "Anh/chị cho em xin SĐT, họ tên và địa chỉ nhận hàng để em tạo đơn nhé ❤️"
+                    )
+                    handled = True
+
+                # 1. Còn hàng / hết hàng?
+                stock_keywords = [
+                    "còn hàng", "con hang", "hết hàng", "het hang",
+                    "còn không", "con khong", "còn ko", "con ko", "còn k", "con k",
+                    "có sẵn", "co san", "còn size", "con size"
+                ]
+                if not handled and any(k in lower for k in stock_keywords):
+                    msg = answer_stock(current_rows, current_ms)
+                    send_text(sender_id, msg)
+                    handled = True
+
+                # 2. Giá bao nhiêu?
+                price_keywords = [
+                    "giá", "gia", "bao nhiêu", "bao nhieu",
+                    "nhiêu tiền", "nhieu tien", "bn", "bao nhieu 1", "bao nhieu 1 bo"
+                ]
+                if not handled and any(k in lower for k in price_keywords):
+                    msg = answer_price(current_rows, current_ms)
+                    send_text(sender_id, msg)
+                    handled = True
+
+                # 3. Ảnh sản phẩm
+                image_keywords = [
+                    "ảnh", "anh", "hình", "hinh", "hình ảnh", "hinh anh",
+                    "xem mẫu", "xem mau", "xem hình", "xem hinh", "gửi ảnh", "gui anh"
+                ]
+                if not handled and any(k in lower for k in image_keywords):
+                    imgs = get_clean_images(current_rows)
+                    if not imgs:
+                        send_text(
+                            sender_id,
+                            f"Dữ liệu sản phẩm mã {current_ms} hiện chưa có link ảnh để gửi trực tiếp. "
+                            "Anh/chị giúp em chụp lại màn hình hoặc mô tả thêm để em hỗ trợ kỹ hơn ạ."
+                        )
+                    else:
+                        send_text(
+                            sender_id,
+                            f"Em gửi anh/chị một số ảnh của sản phẩm mã {current_ms} để mình xem thêm ạ:"
+                        )
+                        for img in imgs[:5]:
+                            send_image(sender_id, img, product_key=current_ms)
+                            time.sleep(0.3)
+                    handled = True
+
+                # 4. Video sản phẩm
+                video_keywords = ["video", "clip", "tiktok", "reels"]
+                if not handled and any(k in lower for k in video_keywords):
+                    vids = get_videos(current_rows)
+                    if not vids:
+                        send_text(
+                            sender_id,
+                            f"Mã {current_ms} hiện chưa có video sẵn. "
+                            "Anh/chị có thể xem thêm ảnh hoặc em gửi mô tả chi tiết cho mình ạ."
+                        )
+                    else:
+                        send_text(
+                            sender_id,
+                            f"Em gửi anh/chị video tham khảo thêm về sản phẩm mã {current_ms} ạ:"
+                        )
+                        for vurl in vids[:2]:
+                            send_video(sender_id, vurl, product_key=current_ms)
+                            time.sleep(0.3)
+                    handled = True
+
+                # 5. Hỏi về phí ship / freeship / thời gian giao hàng
+                shipping_keywords = [
+                    "miễn ship", "mien ship", "free ship", "freeship",
+                    "phí ship", "phi ship", "tiền ship", "tien ship",
+                    "ship bao lâu", "ship bao nhieu ngay", "ship mấy ngày", "ship may ngay",
+                    "bao lâu nhận", "bao lau nhan", "thời gian vận chuyển", "thoi gian van chuyen",
+                    "giao hàng mấy ngày", "giao hang may ngay", "ship nhanh không", "ship nhanh khong"
+                ]
+                if not handled and any(k in lower for k in shipping_keywords):
+                    send_text(
+                        sender_id,
+                        "Dạ phí ship và thời gian giao hàng sẽ tuỳ khu vực và đơn vị vận chuyển ạ. "
+                        "Anh/chị cho em xin khu vực nhận hàng (tỉnh/huyện) và nếu được thì cho em luôn số lượng để em nhờ nhân viên báo phí và thời gian dự kiến thật chính xác cho mình nhé ❤️"
+                    )
+                    handled = True
+
+                # 6. Màu & size
+                color_size_keywords = [
+                    "màu", "mau", "màu sắc", "mau sac",
+                    "size", "sai", "kích cỡ", "kich co", "kích thước", "kich thuoc"
+                ]
+                if not handled and any(k in lower for k in color_size_keywords):
+                    msg = answer_color_size(current_rows, current_ms)
+                    send_text(sender_id, msg)
+                    handled = True
+
+                # Nếu các case trên không trúng -> gọi GPT tư vấn theo mô tả / chất liệu / độ phù hợp...
+                if not handled:
+                    product_summary = build_product_summary(current_rows, current_ms)
+                    reply = call_gpt_for_product(
+                        user_message=text,
+                        product_summary=product_summary,
+                        conversation_hint=f"Hiện đang tư vấn sản phẩm mã {current_ms} cho khách."
+                    )
+                    send_text(sender_id, reply)
+
                 continue
 
             # Nếu chưa có context sản phẩm nào -> thử search theo nội dung khách hỏi
@@ -1153,14 +817,16 @@ def webhook():
                     ms = str(row["Mã sản phẩm"])
                     name = str(row["Tên sản phẩm"])
                     lines.append(f"- [{ms}] {name}")
-                lines.append("\nAnh/chị quan tâm mã nào, gửi giúp em mã (dạng MSxxxxx), em tư vấn chi tiết ạ.")
+                lines.append(
+                    "\nAnh/chị quan tâm mã nào, gửi giúp em mã (dạng MSxxxxx), em tư vấn chi tiết ạ."
+                )
                 send_text(sender_id, "\n".join(lines))
             else:
                 send_text(
                     sender_id,
-                    "Dạ em chưa tìm thấy sản phẩm phù hợp trong dữ liệu theo mô tả vừa rồi. "
-                    "Anh/chị mô tả rõ hơn (mã, tên, kiểu dáng, màu sắc, hình ảnh...) "
-                    "anh/chị đang xem giúp em nhé.",
+                    "Hiện tại em chưa xác định được sản phẩm anh/chị cần. "
+                    "Anh/chị có thể gửi *mã sản phẩm* (MSxxxxx) hoặc mô tả rõ hơn tên sản phẩm/bài viết "
+                    "anh/chị đang xem giúp em nhé."
                 )
 
     return "ok", 200
