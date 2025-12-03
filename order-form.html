@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <title>Đặt hàng</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="/static/order.css">
+    <script src="/static/order-form.js" defer></script>
+</head>
+<body>
+<div class="form-container">
+
+    <div id="header">
+        <img id="productImage" src="" alt="Ảnh sản phẩm">
+        <h2 id="fanpageName">Fanpage</h2>
+    </div>
+
+    <h3 class="section-title">Thông tin khách hàng</h3>
+
+    <label>Họ và tên</label>
+    <input type="text" id="customerName" placeholder="Nhập họ tên">
+
+    <label>Số điện thoại</label>
+    <input type="tel" id="phone" placeholder="0123456789">
+
+    <label>Số nhà / thôn / xóm</label>
+    <input type="text" id="home" placeholder="Ví dụ: Số 12 – Xóm 3">
+
+    <label>Tỉnh / Thành phố</label>
+    <select id="province"></select>
+
+    <label>Quận / Huyện</label>
+    <select id="district"></select>
+
+    <label>Xã / Phường</label>
+    <select id="ward"></select>
+
+    <h3 class="section-title">Thông tin sản phẩm</h3>
+
+    <label>Sản phẩm</label>
+    <input type="text" id="productName" disabled>
+
+    <label>Size</label>
+    <select id="size"></select>
+
+    <label>Màu sắc</label>
+    <select id="color"></select>
+
+    <label>Số lượng</label>
+    <select id="quantity">
+        <option>1</option><option>2</option><option>3</option>
+        <option>4</option><option>5</option>
+    </select>
+
+    <label>Đơn giá</label>
+    <input type="text" id="price" disabled>
+
+    <label>Thành tiền</label>
+    <input type="text" id="total" disabled>
+
+    <label>Ghi chú</label>
+    <textarea id="note" placeholder="Ghi chú thêm..."></textarea>
+
+    <button id="orderBtn">ĐẶT HÀNG NGAY</button>
+
+</div>
+</body>
+</html>
