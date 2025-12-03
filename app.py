@@ -150,6 +150,33 @@ def ignore_event(ev):
         return True
     return False
 
+
+# --------------------------
+# GET PAGE NAME (CACHE)
+# --------------------------
+PAGE_NAME = None
+
+def get_page_name():
+    """Lấy tên Fanpage bằng Graph API và cache."""
+    global PAGE_NAME
+    if PAGE_NAME:
+        return PAGE_NAME
+
+    try:
+        resp = requests.get(
+            "https://graph.facebook.com/v18.0/me",
+            params={"access_token": PAGE_ACCESS_TOKEN, "fields": "name"},
+            timeout=10
+        )
+        data = resp.json()
+        PAGE_NAME = data.get("name", "Shop")
+        print("[get_page_name] Fanpage:", PAGE_NAME)
+    except Exception as e:
+        print("[get_page_name] ERROR", e)
+        PAGE_NAME = "Shop"
+
+    return PAGE_NAME
+
 # --------------------------
 # PRODUCT EXTRACTION
 # --------------------------
@@ -448,19 +475,20 @@ def api_get_product():
     sizes = rows["size (Thuộc tính)"].dropna().unique().tolist()
     colors = rows["màu (Thuộc tính)"].dropna().unique().tolist()
 
+    fanpage_name = get_page_name()
+
     return {
         "name": row0["Tên sản phẩm"],
         "price": float(row0["Giá bán"]),
         "sizes": sizes,
         "colors": colors,
         "image": image,
-        "fanpageName": "Tên Fanpage"   # tự lấy theo yêu cầu của bạn
+        "fanpageName": fanpage_name
     }
 
 # --------------------------
 # API ORDER (Form)
 # --------------------------
-@app.route("/api/order", methods=["POST"])
 @app.route("/api/order", methods=["POST"])
 def api_order():
     data = request.json or {}
