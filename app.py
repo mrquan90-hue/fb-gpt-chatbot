@@ -9,7 +9,7 @@ import time
 import io
 import requests
 import pandas as pd
-from flask import Flask, request, send_from_directory
+from flask import Flask, request, send_from_directory, redirect
 from openai import OpenAI
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
@@ -20,7 +20,7 @@ app = Flask(__name__, static_folder="static", static_url_path="/static")
 PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN", "")
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "verify_token_123")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-DOMAIN = os.getenv("DOMAIN", "yourdomain.onrender.com")  # sửa lại domain khi deploy
+DOMAIN = os.getenv("DOMAIN", "fb-gpt-chatbot.onrender.com")  # domain mặc định khi deploy Render
 
 BOT_ENABLED = True
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
@@ -75,6 +75,20 @@ def send_video(uid, url):
         }
     })
 
+# --------------------------
+# LINK ĐẶT HÀNG (KHÔNG DÙNG WEBVIEW)
+# --------------------------
+def send_order_link(uid, ms):
+    """Gửi link đặt hàng dạng rút gọn, mở bằng trình duyệt thường."""
+    # Link rút gọn dạng /o/<MSxxxxxx>?uid=<FACEBOOK_ID>
+    short_url = f"https://{DOMAIN}/o/{ms}?uid={uid}"
+    text = (
+        "🛒💥 ĐẶT HÀNG NHANH (1 chạm):\n"
+        f"👉 {short_url}\n\n"
+        "Anh/chị bấm vào link, điền thông tin nhận hàng, "
+        "shop sẽ gọi xác nhận đơn trong ít phút ạ ❤️"
+    )
+    send_text(uid, text)
 
 # --------------------------
 # GOOGLE SHEET LOADER
@@ -271,31 +285,6 @@ def intro_product(uid, rows, ms, msg=""):
 # --------------------------
 # OPEN WEBVIEW "ĐẶT HÀNG"
 # --------------------------
-def send_order_form(uid, ms):
-    url = f"https://{DOMAIN}/order-form?uid={uid}&ms={ms}"
-
-    fb_send({
-        "recipient": {"id": uid},
-        "message": {
-            "attachment": {
-                "type": "template",
-                "payload": {
-                    "template_type": "button",
-                    "text": "Dạ để em tạo đơn nhanh cho mình ạ ❤️",
-                    "buttons": [
-                        {
-                            "type": "web_url",
-                            "url": url,
-                            "title": "ĐẶT HÀNG NGAY",
-                            "webview_height_ratio": "tall",
-                            "messenger_extensions": True
-                        }
-                    ]
-                }
-            }
-        }
-    })
-
 # --------------------------
 # WEBHOOK CORE
 # --------------------------
@@ -363,7 +352,7 @@ def webhook():
 
             # 2. ĐẶT HÀNG → MỞ FORM
             if current_ms and is_order_ship(text):
-                send_order_form(sender, current_ms)
+                send_order_link(sender, current_ms)
                 continue
 
             # 3. PHẢN HỒI THEO SẢN PHẨM
@@ -422,6 +411,15 @@ def webhook():
 # --------------------------
 # WEBVIEW FORM ENDPOINT
 # --------------------------
+
+# --------------------------
+# SHORT LINK /o/<MSxxxxxx> -> REDIRECT SANG /order-form
+# --------------------------
+@app.route("/o/<ms>")
+def short_order(ms):
+    uid = request.args.get("uid", "")
+    # Redirect sang form đặt hàng chính, giữ lại uid & ms
+    return redirect(f"/order-form?uid={uid}&ms={ms}")
 @app.route("/order-form")
 def order_form():
     return send_from_directory("static", "order-form.html")
@@ -463,11 +461,31 @@ def api_get_product():
 # API ORDER (Form)
 # --------------------------
 @app.route("/api/order", methods=["POST"])
+@app.route("/api/order", methods=["POST"])
 def api_order():
-    data = request.json
+    data = request.json or {}
     print("ORDER RECEIVED:", data)
-    return {"status": "ok"}
 
+    uid = data.get("uid") or data.get("user_id")
+    ms_code = data.get("ms") or data.get("product_code")
+
+    if uid:
+        summary = (
+            "✅ Shop đã nhận được đơn của anh/chị ạ:\n"
+            f"- Sản phẩm: {data.get('productName', '')} ({ms_code})\n"
+            f"- Màu: {data.get('color', '')}\n"
+            f"- Size: {data.get('size', '')}\n"
+            f"- Số lượng: {data.get('quantity', '')}\n"
+            f"- Thành tiền: {data.get('total', '')}\n"
+            f"- Khách: {data.get('customerName', '')}\n"
+            f"- SĐT: {data.get('phone', '')}\n"
+            f"- Địa chỉ: {data.get('home', '')}, "
+            f"{data.get('ward', '')}, {data.get('district', '')}, {data.get('province', '')}\n\n"
+            "Trong ít phút nữa bên em sẽ gọi xác nhận, anh/chị để ý điện thoại giúp em nha ❤️"
+        )
+        send_text(uid, summary)
+
+    return {"status": "ok"}
 # --------------------------
 # ROOT
 # --------------------------
