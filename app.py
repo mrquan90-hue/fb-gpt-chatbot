@@ -1,7 +1,3 @@
-# =======================
-#   APP.PY – BẢN PRO COMMENT + FIX NHẦM SẢN PHẨM
-# =======================
-
 import os
 import re
 import time
@@ -115,6 +111,9 @@ def detect_comment_intent(message: str) -> str:
     return "other"
 
 
+# --------------------------
+# FB SEND
+# --------------------------
 def fb_send(payload):
     if not PAGE_ACCESS_TOKEN:
         print("[fb_send] MISSING PAGE_ACCESS_TOKEN")
@@ -134,6 +133,7 @@ def fb_send(payload):
 
 
 def send_text(uid, text):
+    print(f"[SEND_TEXT] -> {uid}: {text[:80]!r}")
     fb_send({"recipient": {"id": uid}, "message": {"text": text}})
 
 
@@ -254,7 +254,7 @@ def ignore_event(ev):
     if "read" in ev:
         print("[IGNORE] read")
         return True
-    # KHÔNG ignore echo ở đây nữa
+    # KHÔNG bỏ qua echo ở đây – echo xử lý riêng trong webhook
     return False
 
 
@@ -300,22 +300,36 @@ def extract_ms_from_hashtag(text: str):
 
 
 def extract_ms(text: str):
+    """
+    Bắt các dạng:
+    - MS000123
+    - MS 123
+    - [MS000123]
+    """
     if not text:
         return None
     raw = text.upper()
+
+    # Dạng MS 123
     m = re.search(r"MS\s*(\d+)", raw)
     if m:
         return "MS" + m.group(1).zfill(6)
 
+    # Dạng [MS000123]
     m2 = re.search(r"\[(MS\d+)\]", raw)
     if m2:
-        return m2.group(1)
+        code = m2.group(1)
+        return "MS" + re.sub(r"\D", "", code[2:]).zfill(6)
     return None
 
 
 def guess_ms(text: str):
+    """
+    Đoán mã từ các dạng 'Mã 123', 'M SP 123', 'MÃ SP 123'...
+    (coi là 'nhập mã' tương đối rõ ràng)
+    """
     global df
-    if df is None:
+    if df is None or not text:
         return None
     raw = text.upper()
 
@@ -344,8 +358,7 @@ STOPWORDS = {
 def guess_ms_by_content(text: str):
     """
     Đoán mã sản phẩm theo nội dung mô tả.
-    ĐÃ SIẾT CHẶT: bỏ stopwords + yêu cầu điểm >= 2
-    để tránh cmt kiểu 'cần tư vấn' cũng map bừa vào 1 sản phẩm.
+    Dùng CHỈ KHI chưa có current_ms.
     """
     global df
     if df is None or not text:
@@ -374,7 +387,6 @@ def guess_ms_by_content(text: str):
             best_score = score
             best_ms = ms_code
 
-    # yêu cầu ít nhất 2 từ trùng mới chấp nhận
     if best_score < 2:
         return None
     return best_ms
@@ -552,7 +564,7 @@ def webhook():
     data = request.get_json()
 
     for entry in data.get("entry", []):
-        # 0. Xử lý comment
+        # 0. Xử lý comment (feed)
         for change in entry.get("changes", []):
             handle_change(change)
 
@@ -561,12 +573,12 @@ def webhook():
             sender = event["sender"]["id"]
             message = event.get("message")
 
-            # Trường hợp echo: tin nhắn do page/Fchat gửi
+            # ECHO (tin do Page/Fchat gửi)
             if message and message.get("is_echo"):
-                text = message.get("text", "")
+                text = message.get("text", "") or ""
                 print(f"[ECHO] from page/fchat -> {sender}: {text}")
                 handle_page_outgoing_message(sender, text)
-                # KHÔNG trả lời lại echo
+                # KHÔNG trả lời echo
                 continue
 
             # Bỏ qua delivery/read...
@@ -587,6 +599,8 @@ def webhook():
 
             load_sheet()
 
+            print(f"[MSG] from {sender}: {text!r}")
+
             if lower in ["tắt bot", "tat bot"]:
                 BOT_ENABLED = False
                 send_text(sender, "❌ Bot đã tắt.")
@@ -601,18 +615,33 @@ def webhook():
 
             ctx = get_ctx(sender)
             current_ms = ctx.get("current_ms")
+            print(f"[CTX] current_ms={current_ms}")
 
-            # 1. Thử lấy mã sản phẩm từ tin nhắn khách
-            ms = (extract_ms_from_hashtag(text) or extract_ms(text) or guess_ms(text) or guess_ms_by_content(text))
-            if ms:
-                rows = find_product(ms)
+            # 1. THỬ LẤY MÃ RÕ RÀNG TỪ TIN NHẮN KHÁCH
+            explicit_ms = (
+                extract_ms_from_hashtag(text)
+                or extract_ms(text)
+                or guess_ms(text)
+            )
+
+            if explicit_ms:
+                rows = find_product(explicit_ms)
                 if rows is None:
-                    send_text(sender, f"Không tìm thấy sản phẩm {ms} ạ.")
+                    send_text(sender, f"Không tìm thấy sản phẩm {explicit_ms} ạ.")
                 else:
-                    intro_product(sender, rows, ms, msg=text)
+                    intro_product(sender, rows, explicit_ms, msg=text)
                 continue
 
-            # 2. ĐẶT HÀNG
+            # 1b. NẾU CHƯA CÓ current_ms THÌ MỚI THỬ ĐOÁN THEO NỘI DUNG
+            if not current_ms:
+                implied_ms = guess_ms_by_content(text)
+                if implied_ms:
+                    rows = find_product(implied_ms)
+                    if rows is not None:
+                        intro_product(sender, rows, implied_ms, msg=text)
+                        continue
+
+            # 2. ĐẶT HÀNG (SHIP)
             if current_ms and is_order_ship(text):
                 send_order_link(sender, current_ms)
                 continue
@@ -642,7 +671,10 @@ def webhook():
                     continue
 
                 if any(x in lower for x in ["video", "clip", "reels"]):
-                    vids = rows["Videos"].astype(str).tolist()
+                    if "Videos" in rows.columns:
+                        vids = rows["Videos"].astype(str).tolist()
+                    else:
+                        vids = []
                     ok = False
                     for v in vids:
                         parts = re.split(r"[\s,;]+", v)
@@ -707,8 +739,8 @@ def api_get_product():
             image = u
             break
 
-    sizes = rows["size (Thuộc tính)"].dropna().unique().tolist()
-    colors = rows["màu (Thuộc tính)"].dropna().unique().tolist()
+    sizes = rows["size (Thuộc tính)"].dropna().unique().tolist() if "size (Thuộc tính)" in rows.columns else []
+    colors = rows["màu (Thuộc tính)"].dropna().unique().tolist() if "màu (Thuộc tính)" in rows.columns else []
 
     fanpage_name = get_page_name()
 
