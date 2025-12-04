@@ -310,9 +310,6 @@ def intro_product(uid, rows, ms, msg=""):
         time.sleep(0.3)
 
 # --------------------------
-# OPEN WEBVIEW "ĐẶT HÀNG"
-# --------------------------
-# --------------------------
 # WEBHOOK CORE
 # --------------------------
 @app.route("/webhook", methods=["GET", "POST"])
@@ -436,10 +433,6 @@ def webhook():
     return "ok", 200
 
 # --------------------------
-# WEBVIEW FORM ENDPOINT
-# --------------------------
-
-# --------------------------
 # SHORT LINK /o/<MSxxxxxx> -> REDIRECT SANG /order-form
 # --------------------------
 @app.route("/o/<ms>")
@@ -447,6 +440,7 @@ def short_order(ms):
     uid = request.args.get("uid", "")
     # Redirect sang form đặt hàng chính, giữ lại uid & ms
     return redirect(f"/order-form?uid={uid}&ms={ms}")
+
 @app.route("/order-form")
 def order_form():
     return send_from_directory("static", "order-form.html")
@@ -483,7 +477,8 @@ def api_get_product():
         "sizes": sizes,
         "colors": colors,
         "image": image,
-        "fanpageName": fanpage_name
+        "fanpageName": fanpage_name,
+        "page_name": fanpage_name  # thêm key này để JS mới đọc được
     }
 
 # --------------------------
@@ -514,6 +509,7 @@ def api_order():
         send_text(uid, summary)
 
     return {"status": "ok"}
+
 # --------------------------
 # ROOT
 # --------------------------
