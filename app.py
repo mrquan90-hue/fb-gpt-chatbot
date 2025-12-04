@@ -1,12 +1,14 @@
 # =======================
-#   APP.PY – PHIÊN BẢN FULL (ĐÃ CHÈN LỜI CHÀO MỞ ĐẦU)
-#   KHÔNG PHÁ VỠ LOGIC KHÁC
+#   APP.PY – PHIÊN BẢN PRO
+#   + WEBVIEW FORM + CHỐNG LẶP + STATE ĐẶT HÀNG + HYBRID INTENT
+#   + AUTO-REPLY COMMENT (XOAY VÒNG NỘI DUNG)
 # =======================
 
 import os
 import re
 import time
 import io
+import random  # thêm để xoay vòng nội dung trả lời comment
 import requests
 import pandas as pd
 from flask import Flask, request, send_from_directory, redirect
@@ -26,7 +28,50 @@ BOT_ENABLED = True
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 FB_API_URL = "https://graph.facebook.com/v18.0/me/messages"
+FB_GRAPH_URL = "https://graph.facebook.com/v18.0"
 
+# --------------------------
+# AUTO-REPLY COMMENT – TEMPLATE DÀI, XOAY VÒNG
+# --------------------------
+COMMENT_REPLY_TEMPLATES = [
+    "{name} ơi, shop đã gửi đầy đủ giá + ảnh thật mẫu anh/chị quan tâm vào inbox rồi ạ. Anh/chị mở tin nhắn giúp em để em tư vấn chi tiết hơn nha ❤️",
+    "{name} ơi, em vừa inbox thông tin chi tiết về mẫu anh/chị đang hỏi, kèm giá và ưu đãi hôm nay. Anh/chị check tin nhắn giúp em với ạ ❤️",
+    "{name} ơi, shop đã nhắn riêng báo giá, hình thật và tư vấn size cho anh/chị rồi đó ạ. Anh/chị xem tin nhắn để em hỗ trợ đặt đơn luôn nha ❤️",
+    "{name} ơi, em gửi qua inbox toàn bộ thông tin mẫu, giá và các màu còn sẵn cho anh/chị rồi ạ. Anh/chị mở Messenger giúp em để mình trao đổi nhanh hơn nha ❤️",
+    "{name} ơi, shop đã gửi giá + ảnh thật sản phẩm vào inbox rồi ạ. Anh/chị xem giúp em, nếu cần em tư vấn thêm về size/màu luôn cho mình nha ❤️",
+    "{name} ơi, em vừa nhắn riêng cho anh/chị bảng giá và hình thật sản phẩm. Anh/chị check tin nhắn để em hỗ trợ chốt đơn nhanh trong hôm nay nha ❤️",
+    "{name} ơi, thông tin chi tiết về mẫu anh/chị hỏi (giá, màu, size) em đã gửi vào inbox rồi ạ. Anh/chị xem giúp em, có gì em hỗ trợ ngay nha ❤️",
+    "{name} ơi, shop đã inbox đầy đủ thông tin và ưu đãi hiện tại cho anh/chị. Anh/chị mở Messenger xem giúp em để em tư vấn kỹ hơn nha ❤️",
+    "{name} ơi, em gửi tin nhắn riêng kèm hình thật và mô tả chi tiết sản phẩm rồi ạ. Anh/chị xem tin nhắn giúp em nhé, em luôn sẵn sàng hỗ trợ ạ ❤️",
+    "{name} ơi, giá và hình ảnh chi tiết em đã gửi vào inbox cho anh/chị rồi ạ. Anh/chị kiểm tra tin nhắn để mình chốt đơn với ưu đãi tốt nhất hôm nay nha ❤️"
+]
+
+LAST_COMMENT_TEMPLATE_IDX = None
+
+
+def get_comment_reply_text(name: str = None) -> str:
+    """
+    Chọn ngẫu nhiên 1 câu trả lời comment, hạn chế trùng lặp liên tiếp.
+    name: dùng để @Tên khách hoặc xưng hô cá nhân hóa.
+    """
+    global LAST_COMMENT_TEMPLATE_IDX
+    if not COMMENT_REPLY_TEMPLATES:
+        return "Shop đã inbox anh/chị đầy đủ thông tin rồi ạ, anh/chị check giúp em nhé ❤️"
+
+    n = len(COMMENT_REPLY_TEMPLATES)
+    idx = random.randint(0, n - 1)
+    if LAST_COMMENT_TEMPLATE_IDX is not None and n > 1 and idx == LAST_COMMENT_TEMPLATE_IDX:
+        idx = (idx + 1) % n
+    LAST_COMMENT_TEMPLATE_IDX = idx
+
+    template = COMMENT_REPLY_TEMPLATES[idx]
+    if not name:
+        name = "anh/chị"
+    return template.format(name=name)
+
+
+# --------------------------
+# Facebook Send
 # --------------------------
 def fb_send(payload):
     if not PAGE_ACCESS_TOKEN:
@@ -73,8 +118,38 @@ def send_video(uid, url):
         }
     })
 
+
+# --------------------------
+# REPLY COMMENT TRÊN BÀI VIẾT
+# --------------------------
+def fb_reply_comment(comment_id, text):
+    """
+    Trả lời comment ngay trên bài viết.
+    """
+    if not PAGE_ACCESS_TOKEN:
+        print("[fb_reply_comment] MISSING PAGE_ACCESS_TOKEN")
+        print(comment_id, text)
+        return False
+
+    url = f"{FB_GRAPH_URL}/{comment_id}/comments"
+    params = {"access_token": PAGE_ACCESS_TOKEN}
+    payload = {"message": text}
+    try:
+        r = requests.post(url, params=params, json=payload, timeout=10)
+        if r.status_code != 200:
+            print("[fb_reply_comment] ERROR:", r.status_code, r.text)
+            return False
+        return True
+    except Exception as e:
+        print("[fb_reply_comment] EXCEPTION:", e)
+        return False
+
+
+# --------------------------
+# LINK ĐẶT HÀNG (KHÔNG DÙNG WEBVIEW)
 # --------------------------
 def send_order_link(uid, ms):
+    """Gửi link đặt hàng dạng rút gọn, mở bằng trình duyệt thường."""
     short_url = f"https://{DOMAIN}/o/{ms}?uid={uid}"
     text = (
         "🛒💥 ĐẶT HÀNG NHANH (1 chạm):\n"
@@ -84,12 +159,16 @@ def send_order_link(uid, ms):
     )
     send_text(uid, text)
 
+
+# --------------------------
+# GOOGLE SHEET LOADER
 # --------------------------
 SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/18eI8Yn-WG8xN0YK8mWqgIOvn-USBhmXBH3sR2drvWus/export?format=csv"
 
 df = None
 LAST_LOAD = 0
 LOAD_TTL = 300
+
 
 def load_sheet(force=False):
     global df, LAST_LOAD
@@ -109,12 +188,17 @@ def load_sheet(force=False):
     except Exception as e:
         print("[Sheet] ERROR:", e)
 
+
+# --------------------------
+# CONTEXT
 # --------------------------
 USER_CONTEXT = {}
 LAST_MESSAGE_MID = {}
 
+
 def get_ctx(uid):
     return USER_CONTEXT.get(uid, {})
+
 
 def set_ctx(uid, **kwargs):
     ctx = USER_CONTEXT.get(uid, {})
@@ -122,9 +206,13 @@ def set_ctx(uid, **kwargs):
     USER_CONTEXT[uid] = ctx
     return ctx
 
+
 def normalize(t):
     return str(t).strip().lower()
 
+
+# --------------------------
+# IGNORE FB SYSTEM EVENTS
 # --------------------------
 def ignore_event(ev):
     if "delivery" in ev:
@@ -140,16 +228,20 @@ def ignore_event(ev):
 
 
 # --------------------------
+# GET PAGE NAME (CACHE)
+# --------------------------
 PAGE_NAME = None
 
+
 def get_page_name():
+    """Lấy tên Fanpage bằng Graph API và cache."""
     global PAGE_NAME
     if PAGE_NAME:
         return PAGE_NAME
 
     try:
         resp = requests.get(
-            "https://graph.facebook.com/v18.0/me",
+            f"{FB_GRAPH_URL}/me",
             params={"access_token": PAGE_ACCESS_TOKEN, "fields": "name"},
             timeout=10
         )
@@ -162,6 +254,9 @@ def get_page_name():
 
     return PAGE_NAME
 
+
+# --------------------------
+# PRODUCT EXTRACTION
 # --------------------------
 def extract_ms(text: str):
     if not text:
@@ -171,6 +266,7 @@ def extract_ms(text: str):
     if m:
         return "MS" + m.group(1).zfill(6)
     return None
+
 
 def guess_ms(text: str):
     global df
@@ -191,16 +287,58 @@ def guess_ms(text: str):
             return code
     return None
 
+
+def guess_ms_by_content(text: str):
+    """
+    Đoán mã sản phẩm theo nội dung mô tả (fallback khi không có số mã).
+    Đơn giản: đếm số từ khóa trùng giữa text và (Tên sản phẩm + Mô tả).
+    """
+    global df
+    if df is None or not text:
+        return None
+
+    raw = normalize(text)
+    tokens = re.findall(r"\w+", raw)
+    tokens = [t for t in tokens if len(t) >= 3]
+    if not tokens:
+        return None
+
+    best_ms = None
+    best_score = 0
+
+    for _, row in df.iterrows():
+        ms_code = str(row.get("Mã sản phẩm", "")).strip()
+        if not ms_code:
+            continue
+        st = f"{row.get('Tên sản phẩm', '')} {row.get('Mô tả', '')}"
+        st_norm = normalize(st)
+        score = 0
+        for t in tokens:
+            if t in st_norm:
+                score += 1
+        if score > best_score:
+            best_score = score
+            best_ms = ms_code
+
+    if best_score == 0:
+        return None
+    return best_ms
+
+
 def find_product(ms):
     rows = df[df["Mã sản phẩm"] == ms]
     return rows if not rows.empty else None
 
+
 def format_price(v):
     try:
         return f"{float(v):,.0f}đ".replace(",", ".")
-    except:
+    except Exception:
         return str(v)
 
+
+# --------------------------
+# SHIP = ĐẶT HÀNG INTENT
 # --------------------------
 NEG_SHIP = ["miễn ship", "mien ship", "free ship", "freeship", "phí ship"]
 SHIP_PATTERNS = [
@@ -209,6 +347,7 @@ SHIP_PATTERNS = [
     r"\bship\b.*\b(cái|cai|bộ|bo)",
     r"\bsip\b.*\b(cái|cai|bộ|bo)"
 ]
+
 
 def is_order_ship(text):
     t = text.lower()
@@ -220,11 +359,15 @@ def is_order_ship(text):
             return True
     return False
 
+
+# --------------------------
+# GPT SUMMARIZER
 # --------------------------
 SYSTEM_INSTRUCT = """
 Bạn là trợ lý bán hàng, trả lời chính xác theo dữ liệu sản phẩm.
 Không bịa, không thêm thông tin không có trong sheet.
 """
+
 
 def call_gpt(user_msg, product_summary, hint=""):
     if not client:
@@ -246,12 +389,18 @@ def call_gpt(user_msg, product_summary, hint=""):
         print("[GPT ERROR]", e)
         return "Hệ thống hơi chậm, anh/chị mô tả chi tiết hơn giúp em ạ."
 
+
+# --------------------------
+# BUILD PRODUCT SUMMARY
 # --------------------------
 def build_summary(rows, ms):
     name = rows.iloc[0]["Tên sản phẩm"]
     desc = rows.iloc[0]["Mô tả"]
     return f"Mã: {ms}\nTên: {name}\nMô tả:\n{desc}"
 
+
+# --------------------------
+# CLEAN IMAGES
 # --------------------------
 def clean_images(rows):
     if "Images" not in rows.columns:
@@ -268,6 +417,9 @@ def clean_images(rows):
                     urls.append(u)
     return urls
 
+
+# --------------------------
+# INTRODUCE PRODUCT
 # --------------------------
 def intro_product(uid, rows, ms, msg=""):
     set_ctx(uid, current_ms=ms, order_state=None)
@@ -282,6 +434,49 @@ def intro_product(uid, rows, ms, msg=""):
         send_image(uid, img)
         time.sleep(0.3)
 
+
+# --------------------------
+# HANDLE FEED CHANGES (COMMENT) – AUTO-REPLY COMMENT
+# --------------------------
+def handle_change(change):
+    """
+    Xử lý webhook dạng entry['changes'] cho sự kiện comment trên bài viết.
+    Auto-reply comment bằng nội dung xoay vòng, tránh trùng lặp.
+    """
+    try:
+        field = change.get("field")
+        if field != "feed":
+            return
+
+        value = change.get("value", {})
+        if value.get("item") != "comment":
+            return
+
+        verb = value.get("verb")
+        if verb not in ("add", "edited"):
+            return
+
+        comment_id = value.get("comment_id") or value.get("commentId")
+        if not comment_id:
+            return
+
+        from_info = value.get("from", {})
+        name = from_info.get("name") or "anh/chị"
+
+        # Tạo câu trả lời dài, xoay vòng, có @tên khách
+        reply_text = get_comment_reply_text(name=f"@{name}")
+        ok = fb_reply_comment(comment_id, reply_text)
+        if ok:
+            print(f"[COMMENT REPLY] {comment_id} -> {reply_text}")
+        else:
+            print(f"[COMMENT REPLY] FAILED {comment_id}")
+
+    except Exception as e:
+        print("[handle_change] ERROR:", e)
+
+
+# --------------------------
+# WEBHOOK CORE
 # --------------------------
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
@@ -295,6 +490,11 @@ def webhook():
     data = request.get_json()
 
     for entry in data.get("entry", []):
+        # 0. Xử lý thay đổi feed (comment) – auto-reply comment
+        for change in entry.get("changes", []):
+            handle_change(change)
+
+        # 1. Xử lý tin nhắn Messenger
         for event in entry.get("messaging", []):
 
             if ignore_event(event):
@@ -334,8 +534,8 @@ def webhook():
             ctx = get_ctx(sender)
             current_ms = ctx.get("current_ms")
 
-            # 1. Khách gửi MÃ SẢN PHẨM
-            ms = extract_ms(text) or guess_ms(text)
+            # 1. Khách gửi MÃ SẢN PHẨM hoặc mô tả có thể map sang sản phẩm
+            ms = extract_ms(text) or guess_ms(text) or guess_ms_by_content(text)
             if ms:
                 rows = find_product(ms)
                 if rows is None:
@@ -344,12 +544,12 @@ def webhook():
                     intro_product(sender, rows, ms, msg=text)
                 continue
 
-            # 2. ĐẶT HÀNG
+            # 2. ĐẶT HÀNG → MỞ FORM
             if current_ms and is_order_ship(text):
                 send_order_link(sender, current_ms)
                 continue
 
-            # 3. NGỮ CẢNH SẢN PHẨM
+            # 3. PHẢN HỒI THEO SẢN PHẨM (đã có current_ms)
             if current_ms:
                 rows = find_product(current_ms)
                 if rows is None:
@@ -392,14 +592,12 @@ def webhook():
                         send_text(sender, "Mã này chưa có video ạ.")
                     continue
 
-                # Nếu không rơi vào case nào → GPT
+                # Còn lại → GPT
                 reply = call_gpt(text, summary, hint=f"Đang tư vấn mã {current_ms}")
                 send_text(sender, reply)
                 continue
 
-            # --------------------------
-            # ⭐⭐ LỜI CHÀO MỞ ĐẦU (ĐÃ THAY THEO YÊU CẦU) ⭐⭐
-            # --------------------------
+            # 4. KHÔNG CÓ NGỮ CẢNH (TIN NHẮN ĐẦU TIÊN)
             send_text(
                 sender,
                 "Shop chào anh/chị 👋\n"
@@ -410,16 +608,24 @@ def webhook():
 
     return "ok", 200
 
+
+# --------------------------
+# SHORT LINK /o/<MSxxxxxx> -> REDIRECT SANG /order-form
 # --------------------------
 @app.route("/o/<ms>")
 def short_order(ms):
     uid = request.args.get("uid", "")
+    # Redirect sang form đặt hàng chính, giữ lại uid & ms
     return redirect(f"/order-form?uid={uid}&ms={ms}")
+
 
 @app.route("/order-form")
 def order_form():
     return send_from_directory("static", "order-form.html")
 
+
+# --------------------------
+# API GET PRODUCT (Form)
 # --------------------------
 @app.route("/api/get-product")
 def api_get_product():
@@ -431,6 +637,7 @@ def api_get_product():
 
     row0 = rows.iloc[0]
 
+    # ẢNH đầu tiên của biến thể đầu tiên
     image = ""
     parts = re.split(r"[\s,;]+", str(row0.get("Images", "")))
     for u in parts:
@@ -450,9 +657,12 @@ def api_get_product():
         "colors": colors,
         "image": image,
         "fanpageName": fanpage_name,
-        "page_name": fanpage_name
+        "page_name": fanpage_name  # thêm key này để JS mới đọc được
     }
 
+
+# --------------------------
+# API ORDER (Form)
 # --------------------------
 @app.route("/api/order", methods=["POST"])
 def api_order():
@@ -480,10 +690,14 @@ def api_order():
 
     return {"status": "ok"}
 
+
+# --------------------------
+# ROOT
 # --------------------------
 @app.route("/")
 def home():
     return "Chatbot running OK", 200
+
 
 # --------------------------
 if __name__ == "__main__":
