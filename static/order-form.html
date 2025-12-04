@@ -1,104 +1,46 @@
 <!DOCTYPE html>
 <html lang="vi">
 <head>
-    <meta charset="UTF-8">
+    <meta charset="UTF-8" />
+    <meta name="viewport"
+          content="width=device-width, initial-scale=1.0" />
+          
     <title>Đặt hàng nhanh</title>
 
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-
+    <!-- CSS của bạn -->
+    <link rel="stylesheet" href="/static/order.css" />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap"
           rel="stylesheet">
 
-    <style>
-        body {
-            font-family: Inter, sans-serif;
-            margin: 0;
-            padding: 15px;
-            background: #f5f5f5;
-        }
-
-        .container {
-            max-width: 420px;
-            margin: auto;
-            background: #fff;
-            padding: 18px;
-            border-radius: 12px;
-            box-shadow: 0 4px 25px rgba(0,0,0,0.08);
-        }
-
-        h2 {
-            margin-top: 0;
-            text-align: center;
-            font-size: 20px;
-        }
-
-        img {
-            width: 100%;
-            border-radius: 10px;
-            margin-bottom: 12px;
-        }
-
-        label {
-            font-weight: 600;
-            margin-top: 10px;
-            display: block;
-        }
-
-        input, select, textarea {
-            width: 100%;
-            padding: 10px;
-            margin-top: 4px;
-            border-radius: 8px;
-            border: 1px solid #ccc;
-            font-size: 15px;
-        }
-
-        button {
-            width: 100%;
-            background: #ff424e;
-            padding: 14px;
-            border: none;
-            color: #fff;
-            border-radius: 10px;
-            font-size: 17px;
-            margin-top: 18px;
-            font-weight: 600;
-        }
-
-        .note-area {
-            margin-top: 6px;
-            color: #b70000;
-            font-size: 13px;
-        }
-    </style>
 </head>
 
 <body>
-<div class="container">
 
-    <!-- Tên Shop -->
-    <h2 id="fanpageName">Shop</h2>
+<div class="form-container">
 
-    <!-- Ảnh SP -->
-    <img id="productImage" src="" alt="Ảnh sản phẩm">
+    <!-- Header -->
+    <div id="header">
+        <h2 id="fanpageName">Shop</h2>
+    </div>
 
-    <!-- Tên SP -->
+    <!-- Ảnh sản phẩm -->
+    <img id="productImage" src="" alt="Ảnh sản phẩm" />
+
+    <!-- Tên sản phẩm -->
+    <div class="section-title">THÔNG TIN SẢN PHẨM</div>
+
     <label>Sản phẩm</label>
     <input id="productName" readonly />
 
-    <!-- Giá -->
     <label>Đơn giá</label>
     <input id="price" readonly />
 
-    <!-- Size -->
     <label>Size</label>
     <select id="size"></select>
 
-    <!-- Màu -->
     <label>Màu</label>
     <select id="color"></select>
 
-    <!-- Số lượng -->
     <label>Số lượng</label>
     <select id="quantity">
         <option>1</option>
@@ -108,45 +50,44 @@
         <option>5</option>
     </select>
 
-    <!-- Thành tiền -->
     <label>Thành tiền</label>
     <input id="total" readonly />
 
-    <!-- Tên khách -->
+    <!-- THÔNG TIN KHÁCH HÀNG -->
+    <div class="section-title">THÔNG TIN KHÁCH HÀNG</div>
+
     <label>Họ tên</label>
     <input id="customerName" placeholder="Nhập họ tên" />
 
-    <!-- SĐT -->
     <label>Số điện thoại</label>
     <input id="phone" placeholder="Nhập số điện thoại" />
 
-    <!-- Địa chỉ -->
     <label>Địa chỉ (Số nhà, tổ, thôn...)</label>
     <input id="home" placeholder="Ví dụ: Số 10, Ngõ 5" />
 
-    <!-- Tỉnh -->
     <label>Tỉnh / Thành phố</label>
     <select id="province"></select>
 
-    <!-- Xã -->
     <label>Phường / Xã</label>
     <select id="ward"></select>
 
-    <!-- Huyện Ẩn -->
+    <!-- Huyện ẩn -->
     <select id="district" style="display:none"></select>
     <div class="note-area">
         * Sau sáp nhập không cần chọn quận/huyện – chỉ cần TỈNH + XÃ
     </div>
 
-    <!-- Ghi chú -->
     <label>Ghi chú đơn hàng</label>
-    <textarea id="note" rows="3" placeholder="Ví dụ: Giao giờ hành chính..."></textarea>
+    <textarea id="note"
+              rows="3"
+              placeholder="Ví dụ: Giao giờ hành chính..."></textarea>
 
-    <!-- Button -->
+    <!-- BUTTON -->
     <button id="orderBtn">ĐẶT HÀNG NGAY</button>
+
 </div>
 
-<!-- JS Form -->
+<!-- JS -->
 <script src="/static/order-form.js"></script>
 
 </body>
