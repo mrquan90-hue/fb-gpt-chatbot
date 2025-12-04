@@ -254,9 +254,7 @@ def ignore_event(ev):
     if "read" in ev:
         print("[IGNORE] read")
         return True
-    if ev.get("message", {}).get("is_echo"):
-        print("[IGNORE] echo")
-        return True
+    # KHÔNG ignore echo ở đây nữa
     return False
 
 
@@ -478,6 +476,27 @@ def intro_product(uid, rows, ms, msg=""):
 
 
 # --------------------------
+# HANDLE PAGE/FCHAT OUTGOING MESSAGE (ECHO)
+# --------------------------
+def handle_page_outgoing_message(uid, text):
+    """
+    Tin nhắn do PAGE/FCHAT gửi tới khách (echo).
+    Bot chỉ dùng để cập nhật ngữ cảnh sản phẩm nếu có hashtag #MSxxxxx,
+    KHÔNG trả lời lại tin này.
+    """
+    if not text:
+        print("[PAGE MSG] empty")
+        return
+
+    ms = extract_ms_from_hashtag(text)
+    if ms:
+        print(f"[PAGE MSG] Detected product from echo: {ms}")
+        set_ctx(uid, current_ms=ms)
+    else:
+        print("[PAGE MSG] no product code in echo")
+
+
+# --------------------------
 # HANDLE FEED CHANGES (COMMENT)
 # --------------------------
 def handle_change(change):
@@ -539,12 +558,20 @@ def webhook():
 
         # 1. Xử lý tin nhắn
         for event in entry.get("messaging", []):
-
-            if ignore_event(event):
-                continue
-
             sender = event["sender"]["id"]
             message = event.get("message")
+
+            # Trường hợp echo: tin nhắn do page/Fchat gửi
+            if message and message.get("is_echo"):
+                text = message.get("text", "")
+                print(f"[ECHO] from page/fchat -> {sender}: {text}")
+                handle_page_outgoing_message(sender, text)
+                # KHÔNG trả lời lại echo
+                continue
+
+            # Bỏ qua delivery/read...
+            if ignore_event(event):
+                continue
 
             if not (message and "text" in message):
                 continue
@@ -575,7 +602,7 @@ def webhook():
             ctx = get_ctx(sender)
             current_ms = ctx.get("current_ms")
 
-            # 1. Thử lấy mã sản phẩm từ tin nhắn
+            # 1. Thử lấy mã sản phẩm từ tin nhắn khách
             ms = (extract_ms_from_hashtag(text) or extract_ms(text) or guess_ms(text) or guess_ms_by_content(text))
             if ms:
                 rows = find_product(ms)
