@@ -1,6 +1,6 @@
 # =======================
-#   APP.PY – PHIÊN BẢN FULL
-#   ĐÃ GHÉP WEBVIEW FORM + CHỐNG LẶP + STATE ĐẶT HÀNG + HYBRID INTENT
+#   APP.PY – PHIÊN BẢN FULL (ĐÃ CHÈN LỜI CHÀO MỞ ĐẦU)
+#   KHÔNG PHÁ VỠ LOGIC KHÁC
 # =======================
 
 import os
@@ -27,8 +27,6 @@ client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 FB_API_URL = "https://graph.facebook.com/v18.0/me/messages"
 
-# --------------------------
-# Facebook Send
 # --------------------------
 def fb_send(payload):
     if not PAGE_ACCESS_TOKEN:
@@ -76,11 +74,7 @@ def send_video(uid, url):
     })
 
 # --------------------------
-# LINK ĐẶT HÀNG (KHÔNG DÙNG WEBVIEW)
-# --------------------------
 def send_order_link(uid, ms):
-    """Gửi link đặt hàng dạng rút gọn, mở bằng trình duyệt thường."""
-    # Link rút gọn dạng /o/<MSxxxxxx>?uid=<FACEBOOK_ID>
     short_url = f"https://{DOMAIN}/o/{ms}?uid={uid}"
     text = (
         "🛒💥 ĐẶT HÀNG NHANH (1 chạm):\n"
@@ -90,8 +84,6 @@ def send_order_link(uid, ms):
     )
     send_text(uid, text)
 
-# --------------------------
-# GOOGLE SHEET LOADER
 # --------------------------
 SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/18eI8Yn-WG8xN0YK8mWqgIOvn-USBhmXBH3sR2drvWus/export?format=csv"
 
@@ -118,8 +110,6 @@ def load_sheet(force=False):
         print("[Sheet] ERROR:", e)
 
 # --------------------------
-# CONTEXT
-# --------------------------
 USER_CONTEXT = {}
 LAST_MESSAGE_MID = {}
 
@@ -136,8 +126,6 @@ def normalize(t):
     return str(t).strip().lower()
 
 # --------------------------
-# IGNORE FB SYSTEM EVENTS
-# --------------------------
 def ignore_event(ev):
     if "delivery" in ev:
         print("[IGNORE] delivery")
@@ -152,12 +140,9 @@ def ignore_event(ev):
 
 
 # --------------------------
-# GET PAGE NAME (CACHE)
-# --------------------------
 PAGE_NAME = None
 
 def get_page_name():
-    """Lấy tên Fanpage bằng Graph API và cache."""
     global PAGE_NAME
     if PAGE_NAME:
         return PAGE_NAME
@@ -177,8 +162,6 @@ def get_page_name():
 
     return PAGE_NAME
 
-# --------------------------
-# PRODUCT EXTRACTION
 # --------------------------
 def extract_ms(text: str):
     if not text:
@@ -219,8 +202,6 @@ def format_price(v):
         return str(v)
 
 # --------------------------
-# SHIP = ĐẶT HÀNG INTENT
-# --------------------------
 NEG_SHIP = ["miễn ship", "mien ship", "free ship", "freeship", "phí ship"]
 SHIP_PATTERNS = [
     r"\bship\s*\d+",
@@ -239,8 +220,6 @@ def is_order_ship(text):
             return True
     return False
 
-# --------------------------
-# GPT SUMMARIZER
 # --------------------------
 SYSTEM_INSTRUCT = """
 Bạn là trợ lý bán hàng, trả lời chính xác theo dữ liệu sản phẩm.
@@ -268,15 +247,11 @@ def call_gpt(user_msg, product_summary, hint=""):
         return "Hệ thống hơi chậm, anh/chị mô tả chi tiết hơn giúp em ạ."
 
 # --------------------------
-# BUILD PRODUCT SUMMARY
-# --------------------------
 def build_summary(rows, ms):
     name = rows.iloc[0]["Tên sản phẩm"]
     desc = rows.iloc[0]["Mô tả"]
     return f"Mã: {ms}\nTên: {name}\nMô tả:\n{desc}"
 
-# --------------------------
-# CLEAN IMAGES
 # --------------------------
 def clean_images(rows):
     if "Images" not in rows.columns:
@@ -294,8 +269,6 @@ def clean_images(rows):
     return urls
 
 # --------------------------
-# INTRODUCE PRODUCT
-# --------------------------
 def intro_product(uid, rows, ms, msg=""):
     set_ctx(uid, current_ms=ms, order_state=None)
     summary = build_summary(rows, ms)
@@ -309,8 +282,6 @@ def intro_product(uid, rows, ms, msg=""):
         send_image(uid, img)
         time.sleep(0.3)
 
-# --------------------------
-# WEBHOOK CORE
 # --------------------------
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
@@ -362,7 +333,6 @@ def webhook():
 
             ctx = get_ctx(sender)
             current_ms = ctx.get("current_ms")
-            order_state = ctx.get("order_state")
 
             # 1. Khách gửi MÃ SẢN PHẨM
             ms = extract_ms(text) or guess_ms(text)
@@ -374,12 +344,12 @@ def webhook():
                     intro_product(sender, rows, ms, msg=text)
                 continue
 
-            # 2. ĐẶT HÀNG → MỞ FORM
+            # 2. ĐẶT HÀNG
             if current_ms and is_order_ship(text):
                 send_order_link(sender, current_ms)
                 continue
 
-            # 3. PHẢN HỒI THEO SẢN PHẨM
+            # 3. NGỮ CẢNH SẢN PHẨM
             if current_ms:
                 rows = find_product(current_ms)
                 if rows is None:
@@ -422,31 +392,34 @@ def webhook():
                         send_text(sender, "Mã này chưa có video ạ.")
                     continue
 
-                # Còn lại → GPT
+                # Nếu không rơi vào case nào → GPT
                 reply = call_gpt(text, summary, hint=f"Đang tư vấn mã {current_ms}")
                 send_text(sender, reply)
                 continue
 
-            # 4. KHÔNG CÓ NGỮ CẢNH
-            send_text(sender, "Anh/chị gửi mã sản phẩm (MSxxxxx) để em tư vấn ạ.")
+            # --------------------------
+            # ⭐⭐ LỜI CHÀO MỞ ĐẦU (ĐÃ THAY THEO YÊU CẦU) ⭐⭐
+            # --------------------------
+            send_text(
+                sender,
+                "Shop chào anh/chị 👋\n"
+                "Anh/chị đang quan tâm mẫu nào để em hỗ trợ nhanh ạ?\n"
+                "- Nếu đã có mã sản phẩm → gửi mã “MSxxxxx”.\n"
+                "- Nếu có ảnh mẫu → gửi ảnh để em tìm đúng mã giúp anh/chị ❤️"
+            )
 
     return "ok", 200
 
 # --------------------------
-# SHORT LINK /o/<MSxxxxxx> -> REDIRECT SANG /order-form
-# --------------------------
 @app.route("/o/<ms>")
 def short_order(ms):
     uid = request.args.get("uid", "")
-    # Redirect sang form đặt hàng chính, giữ lại uid & ms
     return redirect(f"/order-form?uid={uid}&ms={ms}")
 
 @app.route("/order-form")
 def order_form():
     return send_from_directory("static", "order-form.html")
 
-# --------------------------
-# API GET PRODUCT (Form)
 # --------------------------
 @app.route("/api/get-product")
 def api_get_product():
@@ -458,7 +431,6 @@ def api_get_product():
 
     row0 = rows.iloc[0]
 
-    # ẢNH đầu tiên của biến thể đầu tiên
     image = ""
     parts = re.split(r"[\s,;]+", str(row0.get("Images", "")))
     for u in parts:
@@ -478,11 +450,9 @@ def api_get_product():
         "colors": colors,
         "image": image,
         "fanpageName": fanpage_name,
-        "page_name": fanpage_name  # thêm key này để JS mới đọc được
+        "page_name": fanpage_name
     }
 
-# --------------------------
-# API ORDER (Form)
 # --------------------------
 @app.route("/api/order", methods=["POST"])
 def api_order():
@@ -510,8 +480,6 @@ def api_order():
 
     return {"status": "ok"}
 
-# --------------------------
-# ROOT
 # --------------------------
 @app.route("/")
 def home():
