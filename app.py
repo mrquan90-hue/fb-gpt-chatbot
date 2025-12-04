@@ -359,6 +359,7 @@ def guess_ms_by_content(text: str):
     """
     Đoán mã sản phẩm theo nội dung mô tả.
     Dùng CHỈ KHI chưa có current_ms.
+    (HIỆN TẠI KHÔNG CÒN ĐƯỢC GỌI TRONG LOGIC WEBHOOK)
     """
     global df
     if df is None or not text:
@@ -550,7 +551,7 @@ def handle_change(change):
 
 
 # --------------------------
-# WEBHOOK CORE
+# WEBHOOK CORE (FINAL)
 # --------------------------
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
@@ -570,14 +571,27 @@ def webhook():
 
         # 1. Xử lý tin nhắn
         for event in entry.get("messaging", []):
-            sender = event["sender"]["id"]
             message = event.get("message")
 
-            # ECHO (tin do Page/Fchat gửi)
-            if message and message.get("is_echo"):
+            # Xác định user_id đúng:
+            # - Nếu là echo: user = recipient (khách)
+            # - Nếu là tin khách gửi: user = sender
+            is_echo = bool(message and message.get("is_echo"))
+            if is_echo:
+                user_id = event.get("recipient", {}).get("id")
+            else:
+                user_id = event.get("sender", {}).get("id")
+
+            if not user_id:
+                print("[WARN] Missing user_id in event:", event)
+                continue
+
+            # ECHO (tin do Page/Fchat/Bot gửi)
+            if is_echo:
                 text = message.get("text", "") or ""
-                print(f"[ECHO] from page/fchat -> {sender}: {text}")
-                handle_page_outgoing_message(sender, text)
+                print(f"[ECHO] -> user {user_id}: {text}")
+                # Chỉ dùng ECHO để cập nhật ngữ cảnh sản phẩm nếu có hashtag #MSxxxxx
+                handle_page_outgoing_message(user_id, text)
                 # KHÔNG trả lời echo
                 continue
 
@@ -592,32 +606,32 @@ def webhook():
             lower = normalize(text)
             mid = message.get("mid")
 
-            if LAST_MESSAGE_MID.get(sender) == mid:
+            if LAST_MESSAGE_MID.get(user_id) == mid:
                 print("[IGNORE] duplicate mid")
                 continue
-            LAST_MESSAGE_MID[sender] = mid
+            LAST_MESSAGE_MID[user_id] = mid
 
             load_sheet()
 
-            print(f"[MSG] from {sender}: {text!r}")
+            print(f"[MSG] from {user_id}: {text!r}")
 
             if lower in ["tắt bot", "tat bot"]:
                 BOT_ENABLED = False
-                send_text(sender, "❌ Bot đã tắt.")
+                send_text(user_id, "❌ Bot đã tắt.")
                 continue
             if lower in ["bật bot", "bat bot"]:
                 BOT_ENABLED = True
-                send_text(sender, "✅ Bot đã bật lại.")
+                send_text(user_id, "✅ Bot đã bật lại.")
                 continue
 
             if not BOT_ENABLED:
                 continue
 
-            ctx = get_ctx(sender)
+            ctx = get_ctx(user_id)
             current_ms = ctx.get("current_ms")
             print(f"[CTX] current_ms={current_ms}")
 
-            # 1. THỬ LẤY MÃ RÕ RÀNG TỪ TIN NHẮN KHÁCH
+            # 1. MÃ RÕ RÀNG TỪ TIN NHẮN KHÁCH
             explicit_ms = (
                 extract_ms_from_hashtag(text)
                 or extract_ms(text)
@@ -627,47 +641,38 @@ def webhook():
             if explicit_ms:
                 rows = find_product(explicit_ms)
                 if rows is None:
-                    send_text(sender, f"Không tìm thấy sản phẩm {explicit_ms} ạ.")
+                    send_text(user_id, f"Không tìm thấy sản phẩm {explicit_ms} ạ.")
                 else:
-                    intro_product(sender, rows, explicit_ms, msg=text)
+                    intro_product(user_id, rows, explicit_ms, msg=text)
                 continue
-
-            # 1b. NẾU CHƯA CÓ current_ms THÌ MỚI THỬ ĐOÁN THEO NỘI DUNG
-            if not current_ms:
-                implied_ms = guess_ms_by_content(text)
-                if implied_ms:
-                    rows = find_product(implied_ms)
-                    if rows is not None:
-                        intro_product(sender, rows, implied_ms, msg=text)
-                        continue
 
             # 2. ĐẶT HÀNG (SHIP)
             if current_ms and is_order_ship(text):
-                send_order_link(sender, current_ms)
+                send_order_link(user_id, current_ms)
                 continue
 
             # 3. ĐÃ CÓ NGỮ CẢNH SẢN PHẨM
             if current_ms:
                 rows = find_product(current_ms)
                 if rows is None:
-                    set_ctx(sender, current_ms=None)
-                    send_text(sender, "Anh/chị gửi lại mã sản phẩm giúp em ạ.")
+                    set_ctx(user_id, current_ms=None)
+                    send_text(user_id, "Anh/chị gửi lại mã sản phẩm giúp em ạ.")
                     continue
 
                 summary = build_summary(rows, current_ms)
 
                 if any(x in lower for x in ["giá", "bao nhiêu", "nhiêu tiền", "bn"]):
                     price = rows.iloc[0]["Giá bán"]
-                    send_text(sender, f"Mã {current_ms} giá {format_price(price)} ạ.")
+                    send_text(user_id, f"Mã {current_ms} giá {format_price(price)} ạ.")
                     continue
 
                 if any(x in lower for x in ["ảnh", "hình", "xem mẫu"]):
                     imgs = clean_images(rows)
                     if imgs:
                         for img in imgs[:5]:
-                            send_image(sender, img)
+                            send_image(user_id, img)
                     else:
-                        send_text(sender, "Mã này chưa có ảnh ạ.")
+                        send_text(user_id, "Mã này chưa có ảnh ạ.")
                     continue
 
                 if any(x in lower for x in ["video", "clip", "reels"]):
@@ -680,22 +685,22 @@ def webhook():
                         parts = re.split(r"[\s,;]+", v)
                         for u in parts:
                             if u.startswith("http"):
-                                send_video(sender, u)
+                                send_video(user_id, u)
                                 ok = True
                                 break
                         if ok:
                             break
                     if not ok:
-                        send_text(sender, "Mã này chưa có video ạ.")
+                        send_text(user_id, "Mã này chưa có video ạ.")
                     continue
 
                 reply = call_gpt(text, summary, hint=f"Đang tư vấn mã {current_ms}")
-                send_text(sender, reply)
+                send_text(user_id, reply)
                 continue
 
             # 4. LỜI CHÀO MỞ ĐẦU
             send_text(
-                sender,
+                user_id,
                 "Shop chào anh/chị 👋\n"
                 "Anh/chị đang quan tâm mẫu nào để em hỗ trợ nhanh ạ?\n"
                 "- Nếu đã có mã sản phẩm → gửi mã “MSxxxxx”.\n"
