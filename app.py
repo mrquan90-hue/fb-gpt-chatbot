@@ -287,6 +287,20 @@ def get_page_name():
 # --------------------------
 # PRODUCT EXTRACTION
 # --------------------------
+def extract_ms_from_hashtag(text: str):
+    """
+    Tìm mã sản phẩm theo định dạng hashtag #MS000123
+    Trả về dạng MS000123 (không có dấu #)
+    """
+    if not text:
+        return None
+    raw = text.upper()
+    m = re.search(r"#MS(\d{1,6})", raw)
+    if m:
+        return "MS" + m.group(1).zfill(6)
+    return None
+
+
 def extract_ms(text: str):
     if not text:
         return None
@@ -294,6 +308,7 @@ def extract_ms(text: str):
     m = re.search(r"MS\s*(\d+)", raw)
     if m:
         return "MS" + m.group(1).zfill(6)
+
     m2 = re.search(r"\[(MS\d+)\]", raw)
     if m2:
         return m2.group(1)
@@ -561,7 +576,7 @@ def webhook():
             current_ms = ctx.get("current_ms")
 
             # 1. Thử lấy mã sản phẩm từ tin nhắn
-            ms = extract_ms(text) or guess_ms(text) or guess_ms_by_content(text)
+            ms = (extract_ms_from_hashtag(text) or extract_ms(text) or guess_ms(text) or guess_ms_by_content(text))
             if ms:
                 rows = find_product(ms)
                 if rows is None:
