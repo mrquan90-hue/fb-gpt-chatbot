@@ -382,8 +382,20 @@ def find_ms_by_short_code(code: str):
 
 
 def resolve_best_ms(ctx: dict):
-    for key in ["vision_ms", "inbox_entry_ms", "caption_ms", "last_ms"]:
-        if ctx.get(key):
+    """
+    Ưu tiên mã sản phẩm theo thứ tự:
+    1. Mã từ tin nhắn khách gửi gần nhất (last_ms) nếu nó tồn tại trong PRODUCTS
+    2. Mã từ vision (nếu khách gửi ảnh)
+    3. Mã từ inbox_entry_ms (từ comment/referral)
+    4. Mã từ caption
+    """
+    # Ưu tiên last_ms nếu nó tồn tại trong danh sách sản phẩm
+    if ctx.get("last_ms") and ctx["last_ms"] in PRODUCTS:
+        return ctx["last_ms"]
+    
+    # Các nguồn khác
+    for key in ["vision_ms", "inbox_entry_ms", "caption_ms"]:
+        if ctx.get(key) and ctx[key] in PRODUCTS:
             return ctx[key]
     return None
 
@@ -604,7 +616,7 @@ def handle_text(uid: str, text: str):
     if ms_from_text:
         ctx["last_ms"] = ms_from_text
 
-    # 2. MS tổng hợp từ nhiều nguồn
+    # 2. MS tổng hợp từ nhiều nguồn (ƯU TIÊN last_ms nếu nó hợp lệ)
     ms = resolve_best_ms(ctx)
 
     # 3. Nếu là direct inbox (không có inbox_entry_ms) -> chào theo chuẩn
