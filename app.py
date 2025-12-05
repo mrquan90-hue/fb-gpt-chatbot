@@ -136,20 +136,45 @@ def send_message(uid: str, text: str) -> None:
 
 
 def send_image(uid: str, image_url: str) -> None:
-    url = "https://graph.facebook.com/v18.0/me/messages"
-    params = {"access_token": PAGE_ACCESS_TOKEN}
-    payload = {
-        "recipient": {"id": uid},
-        "message": {
+    """
+    Gửi ảnh qua Facebook Messenger bằng cách UPLOAD file trực tiếp lên Graph API.
+    Cách này ổn định hơn gửi URL, tránh lỗi (#100) khi Facebook không lấy được ảnh từ link.
+    """
+    # Nếu có rehost, giữ nguyên để tránh domain bị chặn (Alibaba...)
+    url_source = image_url
+    try:
+        # Tải ảnh về server
+        resp = requests.get(url_source, timeout=20)
+        resp.raise_for_status()
+    except Exception as e:
+        print("DOWNLOAD IMG ERROR:", e, "URL:", url_source)
+        return
+
+    files = {
+        "filedata": ("image.jpg", resp.content, "image/jpeg")
+    }
+    params = {
+        "access_token": PAGE_ACCESS_TOKEN
+    }
+    data = {
+        "recipient": json.dumps({"id": uid}, ensure_ascii=False),
+        "message": json.dumps({
             "attachment": {
                 "type": "image",
-                "payload": {"url": image_url, "is_reusable": True},
+                "payload": {}
             }
-        },
+        }, ensure_ascii=False),
         "messaging_type": "RESPONSE",
     }
+
     try:
-        r = requests.post(url, params=params, json=payload, timeout=15)
+        r = requests.post(
+            "https://graph.facebook.com/v18.0/me/messages",
+            params=params,
+            data=data,
+            files=files,
+            timeout=30
+        )
         print("SEND IMG:", r.status_code, r.text)
     except Exception as e:
         print("SEND IMG ERROR:", e)
@@ -460,7 +485,7 @@ def maybe_greet(uid: str):
         ctx["greeted"] = True
         send_message(
             uid,
-            "Dạ em chào anh/chị ạ 😊 Em là trợ lý bán hàng của shop, hỗ trợ mình xem mẫu và chốt đơn nhanh ạ!",
+            "Em chào anh/chị 😊\nEm là trợ lý chăm sóc khách hàng của shop, hỗ trợ anh/chị xem mẫu, tư vấn size và chốt đơn nhanh ạ.\nAnh/chị đang quan tâm mẫu nào hoặc có thể gửi ảnh mẫu để em xem giúp ạ?",
         )
 
 
