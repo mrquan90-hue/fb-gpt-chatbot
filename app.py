@@ -179,7 +179,7 @@ def send_image(uid: str, image_url: str) -> None:
 
 
 # ============================================
-# CAROUSEL TEMPLATE (MỚI THÊM)
+# CAROUSEL TEMPLATE
 # ============================================
 
 def send_carousel_template(recipient_id: str, products_data: list) -> None:
@@ -790,7 +790,7 @@ def webhook():
             # từ đây trở xuống: sender_id = user
             ctx = USER_CONTEXT[sender_id]
 
-            # 2) POSTBACK HANDLER (MỚI THÊM: Xử lý khi khách bấm nút trong carousel)
+            # 2) POSTBACK HANDLER (Xử lý khi khách bấm nút trong carousel)
             if "postback" in ev:
                 payload = ev["postback"].get("payload")
                 print(f"[POSTBACK] User {sender_id}: {payload}")
@@ -828,7 +828,7 @@ Hoặc bạn có thể nhắn "Đặt hàng" để em hỗ trợ bạn hoàn t�
                         send_message(sender_id, f"Dạ em không tìm thấy sản phẩm mã {product_code} ạ.")
                     return "ok"
 
-                # Xử lý referral trong postback (nếu có) - GIỮ NGUYÊN
+                # Xử lý referral trong postback (nếu có)
                 ref = ev["postback"].get("referral", {}).get("ref")
                 if ref:
                     ms_ref = extract_ms_from_ref(ref)
@@ -880,7 +880,7 @@ Hoặc bạn có thể nhắn "Đặt hàng" để em hỗ trợ bạn hoàn t�
 
 
 # ============================================
-# ORDER FORM & API (GIỮ NGUYÊN CHO SAU NÀY DÙNG)
+# ORDER FORM & API
 # ============================================
 
 def send_order_link(uid: str, ms: str):
