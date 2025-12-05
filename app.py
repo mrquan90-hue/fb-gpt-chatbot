@@ -5,6 +5,7 @@ import time
 import csv
 from collections import defaultdict
 from urllib.parse import quote
+from datetime import datetime
 
 import requests
 from flask import Flask, request, send_from_directory
@@ -45,6 +46,8 @@ USER_CONTEXT = defaultdict(lambda: {
     "carousel_sent": False,        # đã gửi carousel chưa
     "last_postback_time": 0,       # thời gian postback cuối cùng (chống lặp)
     "sent_message_ids": set(),     # ID các tin nhắn đã gửi (chống lặp echo)
+    "order_state": None,           # Trạng thái đặt hàng: None, "waiting_name", "waiting_phone", "waiting_address", "confirming"
+    "order_data": {},              # Dữ liệu đơn hàng
 })
 
 PRODUCTS = {}
@@ -287,6 +290,229 @@ def send_product_carousel(recipient_id: str) -> None:
     
     # Gửi carousel
     send_carousel_template(recipient_id, products)
+
+
+# ============================================
+# ORDER FORM FUNCTIONS
+# ============================================
+
+def send_order_form_quick_replies(uid: str, product_info: dict) -> None:
+    """
+    Gửi form đặt hàng dạng quick replies
+    """
+    # Gửi tổng hợp thông tin sản phẩm
+    summary = f"""
+📋 THÔNG TIN ĐƠN HÀNG
+────────────────────
+🛍️ Sản phẩm: {product_info['name']}
+💰 Giá: {product_info['price']}
+🎨 Màu: {product_info['color']}
+📏 Size: {product_info['size']}
+────────────────────
+"""
+    send_message(uid, summary)
+    
+    # Gửi form với quick replies
+    form_message = {
+        "recipient": {"id": uid},
+        "message": {
+            "text": "Để hoàn tất đơn hàng, vui lòng cung cấp thông tin sau:",
+            "quick_replies": [
+                {
+                    "content_type": "text",
+                    "title": "👤 Họ tên",
+                    "payload": "ORDER_PROVIDE_NAME"
+                },
+                {
+                    "content_type": "text",
+                    "title": "📱 Số điện thoại",
+                    "payload": "ORDER_PROVIDE_PHONE"
+                },
+                {
+                    "content_type": "text",
+                    "title": "🏠 Địa chỉ",
+                    "payload": "ORDER_PROVIDE_ADDRESS"
+                }
+            ]
+        },
+        "messaging_type": "RESPONSE"
+    }
+    
+    try:
+        r = requests.post(
+            "https://graph.facebook.com/v18.0/me/messages",
+            params={"access_token": PAGE_ACCESS_TOKEN},
+            json=form_message,
+            timeout=15
+        )
+        print("SEND ORDER FORM:", r.status_code, r.text)
+    except Exception as e:
+        print("SEND ORDER FORM ERROR:", e)
+
+
+def send_order_confirmation(uid: str) -> None:
+    """
+    Gửi xác nhận đơn hàng cuối cùng
+    """
+    ctx = USER_CONTEXT[uid]
+    order_data = ctx.get("order_data", {})
+    product_info = order_data.get("product_info", {})
+    
+    if not product_info:
+        send_message(uid, "Có lỗi xảy ra khi xử lý đơn hàng. Vui lòng thử lại.")
+        return
+    
+    confirmation_text = f"""
+✅ ĐÃ XÁC NHẬN ĐƠN HÀNG THÀNH CÔNG!
+────────────────────
+🛍️ Sản phẩm: {product_info.get('name', '')}
+💰 Giá: {product_info.get('price', '')}
+🎨 Màu: {product_info.get('color', '')}
+📏 Size: {product_info.get('size', '')}
+────────────────────
+👤 Người nhận: {order_data.get('name', '')}
+📱 SĐT: {order_data.get('phone', '')}
+🏠 Địa chỉ: {order_data.get('address', '')}
+────────────────────
+⏰ Thời gian đặt hàng: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}
+📦 Đơn hàng sẽ được giao trong 2-4 ngày làm việc
+💳 Thanh toán khi nhận hàng (COD)
+────────────────────
+Cảm ơn bạn đã đặt hàng! ❤️
+Shop sẽ liên hệ xác nhận trong thời gian sớm nhất.
+"""
+    
+    send_message(uid, confirmation_text)
+    
+    # Reset trạng thái đặt hàng
+    ctx["order_state"] = None
+    ctx["order_data"] = {}
+
+
+def handle_order_form_step(uid: str, text: str) -> bool:
+    """
+    Xử lý từng bước điền form đặt hàng
+    Trả về True nếu đã xử lý, False nếu không phải ở trạng thái đặt hàng
+    """
+    ctx = USER_CONTEXT[uid]
+    order_state = ctx.get("order_state")
+    
+    if not order_state:
+        return False
+    
+    if order_state == "waiting_name":
+        ctx["order_data"]["name"] = text
+        ctx["order_state"] = "waiting_phone"
+        send_message(uid, "✅ Đã lưu họ tên: " + text)
+        send_message(uid, "📱 Vui lòng nhập số điện thoại của bạn:")
+        return True
+        
+    elif order_state == "waiting_phone":
+        # Kiểm tra số điện thoại hợp lệ
+        phone_pattern = r'^(0|\+84)[1-9]\d{8}$'
+        phone = text.strip().replace(" ", "")
+        
+        if not re.match(phone_pattern, phone):
+            send_message(uid, "❌ Số điện thoại không hợp lệ. Vui lòng nhập lại số điện thoại (ví dụ: 0912345678 hoặc +84912345678):")
+            return True
+            
+        ctx["order_data"]["phone"] = phone
+        ctx["order_state"] = "waiting_address"
+        send_message(uid, "✅ Đã lưu số điện thoại: " + phone)
+        send_message(uid, "🏠 Vui lòng nhập địa chỉ giao hàng chi tiết (số nhà, đường, phường/xã, quận/huyện, tỉnh/thành phố):")
+        return True
+        
+    elif order_state == "waiting_address":
+        if len(text.strip()) < 10:
+            send_message(uid, "❌ Địa chỉ quá ngắn. Vui lòng nhập địa chỉ chi tiết hơn:")
+            return True
+            
+        ctx["order_data"]["address"] = text.strip()
+        ctx["order_state"] = "confirming"
+        
+        # Hiển thị tổng hợp và yêu cầu xác nhận
+        order_data = ctx["order_data"]
+        product_info = order_data.get("product_info", {})
+        
+        summary = f"""
+📋 THÔNG TIN ĐƠN HÀNG ĐẦY ĐỦ
+────────────────────
+🛍️ Sản phẩm: {product_info.get('name', '')}
+💰 Giá: {product_info.get('price', '')}
+🎨 Màu: {product_info.get('color', '')}
+📏 Size: {product_info.get('size', '')}
+────────────────────
+👤 Người nhận: {order_data.get('name', '')}
+📱 SĐT: {order_data.get('phone', '')}
+🏠 Địa chỉ: {order_data.get('address', '')}
+────────────────────
+"""
+        send_message(uid, summary)
+        
+        # Gửi quick replies để xác nhận
+        confirm_message = {
+            "recipient": {"id": uid},
+            "message": {
+                "text": "Vui lòng xác nhận thông tin trên là chính xác:",
+                "quick_replies": [
+                    {
+                        "content_type": "text",
+                        "title": "✅ Xác nhận đặt hàng",
+                        "payload": "ORDER_CONFIRM"
+                    },
+                    {
+                        "content_type": "text",
+                        "title": "✏️ Sửa thông tin",
+                        "payload": "ORDER_EDIT"
+                    }
+                ]
+            },
+            "messaging_type": "RESPONSE"
+        }
+        
+        try:
+            r = requests.post(
+                "https://graph.facebook.com/v18.0/me/messages",
+                params={"access_token": PAGE_ACCESS_TOKEN},
+                json=confirm_message,
+                timeout=15
+            )
+            print("SEND ORDER CONFIRM:", r.status_code, r.text)
+        except Exception as e:
+            print("SEND ORDER CONFIRM ERROR:", e)
+            
+        return True
+        
+    return False
+
+
+def start_order_process(uid: str, ms: str) -> None:
+    """
+    Bắt đầu quá trình đặt hàng
+    """
+    load_products()
+    
+    if ms not in PRODUCTS:
+        send_message(uid, "❌ Không tìm thấy thông tin sản phẩm. Vui lòng thử lại.")
+        return
+    
+    product_row = PRODUCTS[ms]
+    ctx = USER_CONTEXT[uid]
+    
+    # Lưu thông tin sản phẩm vào order_data
+    ctx["order_data"] = {
+        "product_info": {
+            "ms": ms,
+            "name": f"[{ms}] {product_row.get('Ten', '')}",
+            "price": product_row.get('Gia', ''),
+            "color": product_row.get('màu (Thuộc tính)', ''),
+            "size": product_row.get('size (Thuộc tính)', '')
+        }
+    }
+    
+    # Bắt đầu form đặt hàng
+    send_order_form_quick_replies(uid, ctx["order_data"]["product_info"])
+    ctx["order_state"] = "waiting_name"
 
 
 # ============================================
@@ -722,6 +948,10 @@ def handle_text(uid: str, text: str):
     load_products()
     ctx = USER_CONTEXT[uid]
 
+    # Kiểm tra nếu đang ở trạng thái điền form đặt hàng
+    if handle_order_form_step(uid, text):
+        return
+
     # 1. Cập nhật mã từ chính tin nhắn
     ms_from_text = extract_ms(text)
     if not ms_from_text:
@@ -751,13 +981,11 @@ def handle_text(uid: str, text: str):
     ctx["history"].append({"role": "assistant", "content": reply})
     send_message(uid, reply)
 
-    # 6. Nếu tin nhắn khách có ý định đặt hàng -> gửi CTA chốt đơn
+    # 6. Nếu tin nhắn khách có ý định đặt hàng -> bắt đầu quá trình đặt hàng
     lower = text.lower()
     if ms and ms in PRODUCTS and any(kw in lower for kw in ORDER_KEYWORDS):
-        send_message(
-            uid,
-            "Dạ anh/chị cho em xin họ tên, số điện thoại, địa chỉ cụ thể, màu và size muốn lấy, em lên đơn ngay cho mình ạ. ❤️",
-        )
+        # Bắt đầu quá trình đặt hàng
+        start_order_process(uid, ms)
 
 
 # ============================================
@@ -844,6 +1072,27 @@ def webhook():
                 
                 payload = ev["postback"].get("payload")
                 print(f"[POSTBACK] User {sender_id}: {payload}")
+                
+                # Xử lý order quick replies
+                if payload == "ORDER_PROVIDE_NAME":
+                    ctx["order_state"] = "waiting_name"
+                    send_message(sender_id, "👤 Vui lòng nhập họ tên người nhận hàng:")
+                    return "ok"
+                elif payload == "ORDER_PROVIDE_PHONE":
+                    ctx["order_state"] = "waiting_phone"
+                    send_message(sender_id, "📱 Vui lòng nhập số điện thoại (ví dụ: 0912345678 hoặc +84912345678):")
+                    return "ok"
+                elif payload == "ORDER_PROVIDE_ADDRESS":
+                    ctx["order_state"] = "waiting_address"
+                    send_message(sender_id, "🏠 Vui lòng nhập địa chỉ giao hàng chi tiết:")
+                    return "ok"
+                elif payload == "ORDER_CONFIRM":
+                    send_order_confirmation(sender_id)
+                    return "ok"
+                elif payload == "ORDER_EDIT":
+                    ctx["order_state"] = "waiting_name"
+                    send_message(sender_id, "✏️ Vui lòng nhập lại họ tên người nhận:")
+                    return "ok"
                 
                 # Xử lý postback từ carousel
                 if payload and payload.startswith("VIEW_"):
@@ -939,7 +1188,7 @@ Hoặc bạn có thể nhắn "Đặt hàng" để em hỗ trợ bạn hoàn t�
 
 
 # ============================================
-# ORDER FORM & API
+# ORDER FORM & API (GIỮ NGUYÊN)
 # ============================================
 
 def send_order_link(uid: str, ms: str):
