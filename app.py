@@ -313,7 +313,7 @@ def gpt_analyze_image(url: str):
         }}
         """
         r = client.chat.completions.create(
-            model="gpt-4.1-mini",
+            model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": "Bạn là trợ lý bán hàng chuyên nghiệp."},
                 {"role": "user", "content": [
@@ -429,7 +429,7 @@ def gpt_reply(history: list, product_row: dict | None):
         history = history[-10:]
 
     r = client.chat.completions.create(
-        model="gpt-4.1-mini",
+        model="gpt-4o-mini",
         messages=[{"role": "system", "content": sys}] + history,
         temperature=0.5,
     )
