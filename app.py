@@ -114,10 +114,24 @@ def rehost_image(url: str) -> str:
 
 
 # ============================================
-# LOAD SHEET CHUẨN HÓA CỘT
+# LOAD SHEET THEO ĐÚNG CỘT BẠN YÊU CẦU
 # ============================================
 
 def load_products(force: bool = False) -> None:
+    """
+    Load CSV từ Google Sheet theo đúng cấu trúc sheet bạn đưa:
+    BẮT BUỘC đọc các cột (tên chính xác trên sheet):
+      - Mã sản phẩm
+      - Tên sản phẩm
+      - Images
+      - Videos
+      - Tồn kho
+      - Giá bán
+      - Mô tả
+      - màu (Thuộc tính)
+      - size (Thuộc tính)
+    Các cột khác nếu có sẽ giữ nguyên trong row, nhưng GPT chỉ ưu tiên dùng các cột này.
+    """
     global PRODUCTS, LAST_LOAD
 
     now = time.time()
@@ -129,53 +143,64 @@ def load_products(force: bool = False) -> None:
         PRODUCTS = {}
         return
 
-    print("🟦 Loading sheet:", SHEET_URL)
+    print("🟦 Loading sheet (DictReader, fixed columns):", SHEET_URL)
+
     try:
         resp = requests.get(SHEET_URL, timeout=30)
         resp.raise_for_status()
 
-        df = pd.read_csv(io.StringIO(resp.text), dtype="object").fillna("")
-        cols_lower = {c.lower().strip(): c for c in df.columns}
+        # Ép decode UTF-8, nếu lỗi thì thay ký tự lạ bằng �
+        csv_text = resp.content.decode("utf-8", errors="replace")
+        lines = csv_text.splitlines()
+        reader = csv.DictReader(lines)
 
-        # 1. Mã sản phẩm
-        id_col = None
-        for k in ["mã sản phẩm", "ma san pham", "ma_san_pham", "ms", "mã sp", "ma sp"]:
-            if k in cols_lower:
-                id_col = cols_lower[k]
-                break
-        if not id_col:
-            print("❌ Không tìm thấy cột mã sản phẩm. Columns:", list(df.columns))
-            PRODUCTS = {}
-            return
-        df["MS"] = df[id_col].astype(str).str.strip()
+        products = {}
+        for raw_row in reader:
+            row = dict(raw_row)
 
-        # 2. Tên sản phẩm
-        name_col = None
-        for k in ["tên sản phẩm", "ten san pham", "ten", "title", "name"]:
-            if k in cols_lower:
-                name_col = cols_lower[k]
-                break
-        df["Ten"] = df[name_col].astype(str) if name_col else ""
+            # ---- CỘT BẮT BUỘC: MÃ SẢN PHẨM ----
+            ms = (row.get("Mã sản phẩm") or "").strip()
+            if not ms:
+                continue  # không có mã → bỏ
 
-        # 3. Mô tả
-        desc_col = None
-        for k in ["mô tả", "mo ta", "mota", "description", "mo_ta"]:
-            if k in cols_lower:
-                desc_col = cols_lower[k]
-                break
-        df["MoTa"] = df[desc_col].astype(str) if desc_col else ""
+            # ---- CỘT BẮT BUỘC: TÊN SẢN PHẨM ----
+            ten = (row.get("Tên sản phẩm") or "").strip()
+            if not ten:
+                continue
 
-        # 4. Giá
-        price_col = None
-        for k in ["giá bán", "gia ban", "gia", "price"]:
-            if k in cols_lower:
-                price_col = cols_lower[k]
-                break
-        df["Gia"] = df[price_col].astype(str) if price_col else ""
+            # ---- CỘT BẮT BUỘC: GIÁ BÁN ----
+            gia = (row.get("Giá bán") or "").strip()
+            if not gia:
+                # có thể cho phép trống, nhưng thường bạn sẽ luôn có giá
+                # để an toàn vẫn cho qua, không continue
+                pass
 
-        PRODUCTS = {row["MS"]: dict(row) for _, row in df.iterrows()}
+            # ---- CÁC CỘT QUAN TRỌNG KHÁC ----
+            images = (row.get("Images") or "").strip()
+            videos = (row.get("Videos") or "").strip()
+            tonkho = (row.get("Tồn kho") or "").strip()
+            mota = (row.get("Mô tả") or "").strip()
+            mau = (row.get("màu (Thuộc tính)") or "").strip()
+            size = (row.get("size (Thuộc tính)") or "").strip()
+
+            # Chuẩn hoá key GPT sẽ dùng
+            row["MS"] = ms
+            row["Ten"] = ten
+            row["Gia"] = gia
+            row["MoTa"] = mota
+
+            # Đảm bảo các cột cần thiết luôn tồn tại trong row
+            row["Images"] = images
+            row["Videos"] = videos
+            row["Tồn kho"] = tonkho
+            row["màu (Thuộc tính)"] = mau
+            row["size (Thuộc tính)"] = size
+
+            products[ms] = row
+
+        PRODUCTS = products
         LAST_LOAD = now
-        print(f"📦 Loaded {len(PRODUCTS)} products.")
+        print(f"📦 Loaded {len(PRODUCTS)} products (fixed columns).")
 
     except Exception as e:
         print("❌ load_products error:", e)
@@ -271,7 +296,18 @@ def gpt_reply(history: list, product_row: dict | None):
     """
 
     if product_row:
-        sys += f"\nDữ liệu sản phẩm hiện tại:\nTên: {product_row['Ten']}\nMô tả: {product_row['MoTa']}\nGiá: {product_row['Gia']}\n"
+        tonkho = product_row.get("Tồn kho", "")
+        mau = product_row.get("màu (Thuộc tính)", "")
+        size = product_row.get("size (Thuộc tính)", "")
+        sys += (
+            f"\nDữ liệu sản phẩm hiện tại:\n"
+            f"- Tên: {product_row.get('Ten', '')}\n"
+            f"- Mô tả: {product_row.get('MoTa', '')}\n"
+            f"- Giá bán: {product_row.get('Gia', '')}\n"
+            f"- Tồn kho: {tonkho}\n"
+            f"- Màu: {mau}\n"
+            f"- Size: {size}\n"
+        )
 
     r = client.chat.completions.create(
         model="gpt-4.1-mini",
