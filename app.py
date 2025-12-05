@@ -42,6 +42,7 @@ USER_CONTEXT = defaultdict(lambda: {
     "greeted": False,              # đã chào chưa
     "recommended_sent": False,     # đã gửi 5 sản phẩm gợi ý chưa
     "product_info_sent_ms": None,  # đã gửi thông tin sản phẩm nào
+    "carousel_sent": False,        # đã gửi carousel chưa
 })
 
 PRODUCTS = {}
@@ -175,6 +176,90 @@ def send_image(uid: str, image_url: str) -> None:
         print("SEND IMG:", r.status_code, r.text)
     except Exception as e:
         print("SEND IMG ERROR:", e)
+
+
+# ============================================
+# CAROUSEL TEMPLATE (MỚI THÊM)
+# ============================================
+
+def send_carousel_template(recipient_id: str, products_data: list) -> None:
+    """
+    Gửi carousel template với danh sách sản phẩm
+    products_data: list of dict với keys: code, name, price, desc, image_url
+    """
+    try:
+        # Tạo các element cho carousel
+        elements = []
+        for product in products_data[:10]:  # Facebook giới hạn 10 element
+            # Lấy ảnh đầu tiên từ field Images
+            image_field = product.get("Images", "")
+            image_urls = parse_image_urls(image_field)
+            image_url = image_urls[0] if image_urls else ""
+            
+            # Nếu không có ảnh, bỏ qua sản phẩm này
+            if not image_url:
+                continue
+                
+            element = {
+                "title": f"[{product.get('MS', '')}] {product.get('Ten', '')}",
+                "subtitle": f"💰 Giá: {product.get('Gia', '')}\n{product.get('MoTa', '')[:60]}..." if product.get('MoTa') else f"💰 Giá: {product.get('Gia', '')}",
+                "image_url": image_url,
+                "buttons": [
+                    {
+                        "type": "postback",
+                        "title": "📋 Xem chi tiết",
+                        "payload": f"VIEW_{product.get('MS', '')}"
+                    },
+                    {
+                        "type": "postback",
+                        "title": "🛒 Chọn sản phẩm",
+                        "payload": f"SELECT_{product.get('MS', '')}"
+                    }
+                ]
+            }
+            elements.append(element)
+        
+        if not elements:
+            print("Không có sản phẩm nào có ảnh để hiển thị trong carousel")
+            return
+        
+        # Tạo payload carousel
+        url = "https://graph.facebook.com/v18.0/me/messages"
+        params = {"access_token": PAGE_ACCESS_TOKEN}
+        payload = {
+            "recipient": {"id": recipient_id},
+            "message": {
+                "attachment": {
+                    "type": "template",
+                    "payload": {
+                        "template_type": "generic",
+                        "elements": elements
+                    }
+                }
+            },
+            "messaging_type": "RESPONSE"
+        }
+        
+        r = requests.post(url, params=params, json=payload, timeout=15)
+        print("SEND CAROUSEL:", r.status_code, r.text)
+        
+    except Exception as e:
+        print("SEND CAROUSEL ERROR:", e)
+
+
+def send_product_carousel(recipient_id: str) -> None:
+    """
+    Gửi 5 sản phẩm đầu tiên dưới dạng Carousel Template
+    """
+    load_products()
+    if not PRODUCTS:
+        return
+    
+    # Lấy 5 sản phẩm đầu tiên
+    products = list(PRODUCTS.values())[:5]
+    
+    # Gửi carousel
+    send_carousel_template(recipient_id, products)
 
 
 # ============================================
@@ -529,7 +614,7 @@ def send_recommendations(uid: str):
 
 
 # ============================================
-# GREETING
+# GREETING (SỬA ĐỔI: LUỒNG KHÁCH CHỦ ĐỘNG INBOX)
 # ============================================
 
 def maybe_greet(uid: str, ctx: dict, has_ms: bool):
@@ -553,9 +638,11 @@ def maybe_greet(uid: str, ctx: dict, has_ms: bool):
     send_message(uid, msg)
     ctx["greeted"] = True
 
-    # Gửi 5 sản phẩm gợi ý nếu chưa có mã nào
-    if not has_ms and not ctx["recommended_sent"]:
-        send_recommendations(uid)
+    # SỬA ĐỔI CHÍNH Ở ĐÂY: Gửi carousel thay vì từng sản phẩm riêng lẻ
+    if not has_ms and not ctx["carousel_sent"]:
+        send_message(uid, "Em gửi anh/chị 5 mẫu đang được nhiều khách quan tâm, mình tham khảo thử ạ:")
+        send_product_carousel(uid)  # THAY ĐỔI: Gửi carousel
+        ctx["carousel_sent"] = True
         ctx["recommended_sent"] = True
 
 
@@ -671,7 +758,7 @@ def handle_echo_outgoing(page_id: str, user_id: str, text: str):
 
 
 # ============================================
-# WEBHOOK
+# WEBHOOK (SỬA ĐỔI: THÊM XỬ LÝ POSTBACK CAROUSEL)
 # ============================================
 
 @app.route("/webhook", methods=["GET", "POST"])
@@ -703,7 +790,67 @@ def webhook():
             # từ đây trở xuống: sender_id = user
             ctx = USER_CONTEXT[sender_id]
 
-            # 2) REFERRAL (nhấn nút Inbox, hoặc quảng cáo Click-to-Message)
+            # 2) POSTBACK HANDLER (MỚI THÊM: Xử lý khi khách bấm nút trong carousel)
+            if "postback" in ev:
+                payload = ev["postback"].get("payload")
+                print(f"[POSTBACK] User {sender_id}: {payload}")
+                
+                # Xử lý postback từ carousel
+                if payload and payload.startswith("VIEW_"):
+                    product_code = payload.replace("VIEW_", "")
+                    # Gửi thông tin sản phẩm chi tiết
+                    if product_code in PRODUCTS:
+                        ctx["last_ms"] = product_code
+                        ctx["product_info_sent_ms"] = product_code
+                        send_product_info(sender_id, product_code)
+                    else:
+                        send_message(sender_id, f"Dạ em không tìm thấy sản phẩm mã {product_code} ạ.")
+                    return "ok"
+                    
+                elif payload and payload.startswith("SELECT_"):
+                    product_code = payload.replace("SELECT_", "")
+                    # Xử lý khi khách chọn sản phẩm
+                    if product_code in PRODUCTS:
+                        ctx["last_ms"] = product_code
+                        ctx["product_info_sent_ms"] = product_code
+                        
+                        product_info = PRODUCTS[product_code]
+                        response = f"""✅ Bạn đã chọn sản phẩm **{product_code}** - {product_info.get('Ten', '')}!
+
+Vui lòng cho em biết:
+1. Size bạn muốn đặt là gì?
+2. Màu sắc bạn thích?
+3. Số lượng cần mua?
+
+Hoặc bạn có thể nhắn "Đặt hàng" để em hỗ trợ bạn hoàn tất đơn nhé! 🛍️"""
+                        send_message(sender_id, response)
+                    else:
+                        send_message(sender_id, f"Dạ em không tìm thấy sản phẩm mã {product_code} ạ.")
+                    return "ok"
+
+                # Xử lý referral trong postback (nếu có) - GIỮ NGUYÊN
+                ref = ev["postback"].get("referral", {}).get("ref")
+                if ref:
+                    ms_ref = extract_ms_from_ref(ref)
+                    if ms_ref:
+                        ctx["inbox_entry_ms"] = ms_ref
+                        ctx["last_ms"] = ms_ref
+                        print(f"[REF] Nhận mã từ referral: {ms_ref}")
+                        
+                        # Nếu là luồng referral, không chào
+                        ctx["greeted"] = True
+                        
+                        # Gửi thông tin sản phẩm
+                        send_product_info(sender_id, ms_ref)
+                        return "ok"
+                
+                # Nếu postback không có ref hoặc payload không phải từ carousel
+                if not ctx["greeted"]:
+                    maybe_greet(sender_id, ctx, has_ms=False)
+                send_message(sender_id, "Anh/chị cho em biết đang quan tâm mẫu nào hoặc gửi ảnh mẫu để em xem giúp ạ.")
+                return "ok"
+
+            # 3) REFERRAL (nhấn nút Inbox, hoặc quảng cáo Click-to-Message)
             ref = ev.get("referral", {}).get("ref") \
                 or ev.get("postback", {}).get("referral", {}).get("ref")
             if ref:
@@ -713,7 +860,7 @@ def webhook():
                     ctx["last_ms"] = ms_ref
                     print(f"[REF] Nhận mã từ referral: {ms_ref}")
 
-            # 3) ATTACHMENTS → ảnh
+            # 4) ATTACHMENTS → ảnh
             if "message" in ev and "attachments" in msg:
                 for att in msg["attachments"]:
                     if att.get("type") == "image":
@@ -723,17 +870,10 @@ def webhook():
                             return "ok"
                 continue
 
-            # 4) TEXT
+            # 5) TEXT
             if "message" in ev and "text" in msg:
                 text = msg.get("text", "")
                 handle_text(sender_id, text)
-                return "ok"
-
-            # 5) POSTBACK (nút bấm)
-            if "postback" in ev:
-                # Nếu postback không có ref thì coi như direct inbox
-                maybe_greet(sender_id, ctx, has_ms=False)
-                send_message(sender_id, "Anh/chị cho em biết đang quan tâm mẫu nào hoặc gửi ảnh mẫu để em xem giúp ạ.")
                 return "ok"
 
     return "ok"
