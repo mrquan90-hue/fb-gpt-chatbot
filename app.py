@@ -42,11 +42,77 @@ USER_CONTEXT = defaultdict(lambda: {
     "vision_ms": None,        # mã từ GPT Vision
     "history": [],            # lịch sử hội thoại
     "greeted": False,         # đã chào chưa
+    "last_image_ms": None,    # mã sản phẩm đã gửi ảnh gần nhất (tránh spam)
 })
 
 PRODUCTS = {}
 LAST_LOAD = 0
 LOAD_TTL = 300  # 5 phút cache sheet
+
+# ============================================
+# TỪ KHOÁ THỂ HIỆN Ý ĐỊNH "ĐẶT HÀNG / MUA"
+# (đã loại bỏ các từ quá chung như "ok", "ừ", "được")
+# ============================================
+
+ORDER_KEYWORDS = [
+    "đặt hàng nha",
+    "ok đặt",
+    "ok mua",
+    "ok em",
+    "ok e",
+    "mua 1 cái",
+    "mua cái này",
+    "mua luôn",
+    "chốt",
+    "lấy mã",
+    "lấy mẫu",
+    "lấy luôn",
+    "lấy em này",
+    "lấy e này",
+    "gửi cho",
+    "ship cho",
+    "ship 1 cái",
+    "chốt 1 cái",
+    "cho tôi mua",
+    "tôi lấy nhé",
+    "cho mình đặt",
+    "tôi cần mua",
+    "xác nhận đơn hàng giúp tôi",
+    "tôi đồng ý mua",
+    "làm đơn cho tôi đi",
+    "tôi chốt đơn nhé",
+    "cho xin 1 cái",
+    "cho đặt 1 chiếc",
+    "bên shop tạo đơn giúp em",
+    "okela",
+    "ok bạn",
+    "đồng ý",
+    "được đó",
+    "vậy cũng được",
+    "được vậy đi",
+    "chốt như bạn nói",
+    "ok giá đó đi",
+    "lấy mẫu đó đi",
+    "tư vấn giúp mình đặt hàng",
+    "hướng dẫn mình mua với",
+    "bạn giúp mình đặt nhé",
+    "muốn có nó quá",
+    "muốn mua quá",
+    "ưng quá, làm sao để mua",
+    "chốt đơn",
+    "bán cho em",
+    "bán cho em vé",
+    "xuống đơn giúp em",
+    "đơm hàng",
+    "lấy nha",
+    "lấy nhé",
+    "mua nha",
+    "mình lấy đây",
+    "shop ơi, của em",
+    "vậy lấy cái",
+    "thôi lấy cái",
+    "order nhé",
+]
 
 # ============================================
 # TIỆN ÍCH FACEBOOK
@@ -171,7 +237,6 @@ def load_products(force: bool = False) -> None:
             # ---- CỘT BẮT BUỘC: GIÁ BÁN ----
             gia = (row.get("Giá bán") or "").strip()
             if not gia:
-                # có thể cho phép trống, nhưng thường bạn sẽ luôn có giá
                 # để an toàn vẫn cho qua, không continue
                 pass
 
@@ -266,6 +331,47 @@ def extract_ms(text: str):
     return m.group(1).upper() if m else None
 
 
+def extract_short_code(text: str):
+    """
+    Tìm pattern dạng 'mã 09', 'ma so 9', 'mã số 18'...
+    Trả về phần số (ví dụ '09', '18').
+    """
+    if not text:
+        return None
+    lower = text.lower()
+    m = re.search(r"mã\s*(?:số\s*)?(\d{1,3})", lower)
+    if not m:
+        m = re.search(r"ma\s*(?:so\s*)?(\d{1,3})", lower)
+    if not m:
+        return None
+    return m.group(1)
+
+
+def find_ms_by_short_code(code: str):
+    """
+    Map '09' -> mã trong PRODUCTS kết thúc bằng 09 / 009...
+    Ví dụ: MS000009, MS009,...
+    """
+    if not code:
+        return None
+    # bỏ 0 thừa bên trái để tránh trường hợp '' sau khi lstrip
+    code = code.lstrip("0") or code
+    candidates = []
+    for ms in PRODUCTS.keys():
+        if not ms.upper().startswith("MS"):
+            continue
+        digits = re.sub(r"\D", "", ms)
+        if digits.endswith(code):
+            candidates.append(ms)
+
+    if not candidates:
+        return None
+
+    # Ưu tiên mã dài hơn (đủ 6 số) để hạn chế nhầm
+    candidates.sort(key=len, reverse=True)
+    return candidates[0]
+
+
 def resolve_best_ms(ctx: dict):
     for key in ["vision_ms", "inbox_entry_ms", "caption_ms", "last_ms"]:
         if ctx.get(key):
@@ -322,7 +428,10 @@ def gpt_reply(history: list, product_row: dict | None):
 # ============================================
 
 def handle_image(uid: str, image_url: str):
+    load_products()
     ctx = USER_CONTEXT[uid]
+    maybe_greet(uid)
+
     hosted = rehost_image(image_url)
     ms, desc = gpt_analyze_image(hosted)
     print("VISION RESULT:", ms, desc)
@@ -330,7 +439,7 @@ def handle_image(uid: str, image_url: str):
     if ms and ms in PRODUCTS:
         ctx["vision_ms"] = ms
         ctx["last_ms"] = ms
-        send_message(uid, f"Dạ ảnh này giống mẫu **{ms}** của shop đó ạ!")
+        send_message(uid, f"Dạ ảnh này giống mẫu {ms} của shop đó ạ!")
         imgs = extract_images(PRODUCTS[ms])
         if imgs:
             send_image(uid, rehost_image(imgs[0]))
@@ -356,29 +465,64 @@ def maybe_greet(uid: str):
 
 
 # ============================================
-# HANDLE TEXT MESSAGE
+# HANDLE TEXT MESSAGE (NEW)
 # ============================================
 
 def handle_text(uid: str, text: str):
+    """
+    - GPT tư vấn theo ngữ cảnh (no-rule)
+    - Hiểu mã đầy đủ (MS000046) + mã ngắn ('Mã 09')
+    - Tự động gửi ảnh 1 lần / mã / hội thoại
+    - Gửi link form đặt hàng khi khách thể hiện ý định mua
+    """
     load_products()
     ctx = USER_CONTEXT[uid]
     maybe_greet(uid)
 
+    # 1) Cập nhật mã từ chính tin nhắn khách
     ms_text = extract_ms(text)
+    if not ms_text:
+        short = extract_short_code(text)
+        if short:
+            ms_text = find_ms_by_short_code(short)
+
     if ms_text:
         ctx["last_ms"] = ms_text
 
     ms = resolve_best_ms(ctx)
 
+    # 2) Đẩy câu hỏi vào lịch sử rồi gọi GPT
     ctx["history"].append({"role": "user", "content": text})
 
     if ms and ms in PRODUCTS:
-        reply = gpt_reply(ctx["history"], PRODUCTS[ms])
+        product = PRODUCTS[ms]
+        reply = gpt_reply(ctx["history"], product)
     else:
+        product = None
         reply = gpt_reply(ctx["history"], None)
 
     ctx["history"].append({"role": "assistant", "content": reply})
     send_message(uid, reply)
+
+    # 3) Nếu đã xác định được mã sản phẩm → gửi ảnh + link đặt hàng khi có ý định mua
+    if ms and ms in PRODUCTS:
+        product = PRODUCTS[ms]
+
+        # Gửi ảnh: mỗi mã chỉ gửi 1 lần / hội thoại
+        last_img_ms = ctx.get("last_image_ms")
+        imgs = extract_images(product)
+        if imgs and ms != last_img_ms:
+            try:
+                hosted = rehost_image(imgs[0])
+                send_image(uid, hosted)
+                ctx["last_image_ms"] = ms
+            except Exception as e:
+                print("[IMAGE_SEND_ERROR]", e)
+
+        # Nếu câu của khách có ý 'mua / chốt' thì gửi link form
+        lower = text.lower()
+        if any(kw in lower for kw in ORDER_KEYWORDS):
+            send_order_link(uid, ms)
 
 
 # ============================================
@@ -391,18 +535,20 @@ def extract_ms_from_ref(ref: str | None):
     return extract_ms(ref)
 
 
-def handle_echo_outgoing(uid: str, text: str):
+def handle_echo_outgoing(page_id: str, user_id: str, text: str):
     """
     Tin nhắn do PAGE/FCHAT gửi (echo).
-    Dùng để cập nhật mã sản phẩm, KHÔNG được trả lời lại.
+    Dùng để cập nhật mã sản phẩm cho user, KHÔNG được trả lời lại.
     Ví dụ: "[MS000046] ..." hoặc "#MS000046 ..."
     """
+    if not user_id:
+        return
     ms = extract_ms(text)
     if ms:
-        ctx = USER_CONTEXT[uid]
+        ctx = USER_CONTEXT[user_id]
         ctx["inbox_entry_ms"] = ms
         ctx["last_ms"] = ms
-        print(f"[ECHO] Ghi nhận mã từ page/Fchat: {ms}")
+        print(f"[ECHO] Ghi nhận mã từ page/Fchat cho user {user_id}: {ms}")
 
 
 # ============================================
@@ -427,15 +573,16 @@ def webhook():
             if not sender_id:
                 continue
 
-            ctx = USER_CONTEXT[sender_id]
+            # ECHO: sender_id = page, recipient_id = user
+            msg = ev.get("message", {}) or {}
 
-            msg = ev.get("message", {})
-
-            # 1) ECHO (tin nhắn do page/Fchat gửi)
             if msg.get("is_echo"):
                 text = msg.get("text") or ""
-                handle_echo_outgoing(sender_id, text)
+                handle_echo_outgoing(page_id=sender_id, user_id=recipient_id, text=text)
                 continue
+
+            # Từ đây trở xuống: sender_id = user
+            ctx = USER_CONTEXT[sender_id]
 
             # 2) REF (khách đến từ post/comment/CTA)
             ref = ev.get("referral", {}).get("ref") \
@@ -476,16 +623,28 @@ def webhook():
 # ORDER FORM & API
 # ============================================
 
+def send_order_link(uid: str, ms: str):
+    """
+    Gửi link form đặt hàng cho 1 sản phẩm cụ thể, dùng DOMAIN + route /o/<ms>.
+    """
+    base = DOMAIN or ""
+    if base and not base.startswith("http"):
+        base = "https://" + base
+    url = f"{base}/o/{quote(ms)}"
+    msg = f"Để chốt đơn nhanh, anh/chị điền giúp em thông tin nhận hàng tại đây ạ: {url}"
+    send_message(uid, msg)
+
+
 @app.route("/o/<ms>")
 def order_link(ms: str):
     load_products()
     ms = ms.upper()
     if ms not in PRODUCTS:
         return f"Không tìm thấy sản phẩm {ms}", 404
-    pd = PRODUCTS[ms]
-    ten = pd["Ten"]
-    gia = pd["Gia"]
-    mota = pd["MoTa"]
+    pd_row = PRODUCTS[ms]
+    ten = pd_row["Ten"]
+    gia = pd_row["Gia"]
+    mota = pd_row["MoTa"]
     return f"""
     <html><body>
     <h2>Đặt hàng {ms}</h2>
