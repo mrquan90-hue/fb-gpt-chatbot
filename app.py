@@ -27,7 +27,6 @@ VERIFY_TOKEN       = os.getenv("VERIFY_TOKEN")
 FREEIMAGE_API_KEY  = os.getenv("FREEIMAGE_API_KEY")
 SHEET_URL          = os.getenv("SHEET_CSV_URL")
 DOMAIN             = os.getenv("DOMAIN", "fb-gpt-chatbot.onrender.com")
-PAGE_ID            = os.getenv("PAGE_ID", "516937221685203")
 
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
@@ -47,9 +46,8 @@ USER_CONTEXT = defaultdict(lambda: {
     "carousel_sent": False,        # đã gửi carousel chưa
     "last_postback_time": 0,       # thời gian postback cuối cùng (chống lặp)
     "sent_message_ids": set(),     # ID các tin nhắn đã gửi (chống lặp echo)
-    "order_state": None,           # Trạng thái đặt hàng
+    "order_state": None,           # Trạng thái đặt hàng: None, "waiting_name", "waiting_phone", "waiting_address", "confirming"
     "order_data": {},              # Dữ liệu đơn hàng
-    "page_info": None,             # Thông tin fanpage
 })
 
 PRODUCTS = {}
@@ -203,7 +201,7 @@ def send_image(uid: str, image_url: str) -> str:
 
 
 # ============================================
-# CAROUSEL TEMPLATE - ĐÃ SỬA: NÚT "CHỌN SẢN PHẨM" CHUYỂN THÀNH LINK WEB_URL
+# CAROUSEL TEMPLATE
 # ============================================
 
 def send_carousel_template(recipient_id: str, products_data: list) -> str:
@@ -223,28 +221,21 @@ def send_carousel_template(recipient_id: str, products_data: list) -> str:
             # Nếu không có ảnh, bỏ qua sản phẩm này
             if not image_url:
                 continue
-            
-            ms = product.get('MS', '')
-            
-            # Tạo URL đặt hàng với user_id và mã sản phẩm
-            order_url = f"https://{DOMAIN}/order-form?ms={ms}&uid={recipient_id}"
                 
             element = {
-                "title": f"[{ms}] {product.get('Ten', '')}",
+                "title": f"[{product.get('MS', '')}] {product.get('Ten', '')}",
                 "subtitle": f"💰 Giá: {product.get('Gia', '')}\n{product.get('MoTa', '')[:60]}..." if product.get('MoTa') else f"💰 Giá: {product.get('Gia', '')}",
                 "image_url": image_url,
                 "buttons": [
                     {
                         "type": "postback",
                         "title": "📋 Xem chi tiết",
-                        "payload": f"VIEW_{ms}"
+                        "payload": f"VIEW_{product.get('MS', '')}"
                     },
                     {
-                        "type": "web_url",  # ĐÃ SỬA: Thay postback bằng web_url
-                        "title": "🛒 Đặt ngay",
-                        "url": order_url,
-                        "webview_height_ratio": "tall",
-                        "messenger_extensions": True
+                        "type": "postback",
+                        "title": "🛒 Chọn sản phẩm",
+                        "payload": f"SELECT_{product.get('MS', '')}"
                     }
                 ]
             }
@@ -748,7 +739,7 @@ def resolve_best_ms(ctx: dict):
 
 
 # ============================================
-# GPT CONTEXT ENGINE - ĐÃ SỬA: NÂNG CẤP CÂU TƯ VẤN CHUYÊN NGHIỆP
+# GPT CONTEXT ENGINE
 # ============================================
 
 def gpt_reply(history: list, product_row: dict | None):
@@ -756,83 +747,47 @@ def gpt_reply(history: list, product_row: dict | None):
         return "Dạ hệ thống AI đang bận, anh/chị chờ em 1 lát với ạ."
 
     sys = """
-    Bạn là MIU - trợ lý bán hàng chuyên nghiệp của Fashion Shop Premium.
-    
-    **QUY TẮC GIAO TIẾP:**
-    - Xưng "em", gọi khách là "anh/chị"
-    - Luôn lịch sự, nhiệt tình, thân thiện
-    - Sử dụng icon cảm xúc phù hợp (❤️, 😊, 💕)
-    - Định dạng tin nhắn rõ ràng, có cấu trúc
-    
-    **CHIẾN LƯỢC BÁN HÀNG:**
-    1. TƯ VẤN CHUYÊN SÂU:
-       - Hỏi về dáng người (cao/gầy, mũm mĩm, vai rộng)
-       - Hỏi phong cách yêu thích (công sở, dạo phố, đi tiệc)
-       - Hỏi ngân sách dự kiến
-       - Tư vấn theo đặc điểm cá nhân
-    
-    2. TỐI ƯU CHỐT ĐƠN:
-       - Nhấn mạnh ưu điểm nổi bật của sản phẩm
-       - Gợi ý size/màu phù hợp với dáng người
-       - Thông báo ưu đãi: Freeship 30K, giảm 5% khi đặt chat
-       - Kêu gọi hành động rõ ràng: "Đặt ngay", "Chốt đơn"
-    
-    3. XỬ LÝ TỪ CHỐI:
-       - Thấu hiểu: "Em hiểu ạ, mỗi người có gu riêng mà"
-       - Chuyển hướng: "Để em gợi ý mẫu khác phù hợp hơn nhé"
-       - Giữ liên lạc: "Khi nào cần tư vấn, anh/chị cứ nhắn em ạ"
-    
-    **KHÔNG BAO GIỜ:**
-    - Bịa đặt thông tin sản phẩm
-    - Hứa hẹn không thực tế
-    - Thiếu nhiệt tình trong trả lời
-    - Để khách chờ quá lâu (luôn phản hồi nhanh)
+    Bạn là trợ lý bán hàng của shop quần áo.
+    - Xưng "em", gọi khách là "anh/chị".
+    - Trả lời ngắn gọn, lịch sự, dễ hiểu.
+    - Không bịa đặt chất liệu/giá/ưu đãi nếu không có trong dữ liệu.
+    - Nếu đã biết sản phẩm khách đang xem, hãy:
+      + Tóm tắt mẫu, giá, ưu điểm.
+      + Gợi ý size/màu phù hợp.
+      + Hỏi thêm 1 câu để chốt (size, màu hoặc đặt hàng).
+    - Nếu CHƯA biết sản phẩm:
+      + Hỏi rõ nhu cầu (mục đích, dáng người, ngân sách).
+      + Gợi ý hướng lựa chọn chung, không tự đặt mã.
     """
 
     if product_row:
         tonkho = product_row.get("Tồn kho", "")
         mau = product_row.get("màu (Thuộc tính)", "")
         size = product_row.get("size (Thuộc tính)", "")
-        gia = product_row.get("Gia", "")
-        
         sys += (
-            f"\n\n📦 **THÔNG TIN SẢN PHẨM HIỆN TẠI:**\n"
+            f"\nDữ liệu sản phẩm hiện tại:\n"
             f"- Tên: {product_row.get('Ten', '')}\n"
             f"- Mô tả: {product_row.get('MoTa', '')}\n"
-            f"- Giá bán: {gia}\n"
+            f"- Giá bán: {product_row.get('Gia', '')}\n"
             f"- Tồn kho: {tonkho}\n"
-            f"- Màu sắc có sẵn: {mau if mau else 'Nhiều màu'}\n"
-            f"- Size có sẵn: {size if size else 'Đa dạng size'}\n\n"
-            f"💎 **ƯU ĐÃI ĐẶC BIỆT:**\n"
-            f"- Freeship 30K cho đơn đầu tiên\n"
-            f"- Giảm thêm 5% khi đặt qua chat\n"
-            f"- Tặng voucher 50K cho lần mua sau\n"
-            f"- Đổi trả dễ dàng trong 7 ngày\n\n"
-            f"🎯 **CHIẾN LƯỢC CHỐT ĐƠN:**\n"
-            f"1. Tư vấn size phù hợp dựa trên dáng người\n"
-            f"2. Gợi ý màu sắc hợp phong cách\n"
-            f"3. Thông báo ưu đãi hấp dẫn\n"
-            f"4. Kêu gọi đặt hàng ngay: 'Bấm ĐẶT NGAY để nhận ưu đãi'"
+            f"- Màu: {mau}\n"
+            f"- Size: {size}\n"
         )
 
     # giới hạn lịch sử ~10 turns
     if len(history) > 10:
         history = history[-10:]
 
-    try:
-        r = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "system", "content": sys}] + history,
-            temperature=0.6,
-        )
-        return r.choices[0].message.content
-    except Exception as e:
-        print("GPT ERROR:", e)
-        return "Dạ em đang tư vấn sản phẩm cho anh/chị ạ. Anh/chị có thể cho em biết thêm về dáng người và phong cách để em tư vấn chính xác hơn không ạ? ❤️"
+    r = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "system", "content": sys}] + history,
+        temperature=0.5,
+    )
+    return r.choices[0].message.content
 
 
 # ============================================
-# GỬI THÔNG TIN SẢN PHẨM - ĐÃ SỬA: NÂNG CẤP NỘI DUNG
+# GỬI THÔNG TIN SẢN PHẨM
 # ============================================
 
 def build_product_info_text(ms: str, row: dict) -> str:
@@ -843,41 +798,24 @@ def build_product_info_text(ms: str, row: dict) -> str:
     mau = row.get("màu (Thuộc tính)", "")
     size = row.get("size (Thuộc tính)", "")
 
-    # Ưu điểm nổi bật: format đẹp hơn
+    # Ưu điểm nổi bật: rút gọn mô tả
     highlight = mota
-    if len(highlight) > 300:
-        highlight = highlight[:280].rsplit(" ", 1)[0] + "..."
+    if len(highlight) > 350:
+        highlight = highlight[:330].rsplit(" ", 1)[0] + "..."
 
-    text = f"""🌟 **[{ms}] {ten}** 🌟
-
-✨ **ƯU ĐIỂM NỔI BẬT:**
-{highlight}
-
-🎨 **THÔNG TIN CHI TIẾT:**
-"""
-    if mau:
-        text += f"• Màu sắc: {mau}\n"
-    if size:
-        text += f"• Size có sẵn: {size}\n"
+    text = f"[{ms}] {ten}\n"
+    text += f"\n✨ Ưu điểm nổi bật:\n- {highlight}\n" if highlight else ""
+    if mau or size:
+        text += "\n🎨 Màu/Size:\n"
+        if mau:
+            text += f"- Màu: {mau}\n"
+        if size:
+            text += f"- Size: {size}\n"
     if gia:
-        text += f"• Giá chỉ: **{gia}**\n"
+        text += f"\n💰 Giá bán: {gia}\n"
     if tonkho:
-        text += f"• Tồn kho: {tonkho}\n"
-    
-    text += f"""
-💎 **ƯU ĐÃI KHI MUA NGAY:**
-✓ Freeship 30K cho đơn đầu tiên
-✓ Giảm thêm 5% khi đặt qua chat
-✓ Tặng voucher 50K cho lần sau
-✓ Đổi trả dễ dàng trong 7 ngày
-
-👉 **EM TƯ VẤN THÊM CHO ANH/CHỊ NHÉ:**
-1. Dáng người của anh/chị thế nào?
-2. Thích phong cách gì (công sở, dạo phố, đi tiệc)?
-3. Màu sắc yêu thích?
-
-Hoặc anh/chị có thể bấm **"ĐẶT NGAY"** để chốt đơn trong 2 phút! 🛍️❤️"""
-    
+        text += f"📦 Tồn kho: {tonkho}\n"
+    text += "\n👉 Anh/chị xem giúp em mẫu này có hợp gu không, nếu ưng em tư vấn thêm màu/size và chốt đơn cho mình ạ. ❤️"
     return text
 
 
@@ -911,15 +849,15 @@ def send_recommendations(uid: str):
         return
 
     prods = list(PRODUCTS.values())[:5]
-    send_message(uid, "✨ **EM GỬI ANH/CHỊ 5 MẪU HOT NHẤT TUẦN NÀY:**\n(Các chị em đang săn đón nhiều lắm ạ 💕)")
+    send_message(uid, "Em gửi anh/chị 5 mẫu đang được nhiều khách quan tâm, mình tham khảo thử ạ:")
 
     for row in prods:
         ms = row.get("MS", "")
         ten = row.get("Ten", "")
         gia = row.get("Gia", "")
-        txt = f"🔥 **[{ms}] {ten}**"
+        txt = f"- [{ms}] {ten}"
         if gia:
-            txt += f"\n💰 Giá chỉ: {gia}"
+            txt += f" – Giá: {gia}"
         send_message(uid, txt)
 
         images_field = row.get("Images", "")
@@ -931,12 +869,15 @@ def send_recommendations(uid: str):
 
 
 # ============================================
-# GREETING - ĐÃ SỬA: NÂNG CẤP CÂU CHÀO
+# GREETING (SỬA ĐỔI: LUỒNG KHÁCH CHỦ ĐỘNG INBOX)
 # ============================================
 
 def maybe_greet(uid: str, ctx: dict, has_ms: bool):
     """
-    Chào khách chuyên nghiệp, cuốn hút
+    Chào khách:
+    - Nếu là luồng direct inbox (không có inbox_entry_ms từ Fchat/referral)
+    - Chỉ chào 1 lần
+    - Nếu ngay tin đầu đã có mã (vd: 'Mã 09') thì vẫn chào nhưng KHÔNG gửi 5 gợi ý
     """
     if ctx["greeted"]:
         return
@@ -945,36 +886,23 @@ def maybe_greet(uid: str, ctx: dict, has_ms: bool):
     if ctx.get("inbox_entry_ms"):
         return
 
-    msg = """🌸 **CHÀO MỪNG BẠN ĐẾN VỚI FASHION SHOP PREMIUM!** 🌸
-
-Xin chào anh/chị! Em là **MIU** - trợ lý ảo của shop, rất vui được hỗ trợ bạn ❤️
-
-🎯 **EM CÓ THỂ GIÚP BẠN:**
-✓ Tư vấn set đồ phù hợp với dáng người
-✓ Chọn size chuẩn, đẹp dáng
-✓ Hỗ trợ đặt hàng nhanh trong 2 phút
-✓ Tư vấn mix & match phong cách
-
-💎 **ƯU ĐÃI ĐẶC BIỆT HÔM NAY:**
-• Freeship 30K cho đơn đầu tiên
-• Giảm thêm 5% khi đặt qua chat
-• Tặng voucher 50K cho lần sau
-• Đổi trả dễ dàng trong 7 ngày
-
-👇 Dưới đây là 5 mẫu **HOT NHẤT TUẦN** được các chị em săn đón ạ!"""
-    
+    msg = (
+        "Em chào anh/chị 😊\n"
+        "Em là trợ lý chăm sóc khách hàng của shop, hỗ trợ anh/chị xem mẫu, tư vấn size và chốt đơn nhanh ạ."
+    )
     send_message(uid, msg)
     ctx["greeted"] = True
 
-    # Gửi carousel sản phẩm
+    # SỬA ĐỔI CHÍNH Ở ĐÂY: Gửi carousel thay vì từng sản phẩm riêng lẻ
     if not has_ms and not ctx["carousel_sent"]:
-        send_product_carousel(uid)  # Gửi carousel thay vì từng sản phẩm
+        send_message(uid, "Em gửi anh/chị 5 mẫu đang được nhiều khách quan tâm, mình tham khảo thử ạ:")
+        send_product_carousel(uid)  # THAY ĐỔI: Gửi carousel
         ctx["carousel_sent"] = True
         ctx["recommended_sent"] = True
 
 
 # ============================================
-# HANDLE IMAGE MESSAGE
+# HANDLE IMAGE MESSAGE (LUỒNG GỬI ẢNH)
 # ============================================
 
 def handle_image(uid: str, image_url: str):
@@ -994,22 +922,28 @@ def handle_image(uid: str, image_url: str):
         ctx["last_ms"] = ms
         ctx["product_info_sent_ms"] = ms
 
-        send_message(uid, f"✨ **ẢNH NÀY GIỐNG MẪU [{ms}] CỦA SHOP ĐÓ Ạ!**\nEm gửi thông tin chi tiết cho anh/chị tham khảo nhé 💕")
+        send_message(uid, f"Dạ ảnh này giống mẫu [{ms}] của shop đó anh/chị, em gửi thông tin sản phẩm cho mình nhé. 💕")
         send_product_info(uid, ms)
     else:
         send_message(
             uid,
-            "Dạ hình này hơi khó nhận mẫu chính xác ạ, anh/chị gửi giúp em caption hoặc mã sản phẩm để em kiểm tra cho chuẩn nhé.\n\nHoặc anh/chị có thể mô tả:\n• Dáng người của mình\n• Phong cách yêu thích\n• Ngân sách dự kiến\n\nEm sẽ tư vấn mẫu phù hợp nhất ạ! ❤️",
+            "Dạ hình này hơi khó nhận mẫu chính xác ạ, anh/chị gửi giúp em caption hoặc mã sản phẩm để em kiểm tra cho chuẩn nhé.",
         )
 
 
 # ============================================
-# HANDLE TEXT MESSAGE - ĐÃ SỬA: THÊM ICON LINK ĐẶT HÀNG
+# HANDLE TEXT MESSAGE (LUỒNG CHÍNH)
 # ============================================
 
 def handle_text(uid: str, text: str):
     """
-    Xử lý tin nhắn text từ khách
+    Flow:
+    - COMMENT: Fchat auto msg → echo → bot lưu MS vào inbox_entry_ms
+      → khi khách trả lời inbox: dùng MS đó → gửi thông tin sản phẩm → GPT tư vấn & chốt
+    - REFERRAL (nhấn nút Inbox trên bài viết): có ref:MS → inbox_entry_ms → giống COMMENT
+    - CHỦ ĐỘNG INBOX:
+        + Tin đầu: greet + 5 sản phẩm gợi ý (nếu chưa có mã)
+        + Khi khách gõ mã (đủ / 'Mã 09') → gửi thông tin sản phẩm → GPT tư vấn & chốt
     """
     load_products()
     ctx = USER_CONTEXT[uid]
@@ -1047,52 +981,11 @@ def handle_text(uid: str, text: str):
     ctx["history"].append({"role": "assistant", "content": reply})
     send_message(uid, reply)
 
-    # 6. Nếu tin nhắn khách có ý định đặt hàng -> gửi link form đặt hàng với icon hấp dẫn
+    # 6. Nếu tin nhắn khách có ý định đặt hàng -> gửi link form đặt hàng
     lower = text.lower()
     if ms and ms in PRODUCTS and any(kw in lower for kw in ORDER_KEYWORDS):
-        # Gửi link form đặt hàng với icon hấp dẫn
-        send_order_link_with_icon(uid, ms)
-
-
-# ============================================
-# SEND ORDER LINK WITH ICON - HÀM MỚI: GỬI LINK VỚI ICON HẤP DẪN
-# ============================================
-
-def send_order_link_with_icon(uid: str, ms: str):
-    """
-    Gửi link form đặt hàng với icon hấp dẫn
-    """
-    base = DOMAIN or ""
-    if base and not base.startswith("http"):
-        base = "https://" + base
-    
-    # Tạo URL đặt hàng
-    url = f"{base}/order-form?ms={quote(ms)}&uid={quote(uid)}"
-    
-    # Tin nhắn với icon hấp dẫn
-    msg = f"""🎁 **ĐẶT HÀNG NHANH - NHẬN ƯU ĐÃI NGAY** 🎁
-
-✨ Bấm vào link dưới đây để đặt hàng nhanh và nhận ưu đãi đặc biệt:
-🔗 {url}
-
-💎 **ƯU ĐÃI KHI ĐẶT NGAY:**
-✓ Freeship 30K cho đơn đầu tiên
-✓ Giảm thêm 5% khi đặt qua chat
-✓ Tặng voucher 50K cho lần mua sau
-✓ Đổi trả dễ dàng trong 7 ngày
-
-⏰ **ĐẶT NGAY để nhận hàng sớm nhất!**
-(Form đặt hàng chỉ mất 2 phút thôi ạ)"""
-    
-    send_message(uid, msg)
-
-
-# Giữ nguyên hàm send_order_link cũ để tương thích
-def send_order_link(uid: str, ms: str):
-    """
-    Gửi link form đặt hàng cho khách (phiên bản cũ, giữ để tương thích)
-    """
-    send_order_link_with_icon(uid, ms)
+        # Gửi link form đặt hàng
+        send_order_link(uid, ms)
 
 
 # ============================================
@@ -1122,7 +1015,7 @@ def handle_echo_outgoing(page_id: str, user_id: str, text: str, mid: str = ""):
 
 
 # ============================================
-# WEBHOOK
+# WEBHOOK (SỬA TRIỆT ĐỂ LỖI LẶP)
 # ============================================
 
 @app.route("/webhook", methods=["GET", "POST"])
@@ -1220,25 +1113,20 @@ def webhook():
                     
                 elif payload and payload.startswith("SELECT_"):
                     product_code = payload.replace("SELECT_", "")
-                    # Xử lý khi khách chọn sản phẩm - GIỮ NGUYÊN POSTBACK ĐỂ TƯƠNG THÍCH
+                    # Xử lý khi khách chọn sản phẩm
                     if product_code in PRODUCTS:
                         ctx["last_ms"] = product_code
                         ctx["product_info_sent_ms"] = product_code
                         
                         product_info = PRODUCTS[product_code]
-                        response = f"""✅ **BẠN ĐÃ CHỌN SẢN PHẨM {product_code}!** 
+                        response = f"""✅ Bạn đã chọn sản phẩm **{product_code}** - {product_info.get('Ten', '')}!
 
-🛍️ **{product_info.get('Ten', '')}**
-
-💎 **ĐỂ EM HỖ TRỢ ĐẶT HÀNG NHANH:**
+Vui lòng cho em biết:
 1. Size bạn muốn đặt là gì?
 2. Màu sắc bạn thích?
 3. Số lượng cần mua?
 
-🎁 **ƯU ĐÃI KHI ĐẶT NGAY:**
-• Freeship 30K • Giảm 5% • Voucher 50K
-
-📝 Bạn có thể nhắn **"Đặt hàng"** hoặc bấm **"ĐẶT NGAY"** trên carousel để hoàn tất đơn nhé! ❤️"""
+Hoặc bạn có thể nhắn "Đặt hàng" để em hỗ trợ bạn hoàn tất đơn nhé! 🛍️"""
                         send_message(sender_id, response)
                     else:
                         send_message(sender_id, f"Dạ em không tìm thấy sản phẩm mã {product_code} ạ.")
@@ -1300,71 +1188,44 @@ def webhook():
 
 
 # ============================================
-# API LẤY THÔNG TIN PAGE - MỚI THÊM
+# ORDER FORM & API (GIỮ NGUYÊN)
 # ============================================
 
-@app.route('/api/page-info')
-def get_page_info():
-    """Lấy thông tin fanpage từ Facebook API"""
-    try:
-        # Nếu đã cache thông tin page, trả về luôn
-        if USER_CONTEXT["global"].get("page_info"):
-            return jsonify(USER_CONTEXT["global"]["page_info"])
-        
-        response = requests.get(
-            f'https://graph.facebook.com/v20.0/{PAGE_ID}',
-            params={
-                'access_token': PAGE_ACCESS_TOKEN, 
-                'fields': 'name,about,cover'
-            }
-        )
-        
-        if response.status_code == 200:
-            page_data = response.json()
-            page_info = {
-                'success': True,
-                'page_name': page_data.get('name', 'Fashion Shop Premium'),
-                'page_about': page_data.get('about', 'Chuyên thời trang cao cấp cho phái đẹp'),
-                'cover_photo': page_data.get('cover', {}).get('source', '')
-            }
-            # Cache thông tin page
-            USER_CONTEXT["global"]["page_info"] = page_info
-            return jsonify(page_info)
-        else:
-            return jsonify({
-                'success': False,
-                'page_name': 'Fashion Shop Premium',
-                'page_about': 'Chuyên thời trang cao cấp cho phái đẹp',
-                'cover_photo': ''
-            })
-    except Exception as e:
-        print("GET PAGE INFO ERROR:", e)
-        return jsonify({
-            'success': False,
-            'page_name': 'Fashion Shop Premium',
-            'page_about': 'Chuyên thời trang cao cấp cho phái đẹp',
-            'cover_photo': ''
-        })
+def send_order_link(uid: str, ms: str):
+    """
+    Gửi link form đặt hàng cho khách.
+    """
+    base = DOMAIN or ""
+    if base and not base.startswith("http"):
+        base = "https://" + base
+    # Gửi link đến trang order-form với ms và uid
+    url = f"{base}/order-form?ms={quote(ms)}&uid={quote(uid)}"
+    msg = f"Anh/chị có thể đặt hàng nhanh tại đây ạ: {url}"
+    send_message(uid, msg)
 
 
-# ============================================
-# ORDER FORM & API - ĐÃ SỬA: THÊM SIZE/MÀU VÀ PAGE INFO
-# ============================================
+@app.route("/o/<ms>")
+def order_link(ms: str):
+    load_products()
+    ms = ms.upper()
+    if ms not in PRODUCTS:
+        return f"Không tìm thấy sản phẩm {ms}", 404
+    pd_row = PRODUCTS[ms]
+    ten = pd_row["Ten"]
+    gia = pd_row["Gia"]
+    mota = pd_row["MoTa"]
+    return f"""
+    <html><body>
+    <h2>Đặt hàng {ms}</h2>
+    <p><b>Tên:</b> {ten}</p>
+    <p><b>Giá:</b> {gia}</p>
+    <p><b>Mô tả:</b> {mota}</p>
+    </body></html>
+    """
+
 
 @app.route("/order-form")
 def order_form():
-    # Lấy thông tin page
-    page_info_response = get_page_info()
-    page_info = page_info_response.get_json()
-    
-    # Lấy thông tin sản phẩm từ query params
-    ms = request.args.get("ms", "").upper()
-    uid = request.args.get("uid", "")
-    
-    if not ms:
-        return "Thiếu mã sản phẩm", 400
-    
-    # Trả về template với thông tin page
     return send_from_directory("static", "order-form.html")
 
 
@@ -1379,27 +1240,6 @@ def api_get_product():
     images_field = row.get("Images", "")
     urls = parse_image_urls(images_field)
     image = urls[0] if urls else ""
-    
-    # Lấy thông tin size và màu từ sản phẩm
-    size_field = row.get("size (Thuộc tính)", "")
-    color_field = row.get("màu (Thuộc tính)", "")
-    
-    # Parse size và màu thành list
-    sizes = []
-    if size_field:
-        # Có thể là "S, M, L, XL" hoặc "S-M-L-XL"
-        sizes = [s.strip() for s in re.split(r'[,/|-]', size_field) if s.strip()]
-    
-    colors = []
-    if color_field:
-        # Có thể là "Đen, Trắng, Đỏ" hoặc "Đen-Trắng-Đỏ"
-        colors = [c.strip() for c in re.split(r'[,/|-]', color_field) if c.strip()]
-    
-    # Nếu không có size/color, cung cấp options mặc định
-    if not sizes:
-        sizes = ["S", "M", "L", "XL", "XXL"]
-    if not colors:
-        colors = ["Đen", "Trắng", "Kaki", "Xám", "Hồng", "Xanh Navy"]
 
     return {
         "ms": ms,
@@ -1407,9 +1247,6 @@ def api_get_product():
         "price": row.get("Gia", ""),
         "desc": row.get("MoTa", ""),
         "image": image,
-        "sizes": sizes,
-        "colors": colors,
-        "stock": row.get("Tồn kho", ""),
     }
 
 
@@ -1423,30 +1260,20 @@ def api_order():
 
     if uid:
         msg = (
-            f"✅ **ĐƠN HÀNG ĐÃ ĐƯỢC XÁC NHẬN!**\n"
-            f"────────────────────\n"
-            f"🛍️ Sản phẩm: {data.get('productName', '')} ({ms})\n"
-            f"💰 Giá: {data.get('price', data.get('total', ''))}\n"
-            f"🎨 Màu: {data.get('color', '')}\n"
-            f"📏 Size: {data.get('size', '')}\n"
-            f"📦 Số lượng: {data.get('quantity', '')}\n"
-            f"💵 Thành tiền: {data.get('total', '')}\n"
-            f"────────────────────\n"
-            f"👤 Người nhận: {data.get('customerName', '')}\n"
-            f"📱 SĐT: {data.get('phone', '')}\n"
-            f"🏠 Địa chỉ: {data.get('home', '')}, {data.get('ward', '')}, {data.get('district', '')}, {data.get('province', '')}\n"
-            f"────────────────────\n"
-            f"📝 Ghi chú: {data.get('note', 'Không có ghi chú')}\n"
-            f"────────────────────\n"
-            f"⏰ Thời gian đặt: {datetime.now().strftime('%d/%m/%Y %H:%M')}\n"
-            f"🚚 Dự kiến giao: 2-4 ngày làm việc\n"
-            f"💳 Thanh toán: COD (nhận hàng trả tiền)\n"
-            f"────────────────────\n"
-            f"Trong ít phút nữa bên em sẽ gọi xác nhận, anh/chị để ý điện thoại giúp em nha! ❤️"
+            "✅ Shop đã nhận đơn của anh/chị ạ:\n"
+            f"- Sản phẩm: {data.get('productName', '')} ({ms})\n"
+            f"- Màu: {data.get('color', '')}\n"
+            f"- Size: {data.get('size', '')}\n"
+            f"- Số lượng: {data.get('quantity', '')}\n"
+            f"- Thành tiền: {data.get('total', '')}\n"
+            f"- Khách: {data.get('customerName', '')}\n"
+            f"- SĐT: {data.get('phone', '')}\n"
+            f"- Địa chỉ: {data.get('home', '')}, {data.get('ward', '')}, {data.get('district', '')}, {data.get('province', '')}\n\n"
+            "Trong ít phút nữa bên em sẽ gọi xác nhận, anh/chị để ý điện thoại giúp em nha ❤️"
         )
         send_message(uid, msg)
 
-    return {"status": "ok", "message": "Đơn hàng đã được ghi nhận"}
+    return {"status": "ok"}
 
 
 # ============================================
