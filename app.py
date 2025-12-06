@@ -51,7 +51,10 @@ USER_CONTEXT = defaultdict(lambda: {
     "order_data": {},
     "last_message_time": 0,
     "last_product_info_time": 0,
-    "get_started_processed": False,  # Thêm biến này
+    "get_started_processed": False,
+    "processing_lock": False,
+    "last_postback_payload": None,
+    "postback_count": 0,
 })
 
 PRODUCTS = {}
@@ -60,9 +63,6 @@ LOAD_TTL = 300
 
 # Cache cho ảnh đã rehost
 IMAGE_REHOST_CACHE = {}
-
-# User processing lock to prevent duplicate processing
-USER_PROCESSING_LOCK = {}
 
 # ============================================
 # TỪ KHOÁ THỂ HIỆN Ý ĐỊNH "ĐẶT HÀNG / MUA"
@@ -815,6 +815,51 @@ def send_product_info(uid: str, ms: str, force_send_images: bool = True):
     ctx["last_message_time"] = current_time
 
 
+def send_product_info_debounced(uid: str, ms: str):
+    """Gửi thông tin sản phẩm với cơ chế chống spam"""
+    load_products()
+    ms = ms.upper()
+    
+    if ms not in PRODUCTS:
+        send_message(uid, "Dạ em chưa tìm thấy mã này trong kho ạ.")
+        return
+
+    ctx = USER_CONTEXT[uid]
+    current_time = time.time()
+    
+    # KIỂM TRA DEBOUNCE CHẶT CHẼ HƠN
+    if (ctx.get("product_info_sent_ms") == ms and 
+        current_time - ctx.get("last_product_info_time", 0) < 15):
+        print(f"[DEBOUNCE] Bỏ qua gửi product info {ms} quá nhanh")
+        return
+    
+    row = PRODUCTS[ms]
+    info_text = build_product_info_text(ms, row)
+    
+    # GỬI TEXT TRƯỚC
+    send_message(uid, info_text)
+    
+    # Gửi link form đặt hàng
+    domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
+    order_link = f"{domain}/order-form?ms={ms}&uid={uid}"
+    send_message(uid, f"📋 Anh/chị có thể đặt hàng ngay tại đây:\n{order_link}")
+
+    # GỬI ẢNH VỚI THỜI GIAN CHỜ
+    images_field = row.get("Images", "")
+    urls = parse_image_urls(images_field)
+    urls = urls[:5]  # Giới hạn 5 ảnh
+    
+    for idx, u in enumerate(urls):
+        send_image(uid, u)
+        # Tăng thời gian chờ cho các ảnh sau
+        time.sleep(0.3 if idx < 2 else 0.5)
+    
+    # CẬP NHẬT THỜI GIAN
+    ctx["product_info_sent_ms"] = ms
+    ctx["last_product_info_time"] = current_time
+    ctx["last_message_time"] = current_time
+
+
 def send_recommendations(uid: str):
     load_products()
     if not PRODUCTS:
@@ -871,7 +916,7 @@ def handle_image(uid: str, image_url: str):
         ctx["product_info_sent_ms"] = ms
 
         send_message(uid, f"Dạ ảnh này giống mẫu [{ms}] của shop đó anh/chị, em gửi thông tin sản phẩm cho mình nhé. 💕")
-        send_product_info(uid, ms)
+        send_product_info_debounced(uid, ms)
     else:
         send_message(
             uid,
@@ -885,15 +930,19 @@ def handle_image(uid: str, image_url: str):
 
 def handle_text(uid: str, text: str):
     # Kiểm tra lock để tránh xử lý trùng
-    if uid in USER_PROCESSING_LOCK and USER_PROCESSING_LOCK[uid]:
-        print(f"[SKIP] User {uid} đang được xử lý")
+    ctx = USER_CONTEXT[uid]
+    
+    if ctx.get("processing_lock"):
+        print(f"[TEXT SKIP] User {uid} đang được xử lý")
         return
     
-    USER_PROCESSING_LOCK[uid] = True
+    ctx["processing_lock"] = True
     
     try:
         load_products()
-        ctx = USER_CONTEXT[uid]
+        
+        # Reset postback counter khi có text mới
+        ctx["postback_count"] = 0
 
         if handle_order_form_step(uid, text):
             return
@@ -916,7 +965,7 @@ def handle_text(uid: str, text: str):
             # Kiểm tra thời gian gửi gần nhất
             if current_time - ctx.get("last_message_time", 0) > 2:
                 ctx["product_info_sent_ms"] = ms
-                send_product_info(uid, ms)
+                send_product_info_debounced(uid, ms)
                 ctx["last_message_time"] = current_time
 
         ctx["history"].append({"role": "user", "content": text})
@@ -936,7 +985,7 @@ def handle_text(uid: str, text: str):
             send_message(uid, f"📋 Anh/chị có thể đặt hàng ngay tại đây:\n{order_link}")
     
     finally:
-        USER_PROCESSING_LOCK[uid] = False
+        ctx["processing_lock"] = False
 
 
 # ============================================
@@ -1003,119 +1052,152 @@ def webhook():
 
             ctx = USER_CONTEXT[sender_id]
 
-            if "postback" in ev:
-                current_time = time.time()
-                if current_time - ctx.get("last_postback_time", 0) < 2:  # Giảm thời gian chống spam
-                    print(f"[POSTBACK SKIP] Bỏ qua postback lặp (cách {current_time - ctx.get('last_postback_time', 0):.1f}s)")
-                    return "ok"
-                
-                ctx["last_postback_time"] = current_time
-                
-                payload = ev["postback"].get("payload")
-                print(f"[POSTBACK] User {sender_id}: {payload}")
-                
-                # XỬ LÝ GET_STARTED_PAYLOAD - CHỈ CHẠY 1 LẦN
-                if payload == "GET_STARTED_PAYLOAD":
-                    # Kiểm tra đã xử lý GET_STARTED chưa
-                    if ctx.get("get_started_processed"):
-                        print(f"[POSTBACK SKIP] Đã xử lý GET_STARTED cho user {sender_id}")
+            # KIỂM TRA LOCK ĐỂ TRÁNH XỬ LÝ TRÙNG
+            if ctx.get("processing_lock"):
+                print(f"[SKIP] User {sender_id} đang được xử lý, bỏ qua sự kiện mới")
+                return "ok"
+            
+            # SET LOCK
+            ctx["processing_lock"] = True
+            
+            try:
+                if "postback" in ev:
+                    current_time = time.time()
+                    payload = ev["postback"].get("payload")
+                    
+                    # KIỂM TRA DEBOUNCE: NẾU CÙNG PAYLOAD TRONG VÒNG 3 GIÂY THÌ BỎ QUA
+                    if (payload == ctx.get("last_postback_payload") and 
+                        current_time - ctx.get("last_postback_time", 0) < 3):
+                        print(f"[POSTBACK DEBOUNCE] Bỏ qua postback trùng: {payload}")
                         return "ok"
                     
-                    # Đánh dấu đã xử lý GET_STARTED
-                    ctx["get_started_processed"] = True
+                    # KIỂM TRA SPAM: NẾU NHIỀU POSTBACK QUÁ NHANH
+                    ctx["postback_count"] = ctx.get("postback_count", 0) + 1
+                    if ctx["postback_count"] > 3 and current_time - ctx.get("last_postback_time", 0) < 5:
+                        print(f"[POSTBACK SPAM] Phát hiện spam từ user {sender_id}")
+                        # Reset counter và chờ
+                        time.sleep(1)
                     
-                    # Chỉ gửi chào hỏi nếu chưa chào
+                    ctx["last_postback_time"] = current_time
+                    ctx["last_postback_payload"] = payload
+                    
+                    print(f"[POSTBACK] User {sender_id}: {payload}")
+                    
+                    # XỬ LÝ GET_STARTED_PAYLOAD - CHỈ CHẠY 1 LẦN
+                    if payload == "GET_STARTED_PAYLOAD":
+                        if ctx.get("get_started_processed"):
+                            print(f"[POSTBACK SKIP] Đã xử lý GET_STARTED cho user {sender_id}")
+                            return "ok"
+                        
+                        ctx["get_started_processed"] = True
+                        
+                        if not ctx["greeted"]:
+                            maybe_greet(sender_id, ctx, has_ms=False)
+                        
+                        if not ctx["carousel_sent"]:
+                            send_message(sender_id, "Anh/chị cho em biết đang quan tâm mẫu nào hoặc gửi ảnh mẫu để em xem giúp ạ.")
+                        return "ok"
+                    
+                    # XỬ LÝ ORDER FORM QUICK REPLIES
+                    if payload == "ORDER_PROVIDE_NAME":
+                        ctx["order_state"] = "waiting_name"
+                        send_message(sender_id, "👤 Vui lòng nhập họ tên người nhận hàng:")
+                        return "ok"
+                    elif payload == "ORDER_PROVIDE_PHONE":
+                        ctx["order_state"] = "waiting_phone"
+                        send_message(sender_id, "📱 Vui lòng nhập số điện thoại (ví dụ: 0912345678 hoặc +84912345678):")
+                        return "ok"
+                    elif payload == "ORDER_PROVIDE_ADDRESS":
+                        ctx["order_state"] = "waiting_address"
+                        send_message(sender_id, "🏠 Vui lòng nhập địa chỉ giao hàng chi tiết:")
+                        return "ok"
+                    elif payload == "ORDER_CONFIRM":
+                        send_order_confirmation(sender_id)
+                        return "ok"
+                    elif payload == "ORDER_EDIT":
+                        ctx["order_state"] = "waiting_name"
+                        send_message(sender_id, "✏️ Vui lòng nhập lại họ tên người nhận:")
+                        return "ok"
+                    
+                    # XỬ LÝ VIEW PRODUCT
+                    if payload and payload.startswith("VIEW_"):
+                        product_code = payload.replace("VIEW_", "")
+                        
+                        # KIỂM TRA NẾU ĐÃ GỬI SẢN PHẨM NÀY GẦN ĐÂY (10 GIÂY)
+                        if (ctx.get("product_info_sent_ms") == product_code and 
+                            current_time - ctx.get("last_product_info_time", 0) < 10):
+                            print(f"[PRODUCT INFO SKIP] Đã gửi {product_code} gần đây")
+                            send_message(sender_id, f"Bạn đang xem sản phẩm {product_code}. Cần em hỗ trợ gì thêm không ạ?")
+                            return "ok"
+                        
+                        if product_code in PRODUCTS:
+                            ctx["last_ms"] = product_code
+                            # GỬI SẢN PHẨM VỚI THỜI GIAN CHỜ GIỮA CÁC ẢNH
+                            send_product_info_debounced(sender_id, product_code)
+                        else:
+                            send_message(sender_id, f"Dạ em không tìm thấy sản phẩm mã {product_code} ạ.")
+                        return "ok"
+                        
+                    elif payload and payload.startswith("SELECT_"):
+                        product_code = payload.replace("SELECT_", "")
+                        domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
+                        order_link = f"{domain}/order-form?ms={product_code}&uid={sender_id}"
+                        response_msg = f"📋 Anh/chị có thể đặt hàng sản phẩm [{product_code}] ngay tại đây:\n{order_link}"
+                        send_message(sender_id, response_msg)
+                        return "ok"
+
+                    # XỬ LÝ REFERRAL
+                    ref = ev["postback"].get("referral", {}).get("ref")
+                    if ref:
+                        ms_ref = extract_ms_from_ref(ref)
+                        if ms_ref:
+                            ctx["inbox_entry_ms"] = ms_ref
+                            ctx["last_ms"] = ms_ref
+                            print(f"[REF] Nhận mã từ referral: {ms_ref}")
+                            ctx["greeted"] = True
+                            send_product_info_debounced(sender_id, ms_ref)
+                            return "ok"
+                    
+                    # DEFAULT RESPONSE
                     if not ctx["greeted"]:
                         maybe_greet(sender_id, ctx, has_ms=False)
-                    
-                    # Chỉ gửi tin nhắn nhắc nếu chưa gửi carousel
-                    if not ctx["carousel_sent"]:
-                        send_message(sender_id, "Anh/chị cho em biết đang quan tâm mẫu nào hoặc gửi ảnh mẫu để em xem giúp ạ.")
-                    return "ok"
-                
-                if payload == "ORDER_PROVIDE_NAME":
-                    ctx["order_state"] = "waiting_name"
-                    send_message(sender_id, "👤 Vui lòng nhập họ tên người nhận hàng:")
-                    return "ok"
-                elif payload == "ORDER_PROVIDE_PHONE":
-                    ctx["order_state"] = "waiting_phone"
-                    send_message(sender_id, "📱 Vui lòng nhập số điện thoại (ví dụ: 0912345678 hoặc +84912345678):")
-                    return "ok"
-                elif payload == "ORDER_PROVIDE_ADDRESS":
-                    ctx["order_state"] = "waiting_address"
-                    send_message(sender_id, "🏠 Vui lòng nhập địa chỉ giao hàng chi tiết:")
-                    return "ok"
-                elif payload == "ORDER_CONFIRM":
-                    send_order_confirmation(sender_id)
-                    return "ok"
-                elif payload == "ORDER_EDIT":
-                    ctx["order_state"] = "waiting_name"
-                    send_message(sender_id, "✏️ Vui lòng nhập lại họ tên người nhận:")
-                    return "ok"
-                
-                if payload and payload.startswith("VIEW_"):
-                    product_code = payload.replace("VIEW_", "")
-                    
-                    # Kiểm tra nếu đã gửi sản phẩm này gần đây
-                    if ctx.get("product_info_sent_ms") == product_code and current_time - ctx.get("last_product_info_time", 0) < 10:
-                        send_message(sender_id, "Bạn đang xem sản phẩm này rồi ạ. Cần em hỗ trợ gì thêm không?")
-                        return "ok"
-                    
-                    if product_code in PRODUCTS:
-                        ctx["last_ms"] = product_code
-                        send_product_info(sender_id, product_code)
-                    else:
-                        send_message(sender_id, f"Dạ em không tìm thấy sản phẩm mã {product_code} ạ.")
-                    return "ok"
-                    
-                elif payload and payload.startswith("SELECT_"):
-                    product_code = payload.replace("SELECT_", "")
-                    domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
-                    order_link = f"{domain}/order-form?ms={product_code}&uid={sender_id}"
-                    response_msg = f"📋 Anh/chị có thể đặt hàng sản phẩm [{product_code}] ngay tại đây:\n{order_link}"
-                    send_message(sender_id, response_msg)
+                    send_message(sender_id, "Anh/chị cho em biết đang quan tâm mẫu nào hoặc gửi ảnh mẫu để em xem giúp ạ.")
                     return "ok"
 
-                ref = ev["postback"].get("referral", {}).get("ref")
+                # XỬ LÝ REFERRAL TỪ MESSAGING
+                ref = ev.get("referral", {}).get("ref") \
+                    or ev.get("postback", {}).get("referral", {}).get("ref")
                 if ref:
                     ms_ref = extract_ms_from_ref(ref)
                     if ms_ref:
                         ctx["inbox_entry_ms"] = ms_ref
                         ctx["last_ms"] = ms_ref
                         print(f"[REF] Nhận mã từ referral: {ms_ref}")
-                        ctx["greeted"] = True
-                        send_product_info(sender_id, ms_ref)
+
+                # XỬ LÝ IMAGE MESSAGE
+                if "message" in ev and "attachments" in message:
+                    if not message.get("is_echo"):
+                        for att in message["attachments"]:
+                            if att.get("type") == "image":
+                                image_url = att["payload"].get("url")
+                                if image_url:
+                                    handle_image(sender_id, image_url)
+                                    return "ok"
+                    continue
+
+                # XỬ LÝ TEXT MESSAGE
+                if "message" in ev and "text" in message:
+                    if not message.get("is_echo"):
+                        text = message.get("text", "")
+                        handle_text(sender_id, text)
                         return "ok"
-                
-                if not ctx["greeted"]:
-                    maybe_greet(sender_id, ctx, has_ms=False)
-                send_message(sender_id, "Anh/chị cho em biết đang quan tâm mẫu nào hoặc gửi ảnh mẫu để em xem giúp ạ.")
-                return "ok"
-
-            ref = ev.get("referral", {}).get("ref") \
-                or ev.get("postback", {}).get("referral", {}).get("ref")
-            if ref:
-                ms_ref = extract_ms_from_ref(ref)
-                if ms_ref:
-                    ctx["inbox_entry_ms"] = ms_ref
-                    ctx["last_ms"] = ms_ref
-                    print(f"[REF] Nhận mã từ referral: {ms_ref}")
-
-            if "message" in ev and "attachments" in message:
-                if not message.get("is_echo"):
-                    for att in message["attachments"]:
-                        if att.get("type") == "image":
-                            image_url = att["payload"].get("url")
-                            if image_url:
-                                handle_image(sender_id, image_url)
-                                return "ok"
-                continue
-
-            if "message" in ev and "text" in message:
-                if not message.get("is_echo"):
-                    text = message.get("text", "")
-                    handle_text(sender_id, text)
-                    return "ok"
+                        
+            finally:
+                # RELEASE LOCK
+                ctx["processing_lock"] = False
+                # Reset postback counter sau 10 giây
+                if time.time() - ctx.get("last_postback_time", 0) > 10:
+                    ctx["postback_count"] = 0
 
     return "ok"
 
