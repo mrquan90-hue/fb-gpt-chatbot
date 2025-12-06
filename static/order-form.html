@@ -36,10 +36,14 @@
     <input id="price" readonly />
 
     <label>Size</label>
-    <select id="size"></select>
+    <select id="size">
+        <option value="">-- Chọn size --</option>
+    </select>
 
     <label>Màu</label>
-    <select id="color"></select>
+    <select id="color">
+        <option value="">-- Chọn màu --</option>
+    </select>
 
     <label>Số lượng</label>
     <select id="quantity">
@@ -56,34 +60,38 @@
     <!-- THÔNG TIN KHÁCH HÀNG -->
     <div class="section-title">THÔNG TIN KHÁCH HÀNG</div>
 
-    <label>Họ tên</label>
-    <input id="customerName" placeholder="Nhập họ tên" />
+    <label>Họ tên *</label>
+    <input id="customerName" placeholder="Nhập họ tên" required />
 
-    <label>Số điện thoại</label>
-    <input id="phone" placeholder="Nhập số điện thoại" />
+    <label>Số điện thoại *</label>
+    <input id="phone" placeholder="Nhập số điện thoại" required />
 
-    <label>Địa chỉ (Số nhà, tổ, thôn...)</label>
-    <input id="home" placeholder="Ví dụ: Số 10, Ngõ 5" />
+    <label>Địa chỉ (Số nhà, tổ, thôn...) *</label>
+    <input id="home" placeholder="Ví dụ: Số 10, Ngõ 5, Đường ABC" required />
 
-    <label>Tỉnh / Thành phố</label>
-    <select id="province"></select>
+    <label>Tỉnh / Thành phố *</label>
+    <select id="province">
+        <option value="">-- Chọn tỉnh/thành phố --</option>
+    </select>
 
-    <label>Phường / Xã</label>
-    <select id="ward"></select>
+    <label>Phường / Xã *</label>
+    <select id="ward">
+        <option value="">-- Chọn phường/xã --</option>
+    </select>
 
-    <!-- Huyện ẩn -->
-    <select id="district" style="display:none"></select>
-    <div class="note-area">
-        * Sau sáp nhập không cần chọn quận/huyện – chỉ cần TỈNH + XÃ
+    <div style="color: #FF3B30; margin-top: 5px; font-size: 14px; font-style: italic;">
+        * Địa chỉ mới theo quy định: Chỉ cần Tỉnh/Thành phố + Phường/Xã
     </div>
 
     <label>Ghi chú đơn hàng</label>
     <textarea id="note"
               rows="3"
-              placeholder="Ví dụ: Giao giờ hành chính..."></textarea>
+              placeholder="Ví dụ: Giao giờ hành chính, màu sắc yêu cầu..."></textarea>
 
     <!-- BUTTON -->
     <button id="orderBtn">ĐẶT HÀNG NGAY</button>
+
+    <div id="message" style="margin-top: 15px; padding: 10px; border-radius: 6px; display: none;"></div>
 
 </div>
 
