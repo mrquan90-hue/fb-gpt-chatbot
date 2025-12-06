@@ -981,11 +981,11 @@ def handle_text(uid: str, text: str):
     ctx["history"].append({"role": "assistant", "content": reply})
     send_message(uid, reply)
 
-    # 6. Nếu tin nhắn khách có ý định đặt hàng -> bắt đầu quá trình đặt hàng
+    # 6. Nếu tin nhắn khách có ý định đặt hàng -> gửi link form đặt hàng
     lower = text.lower()
     if ms and ms in PRODUCTS and any(kw in lower for kw in ORDER_KEYWORDS):
-        # Bắt đầu quá trình đặt hàng
-        start_order_process(uid, ms)
+        # Gửi link form đặt hàng
+        send_order_link(uid, ms)
 
 
 # ============================================
@@ -1193,13 +1193,13 @@ Hoặc bạn có thể nhắn "Đặt hàng" để em hỗ trợ bạn hoàn t�
 
 def send_order_link(uid: str, ms: str):
     """
-    Nếu sau này anh muốn dùng form, có thể gọi hàm này từ ORDER_KEYWORDS.
-    Hiện tại mình đang dùng CTA hỏi thông tin trực tiếp.
+    Gửi link form đặt hàng cho khách.
     """
     base = DOMAIN or ""
     if base and not base.startswith("http"):
         base = "https://" + base
-    url = f"{base}/o/{quote(ms)}"
+    # Gửi link đến trang order-form với ms và uid
+    url = f"{base}/order-form?ms={quote(ms)}&uid={quote(uid)}"
     msg = f"Anh/chị có thể đặt hàng nhanh tại đây ạ: {url}"
     send_message(uid, msg)
 
