@@ -15,3 +15,5 @@ services:
         sync: false
       - key: SHEET_CSV_URL
         sync: false
+      - key: FANPAGE_NAME
+        sync: false
