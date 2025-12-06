@@ -55,6 +55,7 @@ USER_CONTEXT = defaultdict(lambda: {
     "processing_lock": False,
     "last_postback_payload": None,
     "postback_count": 0,
+    "current_product_ms": None,
 })
 
 PRODUCTS = {}
@@ -697,10 +698,10 @@ def resolve_best_ms(ctx: dict):
 
 
 # ============================================
-# GPT CONTEXT ENGINE
+# GPT CONTEXT ENGINE - CẢI THIỆN
 # ============================================
 
-def gpt_reply(history: list, product_row: dict | None):
+def gpt_reply(history: list, product_row: dict | None, current_ms: str | None = None):
     if not client:
         return "Dạ hệ thống AI đang bận, anh/chị chờ em 1 lát với ạ."
 
@@ -708,69 +709,176 @@ def gpt_reply(history: list, product_row: dict | None):
     Bạn là trợ lý bán hàng của shop quần áo.
     - Xưng "em", gọi khách là "anh/chị".
     - Trả lời ngắn gọn, lịch sự, dễ hiểu.
-    - Không bịa đặt chất liệu/giá/ưu đãi nếu không có trong dữ liệu.
+    - KHÔNG bịa đặt chất liệu/giá/ưu đãi nếu không có trong dữ liệu.
     - Nếu đã biết sản phẩm khách đang xem, hãy:
-      + Tóm tắt mẫu, giá, ưu điểm.
-      + Gợi ý size/màu phù hợp.
-      + Hỏi thêm 1 câu để chốt (size, màu hoặc đặt hàng).
+      + Tập trung trả lời câu hỏi về sản phẩm ĐÓ.
+      + Dùng thông tin từ dữ liệu sản phẩm để trả lời.
+      + Không tự ý giới thiệu sản phẩm khác trừ khi được yêu cầu.
     - Nếu CHƯA biết sản phẩm:
       + Hỏi rõ nhu cầu (mục đích, dáng người, ngân sách).
       + Gợi ý hướng lựa chọn chung, không tự đặt mã.
+    - Ưu tiên trả lời trực tiếp câu hỏi của khách trước.
     """
 
     if product_row:
-        tonkho = product_row.get("Tồn kho", "")
-        mau = product_row.get("màu (Thuộc tính)", "")
-        size = product_row.get("size (Thuộc tính)", "")
-        sys += (
-            f"\nDữ liệu sản phẩm hiện tại:\n"
-            f"- Tên: {product_row.get('Ten', '')}\n"
-            f"- Mô tả: {product_row.get('MoTa', '')}\n"
-            f"- Giá bán: {product_row.get('Gia', '')}\n"
-            f"- Tồn kho: {tonkho}\n"
-            f"- Màu: {mau}\n"
-            f"- Size: {size}\n"
-        )
+        # Lấy thông tin chi tiết
+        ten = product_row.get('Ten', '')
+        mota = product_row.get('MoTa', '')
+        gia = product_row.get('Gia', '')
+        mau = product_row.get('màu (Thuộc tính)', '')
+        size = product_row.get('size (Thuộc tính)', '')
+        tonkho = product_row.get('Tồn kho', '')
+        
+        sys += f"""
+        Dữ liệu sản phẩm hiện tại khách đang hỏi (Mã: {current_ms}):
+        - Tên sản phẩm: {ten}
+        - Mô tả: {mota}
+        - Giá bán: {gia}
+        - Màu sắc có sẵn: {mau}
+        - Size có sẵn: {size}
+        - Tồn kho: {tonkho}
+        
+        LƯU Ý QUAN TRỌNG:
+        1. Chỉ trả lời về sản phẩm NÀY khi khách hỏi.
+        2. Nếu khách hỏi về size/màu/tồn kho, trả lời DỰA TRÊN DỮ LIỆU TRÊN.
+        3. Nếu khách hỏi "có được xem hàng không", trả lời dựa trên mô tả sản phẩm.
+        4. Chỉ tư vấn sản phẩm khác khi khách yêu cầu hoặc không thích sản phẩm này.
+        5. Luôn tập trung vào sản phẩm hiện tại trừ khi khách hỏi sản phẩm khác.
+        """
 
     if len(history) > 10:
         history = history[-10:]
 
-    r = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "system", "content": sys}] + history,
-        temperature=0.5,
-    )
-    return r.choices[0].message.content
+    try:
+        r = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "system", "content": sys}] + history,
+            temperature=0.5,
+        )
+        return r.choices[0].message.content
+    except Exception as e:
+        print("GPT ERROR:", e)
+        return "Dạ em đang bận xíu, anh/chị chờ em một chút ạ."
 
 
 # ============================================
-# GỬI THÔNG TIN SẢN PHẨM
+# GỬI THÔNG TIN SẢN PHẨM - CẢI THIỆN
 # ============================================
 
 def build_product_info_text(ms: str, row: dict) -> str:
     ten = row.get("Ten", "")
     gia = row.get("Gia", "")
     mota = (row.get("MoTa", "") or "").strip()
-    tonkho = row.get("Tồn kho", "")
     mau = row.get("màu (Thuộc tính)", "")
     size = row.get("size (Thuộc tính)", "")
-
-    highlight = mota
-    if len(highlight) > 350:
-        highlight = highlight[:330].rsplit(" ", 1)[0] + "..."
-
-    text = f"[{ms}] {ten}\n"
-    text += f"\n✨ Ưu điểm nổi bật:\n- {highlight}\n" if highlight else ""
-    if mau or size:
-        text += "\n🎨 Màu/Size:\n"
-        if mau:
-            text += f"- Màu: {mau}\n"
-        if size:
-            text += f"- Size: {size}\n"
+    
+    # Xử lý tên sản phẩm - bỏ mã trùng
+    if ten.startswith(f"[{ms}]"):
+        ten = ten.replace(f"[{ms}]", "").strip()
+    elif f"[{ms}]" in ten:
+        ten = ten.replace(f"[{ms}]", "").strip()
+    
+    # Xử lý mô tả: tách thành các bullet point có nghĩa
+    bullets = []
+    if "•" in mota:
+        # Tách theo dấu bullet
+        parts = mota.split("•")
+        for part in parts:
+            part = part.strip()
+            if part and len(part) > 5:
+                bullets.append(part)
+    else:
+        # Tìm các câu có nghĩa
+        sentences = re.split(r'[.!?]+', mota)
+        for sent in sentences:
+            sent = sent.strip()
+            if sent and len(sent) > 10:
+                bullets.append(sent)
+    
+    # Giới hạn 3-5 bullet points và đảm bảo câu cuối có nghĩa
+    if len(bullets) > 5:
+        bullets = bullets[:5]
+    
+    # Xử lý để câu cuối không bị cắt ngang
+    if bullets:
+        last_bullet = bullets[-1]
+        if len(last_bullet) > 50 and not any(last_bullet.endswith(punct) for punct in ['.', '!', '?']):
+            bullets[-1] = last_bullet + '.'
+    
+    # Xử lý màu
+    colors = []
+    if mau:
+        # Tách màu bằng dấu phẩy hoặc dấu cách
+        if "," in mau:
+            colors = [c.strip() for c in mau.split(",") if c.strip()]
+        else:
+            colors = [mau.strip()]
+    
+    # Xử lý size
+    sizes = []
+    if size:
+        # Tách size bằng dấu phẩy
+        if "," in size:
+            sizes = [s.strip() for s in size.split(",") if s.strip()]
+        else:
+            sizes = [size.strip()]
+    
+    # Format thông tin màu/size
+    color_size_info = ""
+    if colors and sizes:
+        color_size_info = f"\n🎨 Màu/Size (phân loại hàng):\n"
+        if colors:
+            color_list = ", ".join(colors)
+            color_size_info += f"- Màu: {color_list}\n"
+        if sizes:
+            if len(sizes) > 1:
+                # Tìm size đầu và cuối
+                first_size = sizes[0]
+                last_size = sizes[-1]
+                color_size_info += f"- Size: từ {first_size} đến {last_size}\n"
+            else:
+                color_size_info += f"- Size: {sizes[0]}\n"
+    elif colors:
+        color_size_info = f"\n🎨 Màu sắc:\n- Màu: {', '.join(colors)}\n"
+    elif sizes:
+        color_size_info = f"\n📏 Size:\n- Size: {', '.join(sizes)}\n"
+    
+    # Format giá
+    price_info = ""
     if gia:
-        text += f"\n💰 Giá bán: {gia}\n"
-    if tonkho:
-        text += f"📦 Tồn kho: {tonkho}\n"
+        # Chuẩn hóa giá
+        try:
+            # Lấy số từ chuỗi giá
+            price_match = re.search(r'(\d[\d.,]*)', gia)
+            if price_match:
+                price_str = price_match.group(1).replace(',', '').replace('.', '')
+                price_num = int(price_str)
+                if price_num >= 1000:
+                    price_display = f"{price_num//1000}k"
+                else:
+                    price_display = f"{price_num}đ"
+                price_info = f"\n💰 Giá bán: {price_display}\n"
+        except:
+            price_info = f"\n💰 Giá bán: {gia}\n"
+    
+    # Xây dựng tin nhắn
+    text = f"{ten}\n\n"
+    
+    if bullets:
+        text += "✨ Ưu điểm nổi bật:\n"
+        for bullet in bullets:
+            # Đảm bảo mỗi bullet là một câu có nghĩa
+            bullet = bullet.strip()
+            if bullet and not bullet.endswith(('.', '!', '?')):
+                bullet += '.'
+            text += f"• {bullet}\n"
+    
+    if color_size_info:
+        text += color_size_info
+    
+    if price_info:
+        text += price_info
+    
     text += "\n👉 Anh/chị xem giúp em mẫu này có hợp gu không, nếu ưng em tư vấn thêm màu/size và chốt đơn cho mình ạ. ❤️"
     return text
 
@@ -786,7 +894,7 @@ def send_product_info(uid: str, ms: str, force_send_images: bool = True):
     current_time = time.time()
     
     # Kiểm tra thời gian gửi product info lần cuối
-    if ctx.get("last_product_info_time") and current_time - ctx["last_product_info_time"] < 5:
+    if ctx.get("last_product_info_time") and current_time - ctx.get("last_product_info_time") < 5:
         print(f"[SKIP] Đã gửi product info cho {uid} quá gần đây")
         return
     
@@ -809,8 +917,9 @@ def send_product_info(uid: str, ms: str, force_send_images: bool = True):
             send_image(uid, u)
             time.sleep(0.2)  # Giảm thời gian chờ
     
-    # Cập nhật thời gian
+    # Cập nhật thời gian và sản phẩm hiện tại
     ctx["product_info_sent_ms"] = ms
+    ctx["current_product_ms"] = ms
     ctx["last_product_info_time"] = current_time
     ctx["last_message_time"] = current_time
 
@@ -854,8 +963,9 @@ def send_product_info_debounced(uid: str, ms: str):
         # Tăng thời gian chờ cho các ảnh sau
         time.sleep(0.3 if idx < 2 else 0.5)
     
-    # CẬP NHẬT THỜI GIAN
+    # CẬP NHẬT THỜI GIAN VÀ SẢN PHẨM HIỆN TẠI
     ctx["product_info_sent_ms"] = ms
+    ctx["current_product_ms"] = ms
     ctx["last_product_info_time"] = current_time
     ctx["last_message_time"] = current_time
 
@@ -913,6 +1023,7 @@ def handle_image(uid: str, image_url: str):
     if ms and ms in PRODUCTS:
         ctx["vision_ms"] = ms
         ctx["last_ms"] = ms
+        ctx["current_product_ms"] = ms
         ctx["product_info_sent_ms"] = ms
 
         send_message(uid, f"Dạ ảnh này giống mẫu [{ms}] của shop đó anh/chị, em gửi thông tin sản phẩm cho mình nhé. 💕")
@@ -925,11 +1036,10 @@ def handle_image(uid: str, image_url: str):
 
 
 # ============================================
-# HANDLE TEXT MESSAGE
+# HANDLE TEXT MESSAGE - CẢI THIỆN
 # ============================================
 
 def handle_text(uid: str, text: str):
-    # Kiểm tra lock để tránh xử lý trùng
     ctx = USER_CONTEXT[uid]
     
     if ctx.get("processing_lock"):
@@ -944,40 +1054,79 @@ def handle_text(uid: str, text: str):
         # Reset postback counter khi có text mới
         ctx["postback_count"] = 0
 
+        # Xử lý order form trước
         if handle_order_form_step(uid, text):
             return
 
+        # Tìm mã sản phẩm trong tin nhắn
         ms_from_text = extract_ms(text)
         if not ms_from_text:
             short = extract_short_code(text)
             if short:
                 ms_from_text = find_ms_by_short_code(short)
 
+        # Cập nhật last_ms nếu tìm thấy mã
         if ms_from_text:
             ctx["last_ms"] = ms_from_text
+            ctx["current_product_ms"] = ms_from_text
+            print(f"[TEXT] User {uid} đang hỏi về sản phẩm {ms_from_text}")
 
+        # Xác định sản phẩm đang được thảo luận
         ms = resolve_best_ms(ctx)
+        if not ms and ctx.get("current_product_ms"):
+            ms = ctx["current_product_ms"]
+        
+        # Chào hỏi nếu cần
         maybe_greet(uid, ctx, has_ms=bool(ms))
 
-        # Chỉ gửi product info khi có mã mới hoặc chưa gửi gần đây
-        current_time = time.time()
-        if ms and ms in PRODUCTS and ctx.get("product_info_sent_ms") != ms:
-            # Kiểm tra thời gian gửi gần nhất
-            if current_time - ctx.get("last_message_time", 0) > 2:
-                ctx["product_info_sent_ms"] = ms
-                send_product_info_debounced(uid, ms)
-                ctx["last_message_time"] = current_time
-
+        # Thêm tin nhắn user vào history
         ctx["history"].append({"role": "user", "content": text})
 
-        product = PRODUCTS.get(ms) if ms and ms in PRODUCTS else None
-        reply = gpt_reply(ctx["history"], product)
+        # Lấy thông tin sản phẩm nếu có
+        product = None
+        if ms and ms in PRODUCTS:
+            product = PRODUCTS[ms]
+            
+            # Nếu user hỏi về size/màu/tồn kho, gửi thông tin chi tiết
+            lower_text = text.lower()
+            if any(keyword in lower_text for keyword in ["size nào", "có size", "size gì", "size nào", "size bao nhiêu"]):
+                # Trả lời chi tiết về size
+                size_info = product.get('size (Thuộc tính)', 'Không có thông tin')
+                reply = f"Dạ sản phẩm này có các size: {size_info}\n\nAnh/chị quan tâm size nào ạ?"
+                send_message(uid, reply)
+                ctx["history"].append({"role": "assistant", "content": reply})
+                return
+            elif any(keyword in lower_text for keyword in ["màu nào", "có màu", "màu gì", "màu nào", "màu sắc"]):
+                # Trả lời chi tiết về màu
+                color_info = product.get('màu (Thuộc tính)', 'Không có thông tin')
+                reply = f"Dạ sản phẩm này có các màu: {color_info}\n\nAnh/chị quan tâm màu nào ạ?"
+                send_message(uid, reply)
+                ctx["history"].append({"role": "assistant", "content": reply})
+                return
+            elif any(keyword in lower_text for keyword in ["tồn kho", "còn hàng", "hết hàng", "bao nhiêu cái"]):
+                # Trả lời về tồn kho
+                stock_info = product.get('Tồn kho', 'Không có thông tin')
+                reply = f"Dạ sản phẩm này hiện còn {stock_info} cái trong kho ạ.\n\nAnh/chị muốn đặt bao nhiêu ạ?"
+                send_message(uid, reply)
+                ctx["history"].append({"role": "assistant", "content": reply})
+                return
+            elif any(keyword in lower_text for keyword in ["xem hàng", "xem sản phẩm", "xem mẫu", "có được xem"]):
+                # Trả lời về việc xem hàng dựa trên mô tả
+                desc = product.get('MoTa', 'Sản phẩm có sẵn để xem và đặt hàng ạ.')
+                reply = f"Dạ anh/chị có thể xem hàng qua hình ảnh em đã gửi. {desc[:100]}...\n\nAnh/chị muốn xem thêm hình ảnh nào không ạ?"
+                send_message(uid, reply)
+                ctx["history"].append({"role": "assistant", "content": reply})
+                return
+
+        # Gọi GPT để trả lời với thông tin sản phẩm hiện tại
+        reply = gpt_reply(ctx["history"], product, ms)
         ctx["history"].append({"role": "assistant", "content": reply})
         
         # Chỉ gửi reply nếu không phải đang trong order process
         if not ctx.get("order_state"):
             send_message(uid, reply)
 
+        # Kiểm tra từ khóa đặt hàng
         lower = text.lower()
         if ms and ms in PRODUCTS and any(kw in lower for kw in ORDER_KEYWORDS):
             domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
@@ -1006,6 +1155,7 @@ def handle_echo_outgoing(page_id: str, user_id: str, text: str, mid: str = ""):
         ctx = USER_CONTEXT[user_id]
         ctx["inbox_entry_ms"] = ms
         ctx["last_ms"] = ms
+        ctx["current_product_ms"] = ms
         print(f"[ECHO] Ghi nhận mã từ page/Fchat cho user {user_id}: {ms}")
 
 
@@ -1132,6 +1282,7 @@ def webhook():
                         
                         if product_code in PRODUCTS:
                             ctx["last_ms"] = product_code
+                            ctx["current_product_ms"] = product_code
                             # GỬI SẢN PHẨM VỚI THỜI GIAN CHỜ GIỮA CÁC ẢNH
                             send_product_info_debounced(sender_id, product_code)
                         else:
@@ -1153,6 +1304,7 @@ def webhook():
                         if ms_ref:
                             ctx["inbox_entry_ms"] = ms_ref
                             ctx["last_ms"] = ms_ref
+                            ctx["current_product_ms"] = ms_ref
                             print(f"[REF] Nhận mã từ referral: {ms_ref}")
                             ctx["greeted"] = True
                             send_product_info_debounced(sender_id, ms_ref)
@@ -1172,6 +1324,7 @@ def webhook():
                     if ms_ref:
                         ctx["inbox_entry_ms"] = ms_ref
                         ctx["last_ms"] = ms_ref
+                        ctx["current_product_ms"] = ms_ref
                         print(f"[REF] Nhận mã từ referral: {ms_ref}")
 
                 # XỬ LÝ IMAGE MESSAGE
@@ -1203,7 +1356,7 @@ def webhook():
 
 
 # ============================================
-# ORDER FORM & API
+# ORDER FORM & API - CẢI THIỆN
 # ============================================
 
 def send_order_link(uid: str, ms: str):
@@ -1267,19 +1420,23 @@ def api_get_product():
     size_field = row.get("size (Thuộc tính)", "")
     color_field = row.get("màu (Thuộc tính)", "")
     
+    # Xử lý size - tách bằng dấu phẩy
     sizes = []
     if size_field:
         sizes = [s.strip() for s in size_field.split(",") if s.strip()]
     
+    # Xử lý màu - tách bằng dấu phẩy
     colors = []
     if color_field:
         colors = [c.strip() for c in color_field.split(",") if c.strip()]
     
+    # Nếu không có size/color thì dùng mặc định
     if not sizes:
         sizes = ["Mặc định"]
     if not colors:
         colors = ["Mặc định"]
 
+    # Xử lý giá
     price_str = row.get("Gia", "0")
     price_match = re.search(r'(\d[\d.,]*)', price_str)
     price = 0
@@ -1299,7 +1456,9 @@ def api_get_product():
         "image": image,
         "page_name": FANPAGE_NAME,
         "sizes": sizes,
-        "colors": colors
+        "colors": colors,
+        "all_sizes": sizes,  # Thêm để form sử dụng
+        "all_colors": colors  # Thêm để form sử dụng
     }
 
 
@@ -1344,6 +1503,36 @@ def api_order():
         send_message(uid, msg)
 
     return {"status": "ok", "message": "Đơn hàng đã được tiếp nhận"}
+
+
+# ============================================
+# API LẤY GIÁ THEO BIẾN THỂ
+# ============================================
+
+@app.route("/api/get-variant-price")
+def api_get_variant_price():
+    ms = request.args.get("ms", "").upper()
+    size = request.args.get("size", "")
+    color = request.args.get("color", "")
+    
+    if ms not in PRODUCTS:
+        return {"error": "not_found"}, 404
+    
+    row = PRODUCTS[ms]
+    
+    # Trong trường hợp đơn giản, trả về giá chung
+    # Nếu có bảng giá riêng, cần xử lý logic ở đây
+    price_str = row.get("Gia", "0")
+    price_match = re.search(r'(\d[\d.,]*)', price_str)
+    price = 0
+    if price_match:
+        price_str_clean = price_match.group(1).replace(',', '').replace('.', '')
+        try:
+            price = int(price_str_clean)
+        except:
+            price = 0
+    
+    return {"price": price, "price_display": row.get("Gia", "0")}
 
 
 # ============================================
