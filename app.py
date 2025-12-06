@@ -154,19 +154,14 @@ def send_message(uid: str, text: str) -> str:
 
 
 def send_image(uid: str, image_url: str) -> str:
-    # Tăng timeout để tránh lỗi
     try:
-        # Download image với timeout ngắn hơn
-        resp = requests.get(image_url, timeout=10)
-        resp.raise_for_status()
-        image_data = resp.content
+        files = {
+            "filedata": ("image.jpg", requests.get(image_url, timeout=10).content, "image/jpeg")
+        }
     except Exception as e:
         print(f"DOWNLOAD IMG ERROR: {e}, URL: {image_url}")
         return ""
 
-    files = {
-        "filedata": ("image.jpg", image_data, "image/jpeg")
-    }
     params = {
         "access_token": PAGE_ACCESS_TOKEN
     }
@@ -217,7 +212,9 @@ def send_carousel_template(recipient_id: str, products_data: list) -> str:
             if not image_url:
                 continue
             
-            order_link = f"https://{DOMAIN}/order-form?ms={product.get('MS', '')}&uid={recipient_id}"
+            # Sửa lỗi domain - đảm bảo có https://
+            domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
+            order_link = f"{domain}/order-form?ms={product.get('MS', '')}&uid={recipient_id}"
                 
             element = {
                 "title": f"[{product.get('MS', '')}] {product.get('Ten', '')}",
@@ -234,7 +231,8 @@ def send_carousel_template(recipient_id: str, products_data: list) -> str:
                         "title": "🛒 Chọn sản phẩm",
                         "url": order_link,
                         "webview_height_ratio": "tall",
-                        "messenger_extensions": True
+                        "messenger_extensions": True,
+                        "webview_share_button": "hide"
                     }
                 ]
             }
@@ -793,7 +791,8 @@ def send_product_info(uid: str, ms: str, force_send_images: bool = True):
     send_message(uid, info_text)
     
     # Gửi link form đặt hàng
-    order_link = f"https://{DOMAIN}/order-form?ms={ms}&uid={uid}"
+    domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
+    order_link = f"{domain}/order-form?ms={ms}&uid={uid}"
     send_message(uid, f"📋 Anh/chị có thể đặt hàng ngay tại đây:\n{order_link}")
 
     # Gửi 5 ảnh
@@ -930,7 +929,8 @@ def handle_text(uid: str, text: str):
 
         lower = text.lower()
         if ms and ms in PRODUCTS and any(kw in lower for kw in ORDER_KEYWORDS):
-            order_link = f"https://{DOMAIN}/order-form?ms={ms}&uid={uid}"
+            domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
+            order_link = f"{domain}/order-form?ms={ms}&uid={uid}"
             send_message(uid, f"📋 Anh/chị có thể đặt hàng ngay tại đây:\n{order_link}")
     
     finally:
@@ -1049,7 +1049,8 @@ def webhook():
                     
                 elif payload and payload.startswith("SELECT_"):
                     product_code = payload.replace("SELECT_", "")
-                    order_link = f"https://{DOMAIN}/order-form?ms={product_code}&uid={sender_id}"
+                    domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
+                    order_link = f"{domain}/order-form?ms={product_code}&uid={sender_id}"
                     response_msg = f"📋 Anh/chị có thể đặt hàng sản phẩm [{product_code}] ngay tại đây:\n{order_link}"
                     send_message(sender_id, response_msg)
                     return "ok"
@@ -1103,10 +1104,8 @@ def webhook():
 # ============================================
 
 def send_order_link(uid: str, ms: str):
-    base = DOMAIN or ""
-    if base and not base.startswith("http"):
-        base = "https://" + base
-    url = f"{base}/order-form?ms={quote(ms)}&uid={quote(uid)}"
+    domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
+    url = f"{domain}/order-form?ms={quote(ms)}&uid={quote(uid)}"
     msg = f"Anh/chị có thể đặt hàng nhanh tại đây ạ: {url}"
     send_message(uid, msg)
 
