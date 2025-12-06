@@ -3,7 +3,6 @@ import json
 import re
 import time
 import csv
-import hashlib
 from collections import defaultdict
 from urllib.parse import quote
 from datetime import datetime
@@ -15,72 +14,135 @@ from openai import OpenAI
 # ============================================
 # FLASK APP
 # ============================================
-app = Flask(__name__, static_folder="static")
+
+app = Flask(__name__, static_folder="static", static_url_path="/static")
 
 # ============================================
-# ENV & CONFIG
+# ENVIRONMENT (Render)
 # ============================================
-PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN", "").strip()
-VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "").strip()
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
-GOOGLE_SHEET_CSV_URL = os.getenv("GOOGLE_SHEET_CSV_URL", "").strip()
-DOMAIN = os.getenv("DOMAIN", "").strip() or "fb-gpt-chatbot.onrender.com"
-FANPAGE_NAME = os.getenv("FANPAGE_NAME", "Shop thời trang")
-FCHAT_WEBHOOK_URL = os.getenv("FCHAT_WEBHOOK_URL", "").strip()
-FCHAT_TOKEN = os.getenv("FCHAT_TOKEN", "").strip()
 
-if not GOOGLE_SHEET_CSV_URL:
-    GOOGLE_SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/18eI8Yn-WG8xN0YK8mWqgIOvn-USBhmXBH3sR2drvWus/export?format=csv"
+OPENAI_API_KEY     = os.getenv("OPENAI_API_KEY")
+PAGE_ACCESS_TOKEN  = os.getenv("PAGE_ACCESS_TOKEN")
+VERIFY_TOKEN       = os.getenv("VERIFY_TOKEN")
+FREEIMAGE_API_KEY  = os.getenv("FREEIMAGE_API_KEY")
+SHEET_URL          = os.getenv("SHEET_CSV_URL")
+DOMAIN             = os.getenv("DOMAIN", "fb-gpt-chatbot.onrender.com")
+FANPAGE_NAME       = os.getenv("FANPAGE_NAME", "Shop")
 
-# ============================================
-# OPENAI CLIENT
-# ============================================
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 # ============================================
 # GLOBAL STATE
 # ============================================
+
 USER_CONTEXT = defaultdict(lambda: {
-    "history": [],
     "last_ms": None,
     "inbox_entry_ms": None,
+    "vision_ms": None,
+    "caption_ms": None,
+    "history": [],
     "greeted": False,
+    "recommended_sent": False,
+    "product_info_sent_ms": None,
     "carousel_sent": False,
+    "last_postback_time": 0,
+    "sent_message_ids": set(),
+    "order_state": None,
+    "order_data": {},
     "last_message_time": 0,
     "last_product_info_time": 0,
-    "product_info_sent_ms": None,
     "get_started_processed": False,
     "processing_lock": False,
     "last_postback_payload": None,
     "postback_count": 0,
     "current_product_ms": None,
-    "last_order_time": 0,
-    "last_order_hash": None,
 })
 
 PRODUCTS = {}
 LAST_LOAD = 0
 LOAD_TTL = 300
 
-# Các từ khóa liên quan đến đặt hàng
+# Cache cho ảnh đã rehost
+IMAGE_REHOST_CACHE = {}
+
+# ============================================
+# TỪ KHOÁ THỂ HIỆN Ý ĐỊNH "ĐẶT HÀNG / MUA"
+# ============================================
+
 ORDER_KEYWORDS = [
-    "đặt hàng", "chốt đơn", "mua", "lấy", "ship", "gửi", "mua hàng",
-    "ok em", "ok chị", "ok anh", "em chốt", "chị chốt", "anh chốt",
-    "đặt luôn", "lấy luôn", "giao hàng"
+    "đặt hàng nha",
+    "ok đặt",
+    "ok mua",
+    "ok em",
+    "ok e",
+    "mua 1 cái",
+    "mua cái này",
+    "mua luôn",
+    "chốt",
+    "lấy mã",
+    "lấy mẫu",
+    "lấy luôn",
+    "lấy em này",
+    "lấy e này",
+    "gửi cho",
+    "ship cho",
+    "ship 1 cái",
+    "chốt 1 cái",
+    "cho tôi mua",
+    "tôi lấy nhé",
+    "cho mình đặt",
+    "tôi cần mua",
+    "xác nhận đơn hàng giúp tôi",
+    "tôi đồng ý mua",
+    "làm đơn cho tôi đi",
+    "tôi chốt đơn nhé",
+    "cho xin 1 cái",
+    "cho đặt 1 chiếc",
+    "bên shop tạo đơn giúp em",
+    "okela",
+    "ok bạn",
+    "đồng ý",
+    "được đó",
+    "vậy cũng được",
+    "được vậy đi",
+    "chốt như bạn nói",
+    "ok giá đó đi",
+    "lấy mẫu đó đi",
+    "tư vấn giúp mình đặt hàng",
+    "hướng dẫn mình mua với",
+    "bạn giúp mình đặt nhé",
+    "muốn có nó quá",
+    "muốn mua quá",
+    "ưng quá, làm sao để mua",
+    "chốt đơn",
+    "bán cho em",
+    "bán cho em vé",
+    "xuống đơn giúp em",
+    "đơm hàng",
+    "lấy nha",
+    "lấy nhé",
+    "mua nha",
+    "mình lấy đây",
+    "shop ơi, của em",
+    "vậy lấy cái",
+    "thôi lấy cái",
+    "order nhé",
 ]
 
 # ============================================
-# HELPER: SEND MESSAGE
+# TIỆN ÍCH FACEBOOK
 # ============================================
 
-def call_facebook_send_api(payload: dict):
-    if not PAGE_ACCESS_TOKEN:
-        print("[WARN] PAGE_ACCESS_TOKEN is not set. Skip sending.")
+def send_message(uid: str, text: str) -> str:
+    if not text:
         return ""
-
     url = "https://graph.facebook.com/v18.0/me/messages"
     params = {"access_token": PAGE_ACCESS_TOKEN}
-
+    payload = {
+        "recipient": {"id": uid},
+        "message": {"text": text},
+        "messaging_type": "RESPONSE",
+    }
     try:
         r = requests.post(url, params=params, json=payload, timeout=10)
         print("SEND MSG:", r.status_code, r.text)
@@ -88,12 +150,7 @@ def call_facebook_send_api(payload: dict):
             response = r.json()
             message_id = response.get("message_id", "")
             if message_id:
-                # Lưu lại message_id để tránh xử lý echo
-                recipient_id = payload.get("recipient", {}).get("id")
-                if recipient_id:
-                    ctx = USER_CONTEXT[recipient_id]
-                    ctx["history"]  # kích hoạt tạo ctx
-                    ctx.setdefault("sent_message_ids", set()).add(message_id)
+                USER_CONTEXT[uid]["sent_message_ids"].add(message_id)
             return message_id
         return ""
     except Exception as e:
@@ -101,101 +158,402 @@ def call_facebook_send_api(payload: dict):
         return ""
 
 
-def send_message(recipient_id: str, text: str):
-    if not text:
+def send_image(uid: str, image_url: str) -> str:
+    try:
+        files = {
+            "filedata": ("image.jpg", requests.get(image_url, timeout=10).content, "image/jpeg")
+        }
+    except Exception as e:
+        print(f"DOWNLOAD IMG ERROR: {e}, URL: {image_url}")
         return ""
-    payload = {
-        "recipient": {"id": recipient_id},
-        "message": {"text": text},
+
+    params = {
+        "access_token": PAGE_ACCESS_TOKEN
     }
-    return call_facebook_send_api(payload)
-
-
-def send_image(recipient_id: str, image_url: str):
-    if not image_url:
-        return ""
-    payload = {
-        "recipient": {"id": recipient_id},
-        "message": {
+    data = {
+        "recipient": json.dumps({"id": uid}, ensure_ascii=False),
+        "message": json.dumps({
             "attachment": {
                 "type": "image",
-                "payload": {"url": image_url, "is_reusable": True},
+                "payload": {}
             }
-        },
+        }, ensure_ascii=False),
+        "messaging_type": "RESPONSE",
     }
-    return call_facebook_send_api(payload)
-
-
-def send_carousel_template(recipient_id: str, elements: list):
-    if not elements:
-        return ""
-    payload = {
-        "recipient": {"id": recipient_id},
-        "message": {
-            "attachment": {
-                "type": "template",
-                "payload": {
-                    "template_type": "generic",
-                    "elements": elements,
-                },
-            }
-        },
-    }
-    mid = call_facebook_send_api(payload)
-    print("SEND CAROUSEL:", mid)
-    return mid
-
-
-# ============================================
-# PRODUCT LOADING
-# ============================================
-
-def parse_image_urls(raw: str):
-    if not raw:
-        return []
-    parts = re.split(r'[,\n;|]+', raw)
-    urls = []
-    for p in parts:
-        p = p.strip()
-        if not p:
-            continue
-        if "alicdn.com" in p or "taobao" in p or "1688.com" in p or p.startswith("http"):
-            urls.append(p)
-    # Loại trùng
-    seen = set()
-    result = []
-    for u in urls:
-        if u not in seen:
-            seen.add(u)
-            result.append(u)
-    return result
-
-
-def should_use_as_first_image(url: str):
-    # Không loại watermark Trung Quốc theo yêu cầu: chỉ bỏ trùng
-    if not url:
-        return False
-    return True
-
-
-def load_products(force=False):
-    """
-    Đọc dữ liệu từ Google Sheet CSV, cache trong 300s.
-    Gom các biến thể cùng Mã sản phẩm, đồng thời gộp đủ màu & size.
-    """
-    global PRODUCTS, LAST_LOAD
-    now = time.time()
-    if not force and PRODUCTS and (now - LAST_LOAD) < LOAD_TTL:
-        return
 
     try:
-        print(f"🟦 Loading sheet: {GOOGLE_SHEET_CSV_URL}")
-        r = requests.get(GOOGLE_SHEET_CSV_URL, timeout=20)
-        r.raise_for_status()
-        r.encoding = "utf-8"
-        content = r.text
+        r = requests.post(
+            "https://graph.facebook.com/v18.0/me/messages",
+            params=params,
+            data=data,
+            files=files,
+            timeout=15
+        )
+        print("SEND IMG:", r.status_code, r.text)
+        if r.status_code == 200:
+            response = r.json()
+            message_id = response.get("message_id", "")
+            if message_id:
+                USER_CONTEXT[uid]["sent_message_ids"].add(message_id)
+            return message_id
+        return ""
+    except Exception as e:
+        print("SEND IMG ERROR:", e)
+        return ""
 
-        reader = csv.DictReader(content.splitlines())
+
+# ============================================
+# CAROUSEL TEMPLATE - FIXED
+# ============================================
+
+def send_carousel_template(recipient_id: str, products_data: list) -> str:
+    try:
+        elements = []
+        for product in products_data[:10]:
+            image_field = product.get("Images", "")
+            image_urls = parse_image_urls(image_field)
+            original_image_url = image_urls[0] if image_urls else ""
+            
+            if not original_image_url:
+                continue
+            
+            # Sử dụng URL gốc trực tiếp thay vì rehost (vì Facebook chặn domain whitelist)
+            final_image_url = original_image_url
+            
+            # Sửa lỗi domain - đảm bảo có https://
+            domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
+            order_link = f"{domain}/order-form?ms={product.get('MS', '')}&uid={recipient_id}"
+                
+            element = {
+                "title": f"[{product.get('MS', '')}] {product.get('Ten', '')}",
+                "subtitle": f"💰 Giá: {product.get('Gia', '')}\n{product.get('MoTa', '')[:60]}..." if product.get('MoTa') else f"💰 Giá: {product.get('Gia', '')}",
+                "image_url": final_image_url,
+                "buttons": [
+                    {
+                        "type": "postback",
+                        "title": "📋 Xem chi tiết",
+                        "payload": f"VIEW_{product.get('MS', '')}"
+                    },
+                    {
+                        "type": "web_url",
+                        "title": "🛒 Chọn sản phẩm",
+                        "url": order_link,
+                        "webview_height_ratio": "tall",
+                        "messenger_extensions": False,  # Đặt thành False vì domain chưa whitelist
+                        "webview_share_button": "hide"
+                    }
+                ]
+            }
+            elements.append(element)
+        
+        if not elements:
+            print("Không có sản phẩm nào có ảnh để hiển thị trong carousel")
+            return ""
+        
+        url = "https://graph.facebook.com/v18.0/me/messages"
+        params = {"access_token": PAGE_ACCESS_TOKEN}
+        payload = {
+            "recipient": {"id": recipient_id},
+            "message": {
+                "attachment": {
+                    "type": "template",
+                    "payload": {
+                        "template_type": "generic",
+                        "elements": elements
+                    }
+                }
+            },
+            "messaging_type": "RESPONSE"
+        }
+        
+        r = requests.post(url, params=params, json=payload, timeout=10)
+        print("SEND CAROUSEL:", r.status_code, r.text)
+        
+        if r.status_code == 200:
+            response = r.json()
+            message_id = response.get("message_id", "")
+            if message_id:
+                USER_CONTEXT[recipient_id]["sent_message_ids"].add(message_id)
+            return message_id
+        elif r.status_code == 400 and "2018062" in r.text:
+            print("⚠️ LỖI CAROUSEL: Domain chưa được whitelist!")
+            # Fallback: gửi dạng text thay vì carousel
+            return ""
+        return ""
+        
+    except Exception as e:
+        print("SEND CAROUSEL ERROR:", e)
+        return ""
+
+
+def send_product_carousel(recipient_id: str) -> None:
+    load_products()
+    if not PRODUCTS:
+        return
+    
+    products = list(PRODUCTS.values())[:5]
+    message_id = send_carousel_template(recipient_id, products)
+    
+    # Nếu carousel không gửi được, gửi danh sách text thay thế
+    if not message_id:
+        send_message(recipient_id, "Em gửi anh/chị 5 mẫu đang được nhiều khách quan tâm:")
+        for i, product in enumerate(products[:5], 1):
+            ms = product.get('MS', '')
+            ten = product.get('Ten', '')
+            gia = product.get('Gia', '')
+            send_message(recipient_id, f"{i}. [{ms}] {ten}\n💰 Giá: {gia}")
+            time.sleep(0.1)
+
+
+# ============================================
+# CDN IMAGE UPLOAD FUNCTION (giữ lại cho các tính năng khác)
+# ============================================
+
+def rehost_image_to_cdn(image_url: str) -> str:
+    """
+    Hàm này giữ lại nhưng chỉ trả về URL gốc do vấn đề whitelist domain
+    """
+    # Vì Facebook không cho whitelist domain, chúng ta sử dụng URL gốc
+    return image_url
+
+
+# ============================================
+# ORDER FORM FUNCTIONS
+# ============================================
+
+def send_order_form_quick_replies(uid: str, product_info: dict) -> None:
+    summary = f"""
+📋 THÔNG TIN ĐƠN HÀNG
+────────────────────
+🛍️ Sản phẩm: {product_info['name']}
+💰 Giá: {product_info['price']}
+🎨 Màu: {product_info['color']}
+📏 Size: {product_info['size']}
+────────────────────
+"""
+    send_message(uid, summary)
+    
+    form_message = {
+        "recipient": {"id": uid},
+        "message": {
+            "text": "Để hoàn tất đơn hàng, vui lòng cung cấp thông tin sau:",
+            "quick_replies": [
+                {
+                    "content_type": "text",
+                    "title": "👤 Họ tên",
+                    "payload": "ORDER_PROVIDE_NAME"
+                },
+                {
+                    "content_type": "text",
+                    "title": "📱 Số điện thoại",
+                    "payload": "ORDER_PROVIDE_PHONE"
+                },
+                {
+                    "content_type": "text",
+                    "title": "🏠 Địa chỉ",
+                    "payload": "ORDER_PROVIDE_ADDRESS"
+                }
+            ]
+        },
+        "messaging_type": "RESPONSE"
+    }
+    
+    try:
+        r = requests.post(
+            "https://graph.facebook.com/v18.0/me/messages",
+            params={"access_token": PAGE_ACCESS_TOKEN},
+            json=form_message,
+            timeout=10
+        )
+        print("SEND ORDER FORM:", r.status_code, r.text)
+    except Exception as e:
+        print("SEND ORDER FORM ERROR:", e)
+
+
+def send_order_confirmation(uid: str) -> None:
+    ctx = USER_CONTEXT[uid]
+    order_data = ctx.get("order_data", {})
+    product_info = order_data.get("product_info", {})
+    
+    if not product_info:
+        send_message(uid, "Có lỗi xảy ra khi xử lý đơn hàng. Vui lòng thử lại.")
+        return
+    
+    confirmation_text = f"""
+✅ ĐÃ XÁC NHẬN ĐƠN HÀNG THÀNH CÔNG!
+────────────────────
+🛍️ Sản phẩm: {product_info.get('name', '')}
+💰 Giá: {product_info.get('price', '')}
+🎨 Màu: {product_info.get('color', '')}
+📏 Size: {product_info.get('size', '')}
+────────────────────
+👤 Người nhận: {order_data.get('name', '')}
+📱 SĐT: {order_data.get('phone', '')}
+🏠 Địa chỉ: {order_data.get('address', '')}
+────────────────────
+⏰ Thời gian đặt hàng: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}
+📦 Đơn hàng sẽ được giao trong 2-4 ngày làm việc
+💳 Thanh toán khi nhận hàng (COD)
+────────────────────
+Cảm ơn bạn đã đặt hàng! ❤️
+Shop sẽ liên hệ xác nhận trong thời gian sớm nhất.
+"""
+    
+    send_message(uid, confirmation_text)
+    
+    ctx["order_state"] = None
+    ctx["order_data"] = {}
+
+
+def handle_order_form_step(uid: str, text: str) -> bool:
+    ctx = USER_CONTEXT[uid]
+    order_state = ctx.get("order_state")
+    
+    if not order_state:
+        return False
+    
+    if order_state == "waiting_name":
+        ctx["order_data"]["name"] = text
+        ctx["order_state"] = "waiting_phone"
+        send_message(uid, "✅ Đã lưu họ tên: " + text)
+        send_message(uid, "📱 Vui lòng nhập số điện thoại của bạn:")
+        return True
+        
+    elif order_state == "waiting_phone":
+        phone_pattern = r'^(0|\+84)[1-9]\d{8}$'
+        phone = text.strip().replace(" ", "")
+        
+        if not re.match(phone_pattern, phone):
+            send_message(uid, "❌ Số điện thoại không hợp lệ. Vui lòng nhập lại số điện thoại (ví dụ: 0912345678 hoặc +84912345678):")
+            return True
+            
+        ctx["order_data"]["phone"] = phone
+        ctx["order_state"] = "waiting_address"
+        send_message(uid, "✅ Đã lưu số điện thoại: " + phone)
+        send_message(uid, "🏠 Vui lòng nhập địa chỉ giao hàng chi tiết (số nhà, đường, phường/xã, tỉnh/thành phố):")
+        return True
+        
+    elif order_state == "waiting_address":
+        if len(text.strip()) < 10:
+            send_message(uid, "❌ Địa chỉ quá ngắn. Vui lòng nhập địa chỉ chi tiết hơn:")
+            return True
+            
+        ctx["order_data"]["address"] = text.strip()
+        ctx["order_state"] = "confirming"
+        
+        order_data = ctx["order_data"]
+        product_info = order_data.get("product_info", {})
+        
+        summary = f"""
+📋 THÔNG TIN ĐƠN HÀNG ĐẦY ĐỦ
+────────────────────
+🛍️ Sản phẩm: {product_info.get('name', '')}
+💰 Giá: {product_info.get('price', '')}
+🎨 Màu: {product_info.get('color', '')}
+📏 Size: {product_info.get('size', '')}
+────────────────────
+👤 Người nhận: {order_data.get('name', '')}
+📱 SĐT: {order_data.get('phone', '')}
+🏠 Địa chỉ: {order_data.get('address', '')}
+────────────────────
+"""
+        send_message(uid, summary)
+        
+        confirm_message = {
+            "recipient": {"id": uid},
+            "message": {
+                "text": "Vui lòng xác nhận thông tin trên là chính xác:",
+                "quick_replies": [
+                    {
+                        "content_type": "text",
+                        "title": "✅ Xác nhận đặt hàng",
+                        "payload": "ORDER_CONFIRM"
+                    },
+                    {
+                        "content_type": "text",
+                        "title": "✏️ Sửa thông tin",
+                        "payload": "ORDER_EDIT"
+                    }
+                ]
+            },
+            "messaging_type": "RESPONSE"
+        }
+        
+        try:
+            r = requests.post(
+                "https://graph.facebook.com/v18.0/me/messages",
+                params={"access_token": PAGE_ACCESS_TOKEN},
+                json=confirm_message,
+                timeout=10
+            )
+            print("SEND ORDER CONFIRM:", r.status_code, r.text)
+        except Exception as e:
+            print("SEND ORDER CONFIRM ERROR:", e)
+            
+        return True
+        
+    return False
+
+
+def start_order_process(uid: str, ms: str) -> None:
+    load_products()
+    
+    if ms not in PRODUCTS:
+        send_message(uid, "❌ Không tìm thấy thông tin sản phẩm. Vui lòng thử lại.")
+        return
+    
+    product_row = PRODUCTS[ms]
+    ctx = USER_CONTEXT[uid]
+    
+    ctx["order_data"] = {
+        "product_info": {
+            "ms": ms,
+            "name": f"[{ms}] {product_row.get('Ten', '')}",
+            "price": product_row.get('Gia', ''),
+            "color": product_row.get('màu (Thuộc tính)', ''),
+            "size": product_row.get('size (Thuộc tính)', '')
+        }
+    }
+    
+    send_order_form_quick_replies(uid, ctx["order_data"]["product_info"])
+    ctx["order_state"] = "waiting_name"
+
+
+# ============================================
+# REHOST IMAGE (giữ lại cho tương thích)
+# ============================================
+
+def rehost_image(url: str) -> str:
+    """Giữ lại hàm cũ cho tương thích với các phần code khác"""
+    return rehost_image_to_cdn(url)
+
+
+# ============================================
+# LOAD SẢN PHẨM TỪ SHEET
+# ============================================
+
+def load_products(force: bool = False) -> None:
+    global PRODUCTS, LAST_LOAD
+
+    now = time.time()
+    if not force and PRODUCTS and now - LAST_LOAD < LOAD_TTL:
+        return
+
+    if not SHEET_URL:
+        print("❌ SHEET_CSV_URL chưa cấu hình")
+        PRODUCTS = {}
+        return
+
+    print("🟦 Loading sheet:", SHEET_URL)
+
+    try:
+        resp = requests.get(SHEET_URL, timeout=30)
+        resp.raise_for_status()
+
+        csv_text = resp.content.decode("utf-8", errors="replace")
+        lines = csv_text.splitlines()
+        reader = csv.DictReader(lines)
+
         products = {}
         for raw_row in reader:
             row = dict(raw_row)
@@ -226,358 +584,468 @@ def load_products(force=False):
             row["màu (Thuộc tính)"] = mau
             row["size (Thuộc tính)"] = size
 
-            # Gộp các biến thể theo cùng mã sản phẩm: gom đủ màu & size
-            if ms in products:
-                existing = products[ms]
-
-                def _merge_attr(old_val, new_val):
-                    values = []
-                    for v in (old_val, new_val):
-                        if not v:
-                            continue
-                        for part in v.split(","):
-                            part = part.strip()
-                            if part and part not in values:
-                                values.append(part)
-                    return ", ".join(values)
-
-                existing["màu (Thuộc tính)"] = _merge_attr(
-                    existing.get("màu (Thuộc tính)", ""), mau
-                )
-                existing["size (Thuộc tính)"] = _merge_attr(
-                    existing.get("size (Thuộc tính)", ""), size
-                )
-            else:
-                products[ms] = row
+            products[ms] = row
 
         PRODUCTS = products
         LAST_LOAD = now
         print(f"📦 Loaded {len(PRODUCTS)} products.")
     except Exception as e:
-        print("❌ load_products ERROR:", e)
+        print("❌ load_products error:", e)
+        PRODUCTS = {}
 
 
 # ============================================
-# GPT PROMPT
+# IMAGE HELPER & GPT VISION
 # ============================================
 
-def build_product_system_prompt(product: dict | None, ms: str | None):
-    base = (
-        "Bạn là trợ lý bán hàng thời trang cho shop Facebook. "
-        "Nhiệm vụ của bạn là tư vấn size, màu, chất liệu, giá, tồn kho và hỗ trợ chốt đơn. "
-        "Luôn trả lời bằng tiếng Việt thân thiện, xưng 'em' và gọi khách là 'anh/chị'. "
-        "Nếu không chắc thông tin (ví dụ thiếu trong dữ liệu sản phẩm) thì nói rõ là không chắc, "
-        "không được bịa.\n\n"
-    )
-
-    if not product:
-        return base + (
-            "Hiện tại em chưa xác định được sản phẩm cụ thể, "
-            "hãy hỏi khách đang quan tâm mẫu nào, mã nào hoặc bảo khách gửi hình mẫu."
-        )
-
-    mo_ta = product.get("MoTa", "")
-    gia = product.get("Gia", "")
-    tonkho = product.get("Tồn kho", "")
-    mau = product.get("màu (Thuộc tính)", "")
-    size = product.get("size (Thuộc tính)", "")
-
-    detail = f"""Dưới đây là thông tin sản phẩm mã {ms}:
-
-- Tên: {product.get('Ten', '')}
-- Giá niêm yết: {gia}
-- Tồn kho: {tonkho}
-- Màu: {mau}
-- Size: {size}
-- Mô tả: {mo_ta}
-
-Khi khách hỏi:
-- Về size: hãy dựa trên size hiện có, gợi ý size phù hợp chung (không bịa số đo chi tiết nếu không có).
-- Về màu: liệt kê các màu trong dữ liệu.
-- Về giá: trả lời đúng giá, nếu có mô tả 'giá từ ... tới ...' thì giải thích ngắn gọn.
-- Về tồn kho: trả lời dựa trên cột Tồn kho.
-- Nếu khách đồng ý mua: hỏi rõ màu, size, số lượng và hướng khách bấm vào link đặt hàng nếu có.
-
-Không tự ý thay đổi giá, không tư vấn sang sản phẩm khác nếu khách đang hỏi 1 mã cụ thể.
-"""
-    return base + detail
+def parse_image_urls(images_field: str) -> list:
+    if not images_field:
+        return []
+    parts = [u.strip() for u in images_field.split(",") if u.strip()]
+    seen = set()
+    result = []
+    for u in parts:
+        if u not in seen:
+            seen.add(u)
+            result.append(u)
+    return result
 
 
-def gpt_reply(history: list, product: dict | None, ms: str | None):
-    if not OPENAI_API_KEY or not client:
-        # Fallback: trả lời rule-based đơn giản
-        if product and ms:
-            return (
-                f"Dạ em đang tư vấn cho anh/chị về sản phẩm mã {ms} - {product.get('Ten','')} ạ. "
-                "Anh/chị cho em biết đang quan tâm size, màu hay giá để em hỗ trợ chi tiết hơn nhé."
-            )
-        else:
-            return (
-                "Dạ anh/chị cho em xin mã sản phẩm hoặc gửi hình mẫu để em kiểm tra giúp ạ."
-            )
-
-    messages = [{"role": "system", "content": build_product_system_prompt(product, ms)}]
-    messages.extend(history)
-
+def gpt_analyze_image(url: str):
+    if not client:
+        return None, None
     try:
-        resp = client.chat.completions.create(
-            model="gpt-4.1-mini",
-            messages=messages,
-            temperature=0.6,
-            max_tokens=500,
+        prompt = f"""
+        Bạn là trợ lý bán hàng. Hãy mô tả sản phẩm trong ảnh
+        và cố gắng tìm mã sản phẩm gần nhất trong danh sách:
+        {', '.join(PRODUCTS.keys())}
+
+        Trả về JSON dạng:
+        {{
+          "description": "...",
+          "matched_ms": "MS000123" hoặc null
+        }}
+        """
+        r = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "Bạn là trợ lý bán hàng chuyên nghiệp."},
+                {"role": "user", "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": url}},
+                ]},
+            ],
+            temperature=0.3,
         )
-        return resp.choices[0].message.content.strip()
+        text = r.choices[0].message.content
+        m = re.search(r"(MS\d+)", text)
+        return (m.group(1) if m else None), text
     except Exception as e:
-        print("GPT ERROR:", e)
-        if product and ms:
-            return (
-                f"Dạ em đang tư vấn cho anh/chị về sản phẩm mã {ms} - {product.get('Ten','')} ạ. "
-                "Anh/chị cho em biết đang quan tâm size, màu hay giá để em hỗ trợ chi tiết hơn nhé."
-            )
-        return "Dạ anh/chị cho em xin mã sản phẩm hoặc gửi hình mẫu để em kiểm tra giúp ạ."
+        print("Vision error:", e)
+        return None, None
 
 
 # ============================================
-# HELPER: EXTRACT MS
+# MS DETECT & CONTEXT
 # ============================================
 
-MS_PATTERN = re.compile(r"\bMS0*\d{3,}\b", re.IGNORECASE)
-
-
-def extract_ms(text: str | None):
+def extract_ms(text: str):
     if not text:
         return None
-    m = MS_PATTERN.search(text)
-    if not m:
-        return None
-    return m.group(0).upper()
+    m = re.search(r"(MS\d+)", text, flags=re.I)
+    return m.group(1).upper() if m else None
 
 
-def extract_short_code(text: str | None):
-    """
-    Trích mã rút gọn dạng [ABC123] nếu có.
-    """
+def extract_short_code(text: str):
     if not text:
         return None
-    m = re.search(r"\[([A-Za-z0-9_-]{3,})\]", text)
+    lower = text.lower()
+    m = re.search(r"mã\s*(?:số\s*)?(\d{1,3})", lower)
+    if not m:
+        m = re.search(r"ma\s*(?:so\s*)?(\d{1,3})", lower)
     if not m:
         return None
-    return m.group(1).upper()
+    return m.group(1)
 
 
-def find_ms_by_short_code(short_code: str | None):
-    if not short_code:
+def find_ms_by_short_code(code: str):
+    if not code:
         return None
-    load_products()
-    for ms, row in PRODUCTS.items():
-        code_in_sheet = (row.get("Mã sản phẩm") or "").strip().upper()
-        if code_in_sheet == short_code:
-            return ms
-    return None
+    code = code.lstrip("0") or code
+    candidates = []
+    for ms in PRODUCTS.keys():
+        if not ms.upper().startswith("MS"):
+            continue
+        digits = re.sub(r"\D", "", ms)
+        if digits.endswith(code):
+            candidates.append(ms)
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=len, reverse=True)
+    return candidates[0]
 
 
 def resolve_best_ms(ctx: dict):
-    """
-    Ưu tiên: last_ms > inbox_entry_ms
-    """
-    if ctx.get("last_ms"):
+    if ctx.get("last_ms") and ctx["last_ms"] in PRODUCTS:
         return ctx["last_ms"]
-    if ctx.get("inbox_entry_ms"):
-        return ctx["inbox_entry_ms"]
-    if ctx.get("current_product_ms"):
-        return ctx["current_product_ms"]
+    
+    for key in ["vision_ms", "inbox_entry_ms", "caption_ms"]:
+        if ctx.get(key) and ctx[key] in PRODUCTS:
+            return ctx[key]
     return None
 
 
 # ============================================
-# ORDER FORM STATE MACHINE
+# GPT CONTEXT ENGINE - CẢI THIỆN
 # ============================================
 
-def handle_order_form_step(uid: str, text: str):
-    ctx = USER_CONTEXT[uid]
-    state = ctx.get("order_state")
-    if not state:
-        return False
+def gpt_reply(history: list, product_row: dict | None, current_ms: str | None = None):
+    if not client:
+        return "Dạ hệ thống AI đang bận, anh/chị chờ em 1 lát với ạ."
 
-    if state == "waiting_name":
-        ctx["order_name"] = text.strip()
-        ctx["order_state"] = "waiting_phone"
-        send_message(uid, "📱 Vui lòng nhập số điện thoại (ví dụ: 0912345678 hoặc +84912345678):")
-        return True
+    sys = """
+    Bạn là trợ lý bán hàng của shop quần áo.
+    - Xưng "em", gọi khách là "anh/chị".
+    - Trả lời ngắn gọn, lịch sự, dễ hiểu.
+    - KHÔNG bịa đặt chất liệu/giá/ưu đãi nếu không có trong dữ liệu.
+    - Nếu đã biết sản phẩm khách đang xem, hãy:
+      + Tập trung trả lời câu hỏi về sản phẩm ĐÓ.
+      + Dùng thông tin từ dữ liệu sản phẩm để trả lời.
+      + Không tự ý giới thiệu sản phẩm khác trừ khi được yêu cầu.
+    - Nếu CHƯA biết sản phẩm:
+      + Hỏi rõ nhu cầu (mục đích, dáng người, ngân sách).
+      + Gợi ý hướng lựa chọn chung, không tự đặt mã.
+    - Ưu tiên trả lời trực tiếp câu hỏi của khách trước.
+    """
 
-    if state == "waiting_phone":
-        phone = re.sub(r"[^\d+]", "", text)
-        if len(phone) < 8:
-            send_message(uid, "❌ Số điện thoại chưa đúng, anh/chị nhập lại giúp em với ạ.")
-            return True
-        ctx["order_phone"] = phone
-        ctx["order_state"] = "waiting_address"
-        send_message(uid, "🏠 Vui lòng nhập địa chỉ giao hàng chi tiết:")
-        return True
+    if product_row:
+        # Lấy thông tin chi tiết
+        ten = product_row.get('Ten', '')
+        mota = product_row.get('MoTa', '')
+        gia = product_row.get('Gia', '')
+        mau = product_row.get('màu (Thuộc tính)', '')
+        size = product_row.get('size (Thuộc tính)', '')
+        tonkho = product_row.get('Tồn kho', '')
+        
+        sys += f"""
+        Dữ liệu sản phẩm hiện tại khách đang hỏi (Mã: {current_ms}):
+        - Tên sản phẩm: {ten}
+        - Mô tả: {mota}
+        - Giá bán: {gia}
+        - Màu sắc có sẵn: {mau}
+        - Size có sẵn: {size}
+        - Tồn kho: {tonkho}
+        
+        LƯU Ý QUAN TRỌNG:
+        1. Chỉ trả lời về sản phẩm NÀY khi khách hỏi.
+        2. Nếu khách hỏi về size/màu/tồn kho, trả lời DỰA TRÊN DỮ LIỆU TRÊN.
+        3. Nếu khách hỏi "có được xem hàng không", trả lời dựa trên mô tả sản phẩm.
+        4. Chỉ tư vấn sản phẩm khác khi khách yêu cầu hoặc không thích sản phẩm này.
+        5. Luôn tập trung vào sản phẩm hiện tại trừ khi khách hỏi sản phẩm khác.
+        """
 
-    if state == "waiting_address":
-        ctx["order_address"] = text.strip()
-        ctx["order_state"] = None
-        summary = (
-            "✅ Thông tin nhận hàng em đã ghi lại:\n"
-            f"- Họ tên: {ctx.get('order_name','')}\n"
-            f"- Số điện thoại: {ctx.get('order_phone','')}\n"
-            f"- Địa chỉ: {ctx.get('order_address','')}\n"
-            "Anh/chị xem giúp em đã đúng chưa ạ?"
+    if len(history) > 10:
+        history = history[-10:]
+
+    try:
+        r = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "system", "content": sys}] + history,
+            temperature=0.5,
         )
-        send_message(uid, summary)
-        send_message(uid, "Nếu muốn chỉnh sửa, anh/chị bấm 'Sửa thông tin'. Nếu đúng rồi, anh/chị bấm 'Xác nhận' giúp em ạ.")
-        return True
-
-    return False
-
-
-def send_order_confirmation(uid: str):
-    ctx = USER_CONTEXT[uid]
-    ms = resolve_best_ms(ctx)
-    load_products()
-    product_name = ""
-    if ms and ms in PRODUCTS:
-        product_name = PRODUCTS[ms].get("Ten", "")
-
-    msg = (
-        "✅ SHOP ĐÃ NHẬN THÔNG TIN ĐẶT HÀNG CỦA ANH/CHỊ!\n"
-        "────────────────────\n"
-        f"🛍️ Sản phẩm: {product_name} ({ms})\n"
-        f"👤 Người nhận: {ctx.get('order_name','')}\n"
-        f"📱 SĐT: {ctx.get('order_phone','')}\n"
-        f"🏠 Địa chỉ: {ctx.get('order_address','')}\n"
-        "────────────────────\n"
-        "⏰ Shop sẽ gọi điện xác nhận trong 5-10 phút.\n"
-        "💳 Thanh toán khi nhận hàng (COD)\n"
-        "────────────────────\n"
-        "Cảm ơn anh/chị đã đặt hàng! ❤️"
-    )
-    send_message(uid, msg)
+        return r.choices[0].message.content
+    except Exception as e:
+        print("GPT ERROR:", e)
+        return "Dạ em đang bận xíu, anh/chị chờ em một chút ạ."
 
 
 # ============================================
-# GREETING & CAROUSEL
+# GỬI THÔNG TIN SẢN PHẨM - CẢI THIỆN
+# ============================================
+
+def build_product_info_text(ms: str, row: dict) -> str:
+    ten = row.get("Ten", "")
+    gia = row.get("Gia", "")
+    mota = (row.get("MoTa", "") or "").strip()
+    mau = row.get("màu (Thuộc tính)", "")
+    size = row.get("size (Thuộc tính)", "")
+    
+    # Xử lý tên sản phẩm - bỏ mã trùng
+    if ten.startswith(f"[{ms}]"):
+        ten = ten.replace(f"[{ms}]", "").strip()
+    elif f"[{ms}]" in ten:
+        ten = ten.replace(f"[{ms}]", "").strip()
+    
+    # Xử lý mô tả: tách thành các bullet point có nghĩa
+    bullets = []
+    if "•" in mota:
+        # Tách theo dấu bullet
+        parts = mota.split("•")
+        for part in parts:
+            part = part.strip()
+            if part and len(part) > 5:
+                bullets.append(part)
+    else:
+        # Tìm các câu có nghĩa
+        sentences = re.split(r'[.!?]+', mota)
+        for sent in sentences:
+            sent = sent.strip()
+            if sent and len(sent) > 10:
+                bullets.append(sent)
+    
+    # Giới hạn 3-5 bullet points và đảm bảo câu cuối có nghĩa
+    if len(bullets) > 5:
+        bullets = bullets[:5]
+    
+    # Xử lý để câu cuối không bị cắt ngang
+    if bullets:
+        last_bullet = bullets[-1]
+        if len(last_bullet) > 50 and not any(last_bullet.endswith(punct) for punct in ['.', '!', '?']):
+            bullets[-1] = last_bullet + '.'
+    
+    # Xử lý màu
+    colors = []
+    if mau:
+        # Tách màu bằng dấu phẩy hoặc dấu cách
+        if "," in mau:
+            colors = [c.strip() for c in mau.split(",") if c.strip()]
+        else:
+            colors = [mau.strip()]
+    
+    # Xử lý size
+    sizes = []
+    if size:
+        # Tách size bằng dấu phẩy
+        if "," in size:
+            sizes = [s.strip() for s in size.split(",") if s.strip()]
+        else:
+            sizes = [size.strip()]
+    
+    # Format thông tin màu/size
+    color_size_info = ""
+    if colors and sizes:
+        color_size_info = f"\n🎨 Màu/Size (phân loại hàng):\n"
+        if colors:
+            color_list = ", ".join(colors)
+            color_size_info += f"- Màu: {color_list}\n"
+        if sizes:
+            if len(sizes) > 1:
+                # Tìm size đầu và cuối
+                first_size = sizes[0]
+                last_size = sizes[-1]
+                color_size_info += f"- Size: từ {first_size} đến {last_size}\n"
+            else:
+                color_size_info += f"- Size: {sizes[0]}\n"
+    elif colors:
+        color_size_info = f"\n🎨 Màu sắc:\n- Màu: {', '.join(colors)}\n"
+    elif sizes:
+        color_size_info = f"\n📏 Size:\n- Size: {', '.join(sizes)}\n"
+    
+    # Format giá
+    price_info = ""
+    if gia:
+        # Chuẩn hóa giá
+        try:
+            # Lấy số từ chuỗi giá
+            price_match = re.search(r'(\d[\d.,]*)', gia)
+            if price_match:
+                price_str = price_match.group(1).replace(',', '').replace('.', '')
+                price_num = int(price_str)
+                if price_num >= 1000:
+                    price_display = f"{price_num//1000}k"
+                else:
+                    price_display = f"{price_num}đ"
+                price_info = f"\n💰 Giá bán: {price_display}\n"
+        except:
+            price_info = f"\n💰 Giá bán: {gia}\n"
+    
+    # Xây dựng tin nhắn
+    text = f"{ten}\n\n"
+    
+    if bullets:
+        text += "✨ Ưu điểm nổi bật:\n"
+        for bullet in bullets:
+            # Đảm bảo mỗi bullet là một câu có nghĩa
+            bullet = bullet.strip()
+            if bullet and not bullet.endswith(('.', '!', '?')):
+                bullet += '.'
+            text += f"• {bullet}\n"
+    
+    if color_size_info:
+        text += color_size_info
+    
+    if price_info:
+        text += price_info
+    
+    text += "\n👉 Anh/chị xem giúp em mẫu này có hợp gu không, nếu ưng em tư vấn thêm màu/size và chốt đơn cho mình ạ. ❤️"
+    return text
+
+
+def send_product_info(uid: str, ms: str, force_send_images: bool = True):
+    load_products()
+    ms = ms.upper()
+    if ms not in PRODUCTS:
+        send_message(uid, "Dạ em chưa tìm thấy mã này trong kho ạ, anh/chị gửi lại giúp em mã sản phẩm hoặc ảnh mẫu nhé.")
+        return
+
+    ctx = USER_CONTEXT[uid]
+    current_time = time.time()
+    
+    # Kiểm tra thời gian gửi product info lần cuối
+    if ctx.get("last_product_info_time") and current_time - ctx.get("last_product_info_time") < 5:
+        print(f"[SKIP] Đã gửi product info cho {uid} quá gần đây")
+        return
+    
+    row = PRODUCTS[ms]
+    info_text = build_product_info_text(ms, row)
+    send_message(uid, info_text)
+    
+    # Gửi link form đặt hàng
+    domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
+    order_link = f"{domain}/order-form?ms={ms}&uid={uid}"
+    send_message(uid, f"📋 Anh/chị có thể đặt hàng ngay tại đây:\n{order_link}")
+
+    # Gửi 5 ảnh (sử dụng URL gốc)
+    if force_send_images:
+        images_field = row.get("Images", "")
+        urls = parse_image_urls(images_field)
+        urls = urls[:5]  # Gửi 5 ảnh đầu tiên
+        
+        for u in urls:
+            send_image(uid, u)
+            time.sleep(0.2)  # Giảm thời gian chờ
+    
+    # Cập nhật thời gian và sản phẩm hiện tại
+    ctx["product_info_sent_ms"] = ms
+    ctx["current_product_ms"] = ms
+    ctx["last_product_info_time"] = current_time
+    ctx["last_message_time"] = current_time
+
+
+def send_product_info_debounced(uid: str, ms: str):
+    """Gửi thông tin sản phẩm với cơ chế chống spam"""
+    load_products()
+    ms = ms.upper()
+    
+    if ms not in PRODUCTS:
+        send_message(uid, "Dạ em chưa tìm thấy mã này trong kho ạ.")
+        return
+
+    ctx = USER_CONTEXT[uid]
+    current_time = time.time()
+    
+    # KIỂM TRA DEBOUNCE CHẶT CHẼ HƠN
+    if (ctx.get("product_info_sent_ms") == ms and 
+        current_time - ctx.get("last_product_info_time", 0) < 15):
+        print(f"[DEBOUNCE] Bỏ qua gửi product info {ms} quá nhanh")
+        return
+    
+    row = PRODUCTS[ms]
+    info_text = build_product_info_text(ms, row)
+    
+    # GỬI TEXT TRƯỚC
+    send_message(uid, info_text)
+    
+    # Gửi link form đặt hàng
+    domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
+    order_link = f"{domain}/order-form?ms={ms}&uid={uid}"
+    send_message(uid, f"📋 Anh/chị có thể đặt hàng ngay tại đây:\n{order_link}")
+
+    # GỬI ẢNH VỚI THỜI GIAN CHỜ
+    images_field = row.get("Images", "")
+    urls = parse_image_urls(images_field)
+    urls = urls[:5]  # Giới hạn 5 ảnh
+    
+    for idx, u in enumerate(urls):
+        send_image(uid, u)
+        # Tăng thời gian chờ cho các ảnh sau
+        time.sleep(0.3 if idx < 2 else 0.5)
+    
+    # CẬP NHẬT THỜI GIAN VÀ SẢN PHẨM HIỆN TẠI
+    ctx["product_info_sent_ms"] = ms
+    ctx["current_product_ms"] = ms
+    ctx["last_product_info_time"] = current_time
+    ctx["last_message_time"] = current_time
+
+
+def send_recommendations(uid: str):
+    load_products()
+    if not PRODUCTS:
+        return
+
+    prods = list(PRODUCTS.values())[:5]
+    send_message(uid, "Em gửi anh/chị 5 mẫu đang được nhiều khách quan tâm, mình tham khảo thử ạ:")
+    send_product_carousel(uid)
+
+
+# ============================================
+# GREETING
 # ============================================
 
 def maybe_greet(uid: str, ctx: dict, has_ms: bool):
-    now = time.time()
     if ctx["greeted"]:
         return
-    if now - ctx.get("last_message_time", 0) < 5:
+
+    if ctx.get("inbox_entry_ms"):
         return
 
-    ctx["greeted"] = True
-    ctx["last_message_time"] = now
-
-    send_message(
-        uid,
-        "Em chào anh/chị 😊\nEm là trợ lý chăm sóc khách hàng của shop, hỗ trợ anh/chị xem mẫu, tư vấn size và chốt đơn nhanh ạ.",
+    msg = (
+        "Em chào anh/chị 😊\n"
+        "Em là trợ lý chăm sóc khách hàng của shop, hỗ trợ anh/chị xem mẫu, tư vấn size và chốt đơn nhanh ạ."
     )
+    send_message(uid, msg)
+    ctx["greeted"] = True
 
-    if not ctx["carousel_sent"]:
-        send_top_products_carousel(uid)
+    if not has_ms and not ctx["carousel_sent"]:
+        send_message(uid, "Em gửi anh/chị 5 mẫu đang được nhiều khách quan tâm, mình tham khảo thử ạ:")
+        send_product_carousel(uid)
         ctx["carousel_sent"] = True
-
-
-def send_top_products_carousel(uid: str, limit=5):
-    load_products()
-    elements = []
-    cnt = 0
-    for ms, product in list(PRODUCTS.items())[:limit]:
-        images_field = product.get("Images", "")
-        urls = parse_image_urls(images_field)
-        if not urls:
-            continue
-
-        original_image_url = None
-        for u in urls:
-            if should_use_as_first_image(u):
-                original_image_url = u
-                break
-
-        if not original_image_url:
-            continue
-
-        final_image_url = original_image_url
-
-        domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
-        order_link = f"{domain}/order-form?ms={product.get('MS', '')}&uid={uid}"
-
-        element = {
-            "title": f"[{product.get('MS', '')}] {product.get('Ten', '')}",
-            "subtitle": f"💰 Giá: {product.get('Gia', '')}\n{product.get('MoTa', '')[:60]}..." if product.get('MoTa') else f"💰 Giá: {product.get('Gia', '')}",
-            "image_url": final_image_url,
-            "buttons": [
-                {
-                    "type": "postback",
-                    "title": "📋 Xem chi tiết",
-                    "payload": f"VIEW_{product.get('MS', '')}",
-                },
-                {
-                    "type": "web_url",
-                    "title": "🛒 Chọn sản phẩm",
-                    "url": order_link,
-                },
-            ],
-        }
-        elements.append(element)
-        cnt += 1
-        if cnt >= limit:
-            break
-
-    if elements:
-        send_carousel_template(uid, elements)
+        ctx["recommended_sent"] = True
 
 
 # ============================================
-# IMAGE HANDLING
+# HANDLE IMAGE MESSAGE
 # ============================================
 
 def handle_image(uid: str, image_url: str):
-    """
-    Khi khách gửi ảnh, bot sẽ gửi sang Fchat nếu có cấu hình,
-    đồng thời nhắc khách cung cấp thêm thông tin.
-    """
+    load_products()
     ctx = USER_CONTEXT[uid]
-    ctx["last_message_time"] = time.time()
 
-    send_message(
-        uid,
-        "Dạ em đã nhận được hình anh/chị gửi ạ. Em sẽ kiểm tra mẫu tương tự cho anh/chị.\n"
-        "Trong lúc chờ, anh/chị cho em xin thêm thông tin về size/màu anh/chị thích nhé.",
-    )
+    if not ctx["greeted"] and not ctx.get("inbox_entry_ms"):
+        maybe_greet(uid, ctx, has_ms=False)
 
-    if FCHAT_WEBHOOK_URL and FCHAT_TOKEN:
-        try:
-            payload = {
-                "token": FCHAT_TOKEN,
-                "type": "image",
-                "sender_id": uid,
-                "image_url": image_url,
-            }
-            r = requests.post(FCHAT_WEBHOOK_URL, json=payload, timeout=10)
-            print("FCHAT IMAGE WEBHOOK:", r.status_code, r.text)
-        except Exception as e:
-            print("❌ FCHAT IMAGE WEBHOOK ERROR:", e)
+    hosted = rehost_image_to_cdn(image_url)
+    ms, desc = gpt_analyze_image(hosted)
+    print("VISION RESULT:", ms, desc)
+
+    if ms and ms in PRODUCTS:
+        ctx["vision_ms"] = ms
+        ctx["last_ms"] = ms
+        ctx["current_product_ms"] = ms
+        ctx["product_info_sent_ms"] = ms
+
+        send_message(uid, f"Dạ ảnh này giống mẫu [{ms}] của shop đó anh/chị, em gửi thông tin sản phẩm cho mình nhé. 💕")
+        send_product_info_debounced(uid, ms)
+    else:
+        send_message(
+            uid,
+            "Dạ hình này hơi khó nhận mẫu chính xác ạ, anh/chị gửi giúp em caption hoặc mã sản phẩm để em kiểm tra cho chuẩn nhé.",
+        )
 
 
 # ============================================
-# TEXT HANDLING
+# HANDLE TEXT MESSAGE - CẢI THIỆN
 # ============================================
 
 def handle_text(uid: str, text: str):
     ctx = USER_CONTEXT[uid]
-
-    if ctx.get("processing_lock"):
-        print(f"[TEXT SKIP] User {uid} đang được xử lý")
-        return
-
-    ctx["processing_lock"] = True
-
+    
+    # Đã có lock kiểm tra ở webhook, không cần lock lại ở đây
     try:
         load_products()
-
+        
         # Reset postback counter khi có text mới
         ctx["postback_count"] = 0
 
@@ -602,7 +1070,7 @@ def handle_text(uid: str, text: str):
         ms = resolve_best_ms(ctx)
         if not ms and ctx.get("current_product_ms"):
             ms = ctx["current_product_ms"]
-
+        
         # Chào hỏi nếu cần
         maybe_greet(uid, ctx, has_ms=bool(ms))
 
@@ -613,45 +1081,34 @@ def handle_text(uid: str, text: str):
         product = None
         if ms and ms in PRODUCTS:
             product = PRODUCTS[ms]
-
+            
             # Nếu user hỏi về size/màu/tồn kho, gửi thông tin chi tiết
             lower_text = text.lower()
-            if any(
-                keyword in lower_text
-                for keyword in ["size nào", "có size", "size gì", "size nào", "size bao nhiêu"]
-            ):
-                size_info = product.get("size (Thuộc tính)", "Không có thông tin")
+            if any(keyword in lower_text for keyword in ["size nào", "có size", "size gì", "size nào", "size bao nhiêu"]):
+                # Trả lời chi tiết về size
+                size_info = product.get('size (Thuộc tính)', 'Không có thông tin')
                 reply = f"Dạ sản phẩm này có các size: {size_info}\n\nAnh/chị quan tâm size nào ạ?"
                 send_message(uid, reply)
                 ctx["history"].append({"role": "assistant", "content": reply})
                 return
-            elif any(
-                keyword in lower_text
-                for keyword in ["màu nào", "có màu", "màu gì", "màu nào", "màu sắc"]
-            ):
-                color_info = product.get("màu (Thuộc tính)", "Không có thông tin")
+            elif any(keyword in lower_text for keyword in ["màu nào", "có màu", "màu gì", "màu nào", "màu sắc"]):
+                # Trả lời chi tiết về màu
+                color_info = product.get('màu (Thuộc tính)', 'Không có thông tin')
                 reply = f"Dạ sản phẩm này có các màu: {color_info}\n\nAnh/chị quan tâm màu nào ạ?"
                 send_message(uid, reply)
                 ctx["history"].append({"role": "assistant", "content": reply})
                 return
-            elif any(
-                keyword in lower_text
-                for keyword in ["tồn kho", "còn hàng", "hết hàng", "bao nhiêu cái"]
-            ):
-                stock_info = product.get("Tồn kho", "Không có thông tin")
+            elif any(keyword in lower_text for keyword in ["tồn kho", "còn hàng", "hết hàng", "bao nhiêu cái"]):
+                # Trả lời về tồn kho
+                stock_info = product.get('Tồn kho', 'Không có thông tin')
                 reply = f"Dạ sản phẩm này hiện còn {stock_info} cái trong kho ạ.\n\nAnh/chị muốn đặt bao nhiêu ạ?"
                 send_message(uid, reply)
                 ctx["history"].append({"role": "assistant", "content": reply})
                 return
-            elif any(
-                keyword in lower_text
-                for keyword in ["xem hàng", "xem sản phẩm", "xem mẫu", "có được xem"]
-            ):
-                desc = product.get("MoTa", "Sản phẩm có sẵn để xem và đặt hàng ạ.")
-                reply = (
-                    f"Dạ anh/chị có thể xem hàng qua hình ảnh em đã gửi. {desc[:100]}...\n\n"
-                    "Anh/chị muốn xem thêm hình ảnh nào không ạ?"
-                )
+            elif any(keyword in lower_text for keyword in ["xem hàng", "xem sản phẩm", "xem mẫu", "có được xem"]):
+                # Trả lời về việc xem hàng dựa trên mô tả
+                desc = product.get('MoTa', 'Sản phẩm có sẵn để xem và đặt hàng ạ.')
+                reply = f"Dạ anh/chị có thể xem hàng qua hình ảnh em đã gửi. {desc[:100]}...\n\nAnh/chị muốn xem thêm hình ảnh nào không ạ?"
                 send_message(uid, reply)
                 ctx["history"].append({"role": "assistant", "content": reply})
                 return
@@ -659,7 +1116,7 @@ def handle_text(uid: str, text: str):
         # Gọi GPT để trả lời với thông tin sản phẩm hiện tại
         reply = gpt_reply(ctx["history"], product, ms)
         ctx["history"].append({"role": "assistant", "content": reply})
-
+        
         # Chỉ gửi reply nếu không phải đang trong order process
         if not ctx.get("order_state"):
             send_message(uid, reply)
@@ -670,9 +1127,13 @@ def handle_text(uid: str, text: str):
             domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
             order_link = f"{domain}/order-form?ms={ms}&uid={uid}"
             send_message(uid, f"📋 Anh/chị có thể đặt hàng ngay tại đây:\n{order_link}")
-
+    
+    except Exception as e:
+        print(f"ERROR in handle_text: {e}")
+        raise e
     finally:
-        ctx["processing_lock"] = False
+        # KHÔNG release lock ở đây vì đã release ở webhook
+        pass
 
 
 # ============================================
@@ -691,10 +1152,10 @@ def handle_echo_outgoing(page_id: str, user_id: str, text: str, mid: str = ""):
     ms = extract_ms(text)
     if ms:
         ctx = USER_CONTEXT[user_id]
+        ctx["inbox_entry_ms"] = ms
         ctx["last_ms"] = ms
         ctx["current_product_ms"] = ms
-        ctx["history"].append({"role": "assistant", "content": text})
-        print(f"[ECHO OUTGOING] page={page_id}, user={user_id}, ms={ms}, mid={mid}")
+        print(f"[ECHO] Ghi nhận mã từ page/Fchat cho user {user_id}: {ms}")
 
 
 # ============================================
@@ -725,149 +1186,165 @@ def webhook():
                 text = message.get("text") or ""
                 mid = message.get("mid") or ""
                 attachments = message.get("attachments", [])
-
+                
                 # Kiểm tra trong sent_message_ids của recipient (user)
                 ctx = USER_CONTEXT.get(recipient_id, {})
                 if mid in ctx.get("sent_message_ids", set()):
                     print(f"[ECHO SKIP] Bỏ qua echo của tin nhắn bot đã gửi: {mid}")
                     continue
-
+                    
                 if text:
-                    handle_echo_outgoing(
-                        page_id=sender_id, user_id=recipient_id, text=text, mid=mid
-                    )
+                    handle_echo_outgoing(page_id=sender_id, user_id=recipient_id, text=text, mid=mid)
                 elif attachments:
                     print(f"[ECHO SKIP] Bỏ qua echo attachments từ bot: {mid}")
                 continue
 
+            # BỎ QUA CÁC SỰ KIỆN DELIVERY VÀ READ (chỉ gây spam lock)
+            if ev.get("delivery") or ev.get("read"):
+                print(f"[SKIP] Bỏ qua delivery/read event từ {sender_id}")
+                continue
+
             ctx = USER_CONTEXT[sender_id]
 
-            # KIỂM TRA LOCK ĐỂ TRÁNH XỬ LÝ TRÙNG
+            # KIỂM TRA LOCK ĐỂ TRÁNH XỬ LÝ TRÙNG - CHỈ áp dụng cho postback và message
             if ctx.get("processing_lock"):
                 print(f"[SKIP] User {sender_id} đang được xử lý, bỏ qua sự kiện mới")
-                return "ok"
-
-            # SET LOCK
-            ctx["processing_lock"] = True
-
+                # KHÔNG return "ok" ở đây vì sẽ block các event khác
+                # Thay vào đó continue để xử lý event tiếp theo
+                continue
+            
+            # CHỈ SET LOCK CHO CÁC SỰ KIỆN QUAN TRỌNG
+            should_lock = False
+            
+            if "postback" in ev:
+                should_lock = True
+            elif "message" in ev and not message.get("is_echo"):
+                should_lock = True
+            elif ev.get("referral"):
+                should_lock = True
+            
+            if should_lock:
+                ctx["processing_lock"] = True
+            
             try:
                 if "postback" in ev:
                     current_time = time.time()
                     payload = ev["postback"].get("payload")
-
-                    # KIỂM TRA DEBOUNCE: NẾU CÙNG PAYLOAD TRONG VÒNG 3 GIÂY THÌ BỎ QUA
-                    if (
-                        payload == ctx.get("last_postback_payload")
-                        and current_time - ctx.get("last_postback_time", 0) < 3
-                    ):
+                    
+                    # KIỂM TRA DEBOUNCE: NẾU CÙNG PAYLOAD TRONG VÒNG 5 GIÂY THÌ BỎ QUA
+                    if (payload == ctx.get("last_postback_payload") and 
+                        current_time - ctx.get("last_postback_time", 0) < 5):
                         print(f"[POSTBACK DEBOUNCE] Bỏ qua postback trùng: {payload}")
-                        return "ok"
-
+                        # Release lock ngay
+                        if should_lock:
+                            ctx["processing_lock"] = False
+                        continue
+                    
                     # KIỂM TRA SPAM: NẾU NHIỀU POSTBACK QUÁ NHANH
                     ctx["postback_count"] = ctx.get("postback_count", 0) + 1
-                    if (
-                        ctx["postback_count"] > 3
-                        and current_time - ctx.get("last_postback_time", 0) < 5
-                    ):
+                    if ctx["postback_count"] > 3 and current_time - ctx.get("last_postback_time", 0) < 5:
                         print(f"[POSTBACK SPAM] Phát hiện spam từ user {sender_id}")
+                        # Reset counter và release lock
                         time.sleep(1)
-
+                    
                     ctx["last_postback_time"] = current_time
                     ctx["last_postback_payload"] = payload
-
+                    
                     print(f"[POSTBACK] User {sender_id}: {payload}")
-
+                    
                     # XỬ LÝ GET_STARTED_PAYLOAD - CHỈ CHẠY 1 LẦN
                     if payload == "GET_STARTED_PAYLOAD":
                         if ctx.get("get_started_processed"):
                             print(f"[POSTBACK SKIP] Đã xử lý GET_STARTED cho user {sender_id}")
-                            return "ok"
-
+                            # Release lock
+                            if should_lock:
+                                ctx["processing_lock"] = False
+                            continue
+                        
                         ctx["get_started_processed"] = True
-
+                        
                         if not ctx["greeted"]:
                             maybe_greet(sender_id, ctx, has_ms=False)
-
+                        
                         if not ctx["carousel_sent"]:
-                            send_message(
-                                sender_id,
-                                "Anh/chị cho em biết đang quan tâm mẫu nào hoặc gửi ảnh mẫu để em xem giúp ạ.",
-                            )
-                        return "ok"
-
+                            send_message(sender_id, "Anh/chị cho em biết đang quan tâm mẫu nào hoặc gửi ảnh mẫu để em xem giúp ạ.")
+                        # Release lock
+                        if should_lock:
+                            ctx["processing_lock"] = False
+                        continue
+                    
                     # XỬ LÝ ORDER FORM QUICK REPLIES
                     if payload == "ORDER_PROVIDE_NAME":
                         ctx["order_state"] = "waiting_name"
                         send_message(sender_id, "👤 Vui lòng nhập họ tên người nhận hàng:")
-                        return "ok"
+                        # Release lock
+                        if should_lock:
+                            ctx["processing_lock"] = False
+                        continue
                     elif payload == "ORDER_PROVIDE_PHONE":
                         ctx["order_state"] = "waiting_phone"
-                        send_message(
-                            sender_id,
-                            "📱 Vui lòng nhập số điện thoại (ví dụ: 0912345678 hoặc +84912345678):",
-                        )
-                        return "ok"
+                        send_message(sender_id, "📱 Vui lòng nhập số điện thoại (ví dụ: 0912345678 hoặc +84912345678):")
+                        # Release lock
+                        if should_lock:
+                            ctx["processing_lock"] = False
+                        continue
                     elif payload == "ORDER_PROVIDE_ADDRESS":
                         ctx["order_state"] = "waiting_address"
-                        send_message(
-                            sender_id, "🏠 Vui lòng nhập địa chỉ giao hàng chi tiết:"
-                        )
-                        return "ok"
+                        send_message(sender_id, "🏠 Vui lòng nhập địa chỉ giao hàng chi tiết:")
+                        # Release lock
+                        if should_lock:
+                            ctx["processing_lock"] = False
+                        continue
                     elif payload == "ORDER_CONFIRM":
                         send_order_confirmation(sender_id)
-                        return "ok"
+                        # Release lock
+                        if should_lock:
+                            ctx["processing_lock"] = False
+                        continue
                     elif payload == "ORDER_EDIT":
                         ctx["order_state"] = "waiting_name"
-                        send_message(
-                            sender_id, "✏️ Vui lòng nhập lại họ tên người nhận:"
-                        )
-                        return "ok"
-
+                        send_message(sender_id, "✏️ Vui lòng nhập lại họ tên người nhận:")
+                        # Release lock
+                        if should_lock:
+                            ctx["processing_lock"] = False
+                        continue
+                    
                     # XỬ LÝ VIEW PRODUCT
                     if payload and payload.startswith("VIEW_"):
                         product_code = payload.replace("VIEW_", "")
-
-                        # KIỂM TRA NẾU ĐÃ GỬI SẢN PHẨM NÀY GẦN ĐÂY (10 GIÂY)
-                        if (
-                            ctx.get("product_info_sent_ms") == product_code
-                            and current_time - ctx.get("last_product_info_time", 0) < 10
-                        ):
-                            print(
-                                f"[PRODUCT INFO SKIP] Đã gửi {product_code} gần đây"
-                            )
-                            send_message(
-                                sender_id,
-                                f"Bạn đang xem sản phẩm {product_code}. Cần em hỗ trợ gì thêm không ạ?",
-                            )
-                            return "ok"
-
+                        
+                        # KIỂM TRA NẾU ĐÃ GỬI SẢN PHẨM NÀY GẦN ĐÂY (15 GIÂY)
+                        if (ctx.get("product_info_sent_ms") == product_code and 
+                            current_time - ctx.get("last_product_info_time", 0) < 15):
+                            print(f"[PRODUCT INFO SKIP] Đã gửi {product_code} gần đây")
+                            send_message(sender_id, f"Bạn đang xem sản phẩm {product_code}. Cần em hỗ trợ gì thêm không ạ?")
+                            # Release lock
+                            if should_lock:
+                                ctx["processing_lock"] = False
+                            continue
+                        
                         if product_code in PRODUCTS:
                             ctx["last_ms"] = product_code
                             ctx["current_product_ms"] = product_code
+                            # GỬI SẢN PHẨM VỚI THỜI GIAN CHỜ GIỮA CÁC ẢNH
                             send_product_info_debounced(sender_id, product_code)
                         else:
-                            send_message(
-                                sender_id,
-                                f"Dạ em không tìm thấy sản phẩm mã {product_code} ạ.",
-                            )
-                        return "ok"
-
+                            send_message(sender_id, f"Dạ em không tìm thấy sản phẩm mã {product_code} ạ.")
+                        # Release lock
+                        if should_lock:
+                            ctx["processing_lock"] = False
+                        continue
+                        
                     elif payload and payload.startswith("SELECT_"):
                         product_code = payload.replace("SELECT_", "")
-                        domain = (
-                            DOMAIN
-                            if DOMAIN.startswith("http")
-                            else f"https://{DOMAIN}"
-                        )
-                        order_link = (
-                            f"{domain}/order-form?ms={product_code}&uid={sender_id}"
-                        )
-                        response_msg = (
-                            f"📋 Anh/chị có thể đặt hàng sản phẩm [{product_code}] ngay tại đây:\n"
-                            f"{order_link}"
-                        )
+                        domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
+                        order_link = f"{domain}/order-form?ms={product_code}&uid={sender_id}"
+                        response_msg = f"📋 Anh/chị có thể đặt hàng sản phẩm [{product_code}] ngay tại đây:\n{order_link}"
                         send_message(sender_id, response_msg)
-                        return "ok"
+                        # Release lock
+                        if should_lock:
+                            ctx["processing_lock"] = False
+                        continue
 
                     # XỬ LÝ REFERRAL
                     ref = ev["postback"].get("referral", {}).get("ref")
@@ -880,21 +1357,23 @@ def webhook():
                             print(f"[REF] Nhận mã từ referral: {ms_ref}")
                             ctx["greeted"] = True
                             send_product_info_debounced(sender_id, ms_ref)
-                            return "ok"
-
+                            # Release lock
+                            if should_lock:
+                                ctx["processing_lock"] = False
+                            continue
+                    
                     # DEFAULT RESPONSE
                     if not ctx["greeted"]:
                         maybe_greet(sender_id, ctx, has_ms=False)
-                    send_message(
-                        sender_id,
-                        "Anh/chị cho em biết đang quan tâm mẫu nào hoặc gửi ảnh mẫu để em xem giúp ạ.",
-                    )
-                    return "ok"
+                    send_message(sender_id, "Anh/chị cho em biết đang quan tâm mẫu nào hoặc gửi ảnh mẫu để em xem giúp ạ.")
+                    # Release lock
+                    if should_lock:
+                        ctx["processing_lock"] = False
+                    continue
 
                 # XỬ LÝ REFERRAL TỪ MESSAGING
-                ref = ev.get("referral", {}).get("ref") or ev.get(
-                    "postback", {}
-                ).get("referral", {}).get("ref")
+                ref = ev.get("referral", {}).get("ref") \
+                    or ev.get("postback", {}).get("referral", {}).get("ref")
                 if ref:
                     ms_ref = extract_ms_from_ref(ref)
                     if ms_ref:
@@ -911,7 +1390,13 @@ def webhook():
                                 image_url = att["payload"].get("url")
                                 if image_url:
                                     handle_image(sender_id, image_url)
-                                    return "ok"
+                                    # Release lock
+                                    if should_lock:
+                                        ctx["processing_lock"] = False
+                                    continue
+                    # Release lock
+                    if should_lock:
+                        ctx["processing_lock"] = False
                     continue
 
                 # XỬ LÝ TEXT MESSAGE
@@ -919,11 +1404,20 @@ def webhook():
                     if not message.get("is_echo"):
                         text = message.get("text", "")
                         handle_text(sender_id, text)
-                        return "ok"
-
-            finally:
-                # RELEASE LOCK
+                        # Release lock
+                        if should_lock:
+                            ctx["processing_lock"] = False
+                        continue
+                        
+            except Exception as e:
+                print(f"ERROR processing event: {e}")
+                # Release lock nếu có lỗi
                 ctx["processing_lock"] = False
+                raise e
+            finally:
+                # RELEASE LOCK nếu chưa release
+                if should_lock and ctx.get("processing_lock"):
+                    ctx["processing_lock"] = False
                 # Reset postback counter sau 10 giây
                 if time.time() - ctx.get("last_postback_time", 0) > 10:
                     ctx["postback_count"] = 0
@@ -932,69 +1426,43 @@ def webhook():
 
 
 # ============================================
-# SEND PRODUCT INFO (DEBOUNCED)
-# ============================================
-
-def send_product_info_debounced(uid: str, ms: str):
-    ctx = USER_CONTEXT[uid]
-    now = time.time()
-
-    last_ms = ctx.get("product_info_sent_ms")
-    last_time = ctx.get("last_product_info_time", 0)
-
-    if last_ms == ms and (now - last_time) < 5:
-        print(f"[DEBOUNCE] Bỏ qua gửi lại thông tin sản phẩm {ms} cho user {uid}")
-        return
-
-    ctx["product_info_sent_ms"] = ms
-    ctx["last_product_info_time"] = now
-
-    load_products()
-    product = PRODUCTS.get(ms)
-    if not product:
-        send_message(uid, f"Dạ em không tìm thấy sản phẩm mã {ms} ạ.")
-        return
-
-    images_field = product.get("Images", "")
-    urls = parse_image_urls(images_field)
-    sent_first = False
-
-    for url in urls[:5]:
-        if not should_use_as_first_image(url):
-            continue
-        if not sent_first:
-            send_image(uid, url)
-            sent_first = True
-        else:
-            send_image(uid, url)
-        time.sleep(0.3)
-
-    detail = (
-        f"📌 Thông tin sản phẩm [{ms}] {product.get('Ten','')}:\n"
-        f"- Giá: {product.get('Gia','')}\n"
-        f"- Màu: {product.get('màu (Thuộc tính)','')}\n"
-        f"- Size: {product.get('size (Thuộc tính)','')}\n"
-        f"- Tồn kho: {product.get('Tồn kho','')}\n\n"
-        f"{product.get('MoTa','')}"
-    )
-    send_message(uid, detail)
-
-    domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
-    order_link = f"{domain}/order-form?ms={ms}&uid={uid}"
-    send_message(uid, f"📋 Anh/chị có thể đặt hàng ngay tại đây:\n{order_link}")
-
-
-# ============================================
 # ORDER FORM & API - CẢI THIỆN
 # ============================================
 
+def send_order_link(uid: str, ms: str):
+    domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
+    url = f"{domain}/order-form?ms={quote(ms)}&uid={quote(uid)}"
+    msg = f"Anh/chị có thể đặt hàng nhanh tại đây ạ: {url}"
+    send_message(uid, msg)
+
+
+@app.route("/o/<ms>")
+def order_link(ms: str):
+    load_products()
+    ms = ms.upper()
+    if ms not in PRODUCTS:
+        return f"Không tìm thấy sản phẩm {ms}", 404
+    pd_row = PRODUCTS[ms]
+    ten = pd_row["Ten"]
+    gia = pd_row["Gia"]
+    mota = pd_row["MoTa"]
+    return f"""
+    <html><body>
+    <h2>Đặt hàng {ms}</h2>
+    <p><b>Tên:</b> {ten}</p>
+    <p><b>Giá:</b> {gia}</p>
+    <p><b>Mô tả:</b> {mota}</p>
+    </body></html>
+    """
+
+
 @app.route("/order-form")
 def order_form():
-    ms = (request.args.get("ms") or "").upper()
-    uid = request.args.get("uid") or ""
+    ms = request.args.get("ms", "")
+    uid = request.args.get("uid", "")
+    
     if not ms:
-        return (
-            """
+        return """
         <html>
         <body style="text-align: center; padding: 50px; font-family: Arial, sans-serif;">
             <h2 style="color: #FF3B30;">⚠️ Không tìm thấy sản phẩm</h2>
@@ -1002,10 +1470,8 @@ def order_form():
             <a href="/" style="color: #1DB954; text-decoration: none; font-weight: bold;">Quay về trang chủ</a>
         </body>
         </html>
-        """,
-            400,
-        )
-
+        """, 400
+    
     return send_from_directory("static", "order-form.html")
 
 
@@ -1021,31 +1487,43 @@ def api_get_product():
     urls = parse_image_urls(images_field)
     image = urls[0] if urls else ""
 
-    size_field = row.get("size (Thuộc tính)", "")
-    color_field = row.get("màu (Thuộc tính)", "")
-
-    # Xử lý size - tách bằng dấu phẩy
-    sizes = []
+    size_field = row.get("size (Thuộc tính)", "").strip()
+    color_field = row.get("màu (Thuộc tính)", "").strip()
+    
+    # Xử lý size - tách tất cả các size
+    all_sizes = []
     if size_field:
-        sizes = [s.strip() for s in size_field.split(",") if s.strip()]
-
-    # Xử lý màu - tách bằng dấu phẩy
-    colors = []
+        # Tách bằng nhiều dấu phân cách
+        separators = r'[,;/\-\s]+'
+        raw_sizes = re.split(separators, size_field)
+        for size in raw_sizes:
+            size = size.strip()
+            if size and size not in all_sizes:
+                all_sizes.append(size)
+    
+    # Xử lý màu - tách tất cả các màu
+    all_colors = []
     if color_field:
-        colors = [c.strip() for c in color_field.split(",") if c.strip()]
-
+        # Tách bằng nhiều dấu phân cách
+        separators = r'[,;/\-\s]+'
+        raw_colors = re.split(separators, color_field)
+        for color in raw_colors:
+            color = color.strip()
+            if color and color not in all_colors:
+                all_colors.append(color)
+    
     # Nếu không có size/color thì dùng mặc định
-    if not sizes:
-        sizes = ["Mặc định"]
-    if not colors:
-        colors = ["Mặc định"]
+    if not all_sizes:
+        all_sizes = ["Mặc định"]
+    if not all_colors:
+        all_colors = ["Mặc định"]
 
     # Xử lý giá
     price_str = row.get("Gia", "0")
-    price_match = re.search(r"(\d[\d.,]*)", price_str)
+    price_match = re.search(r'(\d[\d.,]*)', price_str)
     price = 0
     if price_match:
-        price_str_clean = price_match.group(1).replace(",", "").replace(".", "")
+        price_str_clean = price_match.group(1).replace(',', '').replace('.', '')
         try:
             price = int(price_str_clean)
         except:
@@ -1059,10 +1537,10 @@ def api_get_product():
         "desc": row.get("MoTa", ""),
         "image": image,
         "page_name": FANPAGE_NAME,
-        "sizes": sizes,
-        "colors": colors,
-        "all_sizes": sizes,
-        "all_colors": colors,
+        "sizes": all_sizes,        # Trả về tất cả sizes
+        "colors": all_colors,      # Trả về tất cả colors
+        "all_sizes": all_sizes,    # Giữ tương thích
+        "all_colors": all_colors   # Giữ tương thích
     }
 
 
@@ -1075,49 +1553,18 @@ def api_order():
     ms = (data.get("ms") or data.get("product_code") or "").upper()
 
     if uid:
-        # Chống gửi 2 lần khi form bị submit trùng
-        ctx = USER_CONTEXT[uid]
-        try:
-            key_fields = {
-                "ms": ms,
-                "color": data.get("color", ""),
-                "size": data.get("size", ""),
-                "quantity": data.get("quantity", ""),
-                "total": data.get("total", ""),
-                "customerName": data.get("customerName", ""),
-                "phone": data.get("phone", ""),
-                "home": data.get("home", ""),
-                "ward": data.get("ward", ""),
-                "province": data.get("province", ""),
-            }
-            payload_str = json.dumps(key_fields, sort_keys=True, ensure_ascii=False)
-        except Exception:
-            payload_str = json.dumps(data, sort_keys=True, default=str, ensure_ascii=False)
-
-        order_hash = hashlib.md5(payload_str.encode("utf-8")).hexdigest()
-        now = time.time()
-        last_hash = ctx.get("last_order_hash")
-        last_time = ctx.get("last_order_time", 0)
-
-        if last_hash == order_hash and (now - last_time) < 5:
-            print(f"[ORDER DUP] Bỏ qua đơn hàng trùng lặp cho user {uid}")
-            return {"status": "ok", "message": "Đơn hàng đã được tiếp nhận"}
-
-        ctx["last_order_hash"] = order_hash
-        ctx["last_order_time"] = now
-
         load_products()
         product_name = ""
         if ms in PRODUCTS:
             product_name = PRODUCTS[ms].get("Ten", "")
-
+        
         address_components = [
-            data.get("home", ""),
-            data.get("ward", ""),
-            data.get("province", ""),
+            data.get('home', ''),
+            data.get('ward', ''),
+            data.get('province', '')
         ]
         address = ", ".join([comp for comp in address_components if comp])
-
+        
         msg = (
             "✅ SHOP ĐÃ NHẬN ĐƠN CỦA ANH/CHỊ!\n"
             "────────────────────\n"
@@ -1141,57 +1588,45 @@ def api_order():
 
 
 # ============================================
-# API LẤY GIÁ THEO BIẾN THỂ (OPTIONAL)
+# API LẤY GIÁ THEO BIẾN THỂ
 # ============================================
 
 @app.route("/api/get-variant-price")
 def api_get_variant_price():
-    ms = (request.args.get("ms") or "").upper()
-    color = (request.args.get("color") or "").strip()
-    size = (request.args.get("size") or "").strip()
-
-    load_products()
+    ms = request.args.get("ms", "").upper()
+    size = request.args.get("size", "")
+    color = request.args.get("color", "")
+    
     if ms not in PRODUCTS:
         return {"error": "not_found"}, 404
-
+    
     row = PRODUCTS[ms]
+    
+    # Trong trường hợp đơn giản, trả về giá chung
+    # Nếu có bảng giá riêng, cần xử lý logic ở đây
     price_str = row.get("Gia", "0")
-    price_match = re.search(r"(\d[\d.,]*)", price_str)
+    price_match = re.search(r'(\d[\d.,]*)', price_str)
     price = 0
     if price_match:
-        price_str_clean = price_match.group(1).replace(",", "").replace(".", "")
+        price_str_clean = price_match.group(1).replace(',', '').replace('.', '')
         try:
             price = int(price_str_clean)
         except:
             price = 0
-
-    return {
-        "ms": ms,
-        "color": color,
-        "size": size,
-        "price": price,
-        "price_display": row.get("Gia", "0"),
-    }
+    
+    return {"price": price, "price_display": row.get("Gia", "0")}
 
 
 # ============================================
-# STATIC & ROOT
+# HEALTHCHECK & START
 # ============================================
 
 @app.route("/")
-def index():
-    return "Chatbot is running."
+def home():
+    load_products()
+    return f"Chatbot OK – {len(PRODUCTS)} products loaded."
 
-
-@app.route("/static/<path:path>")
-def static_files(path):
-    return send_from_directory("static", path)
-
-
-# ============================================
-# MAIN (LOCAL RUN)
-# ============================================
 
 if __name__ == "__main__":
-    print("Starting app on http://0.0.0.0:5000")
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    load_products(force=True)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
