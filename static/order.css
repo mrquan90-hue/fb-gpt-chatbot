@@ -1,20 +1,32 @@
 body {
-    font-family: Arial, sans-serif;
-    background: #fff;
+    font-family: 'Inter', Arial, sans-serif;
+    background: #f5f5f5;
     margin: 0;
     padding: 0;
+    color: #333;
 }
 
 .form-container {
     width: 94%;
-    margin: auto;
-    padding-top: 10px;
+    max-width: 500px;
+    margin: 20px auto;
+    padding: 20px;
+    background: white;
+    border-radius: 12px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
 }
 
 #header {
     text-align: center;
     border-bottom: 3px solid #1DB954;
-    padding-bottom: 10px;
+    padding-bottom: 15px;
+    margin-bottom: 20px;
+}
+
+#fanpageName {
+    color: #1DB954;
+    font-size: 24px;
+    margin: 0;
 }
 
 #productImage {
@@ -22,38 +34,150 @@ body {
     max-height: 300px;
     object-fit: cover;
     border-radius: 8px;
+    margin-bottom: 20px;
+    display: none; /* Ẩn cho đến khi có ảnh */
 }
 
 .section-title {
-    margin-top: 18px;
-    padding: 6px;
+    margin-top: 25px;
+    margin-bottom: 15px;
+    padding: 10px 15px;
     background: #FFC700;
     border-left: 5px solid #1DB954;
+    font-weight: bold;
+    color: #333;
+    border-radius: 4px;
 }
 
 label {
-    margin-top: 12px;
+    margin-top: 15px;
     display: block;
-    font-weight: bold;
+    font-weight: 600;
+    color: #555;
+}
+
+label::after {
+    content: " *";
+    color: #FF3B30;
+    display: none;
+}
+
+label[for="customerName"]::after,
+label[for="phone"]::after,
+label[for="home"]::after,
+label[for="province"]::after,
+label[for="ward"]::after,
+label[for="size"]::after,
+label[for="color"]::after {
+    display: inline;
 }
 
 input, select, textarea {
     width: 100%;
-    padding: 10px;
-    margin-top: 4px;
-    border-radius: 6px;
-    border: 1px solid #1DB954;
+    padding: 12px;
+    margin-top: 6px;
+    margin-bottom: 10px;
+    border-radius: 8px;
+    border: 2px solid #ddd;
     font-size: 16px;
+    font-family: 'Inter', sans-serif;
+    transition: border-color 0.3s;
+    box-sizing: border-box;
+}
+
+input:focus, select:focus, textarea:focus {
+    outline: none;
+    border-color: #1DB954;
+    box-shadow: 0 0 0 2px rgba(29, 185, 84, 0.2);
+}
+
+input[readonly] {
+    background-color: #f8f9fa;
+    border-color: #e9ecef;
+    color: #666;
 }
 
 #orderBtn {
-    margin-top: 20px;
+    margin-top: 25px;
     width: 100%;
-    padding: 14px;
-    background: #FF3B30;
+    padding: 16px;
+    background: linear-gradient(135deg, #FF3B30, #FF6B6B);
     color: white;
     font-size: 18px;
-    border: none;
-    border-radius: 6px;
     font-weight: bold;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.3s;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+#orderBtn:hover {
+    background: linear-gradient(135deg, #FF6B6B, #FF3B30);
+    transform: translateY(-2px);
+    box-shadow: 0 6px 12px rgba(255, 59, 48, 0.3);
+}
+
+#orderBtn:active {
+    transform: translateY(0);
+}
+
+.note-area {
+    color: #FF3B30;
+    font-size: 14px;
+    font-style: italic;
+    margin: 10px 0 20px 0;
+    padding: 10px;
+    background: #FFF3F3;
+    border-radius: 6px;
+    border-left: 4px solid #FF3B30;
+}
+
+#message {
+    margin-top: 20px;
+    padding: 15px;
+    border-radius: 8px;
+    display: none;
+    font-weight: 500;
+    text-align: center;
+}
+
+/* Responsive */
+@media (max-width: 600px) {
+    .form-container {
+        width: 96%;
+        padding: 15px;
+        margin: 10px auto;
+    }
+    
+    #fanpageName {
+        font-size: 20px;
+    }
+    
+    input, select, textarea {
+        padding: 10px;
+        font-size: 15px;
+    }
+    
+    #orderBtn {
+        padding: 14px;
+        font-size: 16px;
+    }
+}
+
+/* Loading state */
+.loading {
+    opacity: 0.7;
+    pointer-events: none;
+}
+
+/* Custom select arrow */
+select {
+    appearance: none;
+    background-image: url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%231DB954' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e");
+    background-repeat: no-repeat;
+    background-position: right 12px center;
+    background-size: 16px;
+    padding-right: 40px;
 }
