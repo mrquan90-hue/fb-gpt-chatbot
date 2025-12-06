@@ -57,6 +57,9 @@ PRODUCTS = {}
 LAST_LOAD = 0
 LOAD_TTL = 300
 
+# Cache cho ảnh đã rehost
+IMAGE_REHOST_CACHE = {}
+
 # User processing lock to prevent duplicate processing
 USER_PROCESSING_LOCK = {}
 
@@ -198,7 +201,7 @@ def send_image(uid: str, image_url: str) -> str:
 
 
 # ============================================
-# CAROUSEL TEMPLATE
+# CAROUSEL TEMPLATE - FIXED WITH CDN
 # ============================================
 
 def send_carousel_template(recipient_id: str, products_data: list) -> str:
@@ -207,9 +210,16 @@ def send_carousel_template(recipient_id: str, products_data: list) -> str:
         for product in products_data[:10]:
             image_field = product.get("Images", "")
             image_urls = parse_image_urls(image_field)
-            image_url = image_urls[0] if image_urls else ""
+            original_image_url = image_urls[0] if image_urls else ""
             
-            if not image_url:
+            if not original_image_url:
+                continue
+            
+            # Sử dụng CDN URL thay vì URL gốc
+            cdn_image_url = rehost_image_to_cdn(original_image_url)
+            if not cdn_image_url or cdn_image_url == original_image_url:
+                # Nếu rehost thất bại, bỏ qua sản phẩm này để tránh lỗi
+                print(f"⚠️ Không thể rehost ảnh cho carousel: {original_image_url}")
                 continue
             
             # Sửa lỗi domain - đảm bảo có https://
@@ -219,7 +229,7 @@ def send_carousel_template(recipient_id: str, products_data: list) -> str:
             element = {
                 "title": f"[{product.get('MS', '')}] {product.get('Ten', '')}",
                 "subtitle": f"💰 Giá: {product.get('Gia', '')}\n{product.get('MoTa', '')[:60]}..." if product.get('MoTa') else f"💰 Giá: {product.get('Gia', '')}",
-                "image_url": image_url,
+                "image_url": cdn_image_url,
                 "buttons": [
                     {
                         "type": "postback",
@@ -270,6 +280,7 @@ def send_carousel_template(recipient_id: str, products_data: list) -> str:
         elif r.status_code == 400 and "2018062" in r.text:
             print("⚠️ LỖI CAROUSEL: Domain chưa được whitelist!")
             print(f"⚠️ Vui lòng whitelist domain: {DOMAIN} trong Facebook App Settings")
+            # Fallback: gửi dạng text thay vì carousel
             return ""
         return ""
         
@@ -295,6 +306,63 @@ def send_product_carousel(recipient_id: str) -> None:
             gia = product.get('Gia', '')
             send_message(recipient_id, f"{i}. [{ms}] {ten}\n💰 Giá: {gia}")
             time.sleep(0.1)
+
+
+# ============================================
+# CDN IMAGE UPLOAD FUNCTION
+# ============================================
+
+def rehost_image_to_cdn(image_url: str) -> str:
+    """
+    Tải ảnh lên CDN (FreeImage.host) và trả về URL CDN
+    Sử dụng cache để tránh tải lại nhiều lần
+    """
+    # Kiểm tra cache trước
+    if image_url in IMAGE_REHOST_CACHE:
+        return IMAGE_REHOST_CACHE[image_url]
+    
+    # Kiểm tra API key
+    if not FREEIMAGE_API_KEY:
+        print("⚠️ FREEIMAGE_API_KEY chưa được cấu hình, sử dụng URL gốc")
+        IMAGE_REHOST_CACHE[image_url] = image_url
+        return image_url
+    
+    try:
+        # Tải ảnh từ URL gốc
+        response = requests.get(image_url, timeout=15)
+        if response.status_code != 200:
+            print(f"❌ Không thể tải ảnh: {image_url}")
+            IMAGE_REHOST_CACHE[image_url] = image_url
+            return image_url
+        
+        # Upload lên FreeImage.host
+        upload_url = "https://freeimage.host/api/1/upload"
+        
+        files = {
+            'key': (None, FREEIMAGE_API_KEY),
+            'action': (None, 'upload'),
+            'format': (None, 'json'),
+            'source': (None, response.content)
+        }
+        
+        upload_response = requests.post(upload_url, files=files, timeout=30)
+        
+        if upload_response.status_code == 200:
+            result = upload_response.json()
+            if result.get('status_code') == 200:
+                cdn_url = result['image']['url']
+                print(f"✅ Đã upload ảnh lên CDN: {cdn_url}")
+                IMAGE_REHOST_CACHE[image_url] = cdn_url
+                return cdn_url
+        
+        print(f"❌ Upload lên CDN thất bại: {image_url}")
+        IMAGE_REHOST_CACHE[image_url] = image_url
+        return image_url
+        
+    except Exception as e:
+        print(f"❌ Lỗi khi rehost ảnh: {e}")
+        IMAGE_REHOST_CACHE[image_url] = image_url
+        return image_url
 
 
 # ============================================
@@ -500,27 +568,12 @@ def start_order_process(uid: str, ms: str) -> None:
 
 
 # ============================================
-# REHOST IMAGE
+# REHOST IMAGE (giữ lại cho tương thích)
 # ============================================
 
 def rehost_image(url: str) -> str:
-    if not FREEIMAGE_API_KEY:
-        return url
-    try:
-        api = "https://freeimage.host/api/1/upload"
-        payload = {
-            "key": FREEIMAGE_API_KEY,
-            "source": url,
-            "action": "upload",
-        }
-        r = requests.post(api, data=payload, timeout=20)
-        data = r.json()
-        if "image" in data and "url" in data["image"]:
-            return data["image"]["url"]
-        return url
-    except Exception as e:
-        print("REHOST ERROR:", e)
-        return url
+    """Giữ lại hàm cũ cho tương thích với các phần code khác"""
+    return rehost_image_to_cdn(url)
 
 
 # ============================================
@@ -795,16 +848,16 @@ def send_product_info(uid: str, ms: str, force_send_images: bool = True):
     order_link = f"{domain}/order-form?ms={ms}&uid={uid}"
     send_message(uid, f"📋 Anh/chị có thể đặt hàng ngay tại đây:\n{order_link}")
 
-    # Gửi 5 ảnh
+    # Gửi 5 ảnh (sử dụng CDN URL)
     if force_send_images:
         images_field = row.get("Images", "")
         urls = parse_image_urls(images_field)
         urls = urls[:5]  # Gửi 5 ảnh đầu tiên
         
         for u in urls:
-            final_url = rehost_image(u)
-            if final_url:
-                send_image(uid, final_url)
+            cdn_url = rehost_image_to_cdn(u)
+            if cdn_url:
+                send_image(uid, cdn_url)
                 time.sleep(0.2)  # Giảm thời gian chờ
     
     # Cập nhật thời gian
@@ -859,7 +912,7 @@ def handle_image(uid: str, image_url: str):
     if not ctx["greeted"] and not ctx.get("inbox_entry_ms"):
         maybe_greet(uid, ctx, has_ms=False)
 
-    hosted = rehost_image(image_url)
+    hosted = rehost_image_to_cdn(image_url)
     ms, desc = gpt_analyze_image(hosted)
     print("VISION RESULT:", ms, desc)
 
