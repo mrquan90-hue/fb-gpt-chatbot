@@ -51,6 +51,7 @@ USER_CONTEXT = defaultdict(lambda: {
     "order_data": {},
     "last_message_time": 0,
     "last_product_info_time": 0,
+    "get_started_processed": False,  # Thêm biến này
 })
 
 PRODUCTS = {}
@@ -201,7 +202,7 @@ def send_image(uid: str, image_url: str) -> str:
 
 
 # ============================================
-# CAROUSEL TEMPLATE - FIXED WITH CDN
+# CAROUSEL TEMPLATE - FIXED
 # ============================================
 
 def send_carousel_template(recipient_id: str, products_data: list) -> str:
@@ -215,12 +216,8 @@ def send_carousel_template(recipient_id: str, products_data: list) -> str:
             if not original_image_url:
                 continue
             
-            # Sử dụng CDN URL thay vì URL gốc
-            cdn_image_url = rehost_image_to_cdn(original_image_url)
-            if not cdn_image_url or cdn_image_url == original_image_url:
-                # Nếu rehost thất bại, bỏ qua sản phẩm này để tránh lỗi
-                print(f"⚠️ Không thể rehost ảnh cho carousel: {original_image_url}")
-                continue
+            # Sử dụng URL gốc trực tiếp thay vì rehost (vì Facebook chặn domain whitelist)
+            final_image_url = original_image_url
             
             # Sửa lỗi domain - đảm bảo có https://
             domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
@@ -229,7 +226,7 @@ def send_carousel_template(recipient_id: str, products_data: list) -> str:
             element = {
                 "title": f"[{product.get('MS', '')}] {product.get('Ten', '')}",
                 "subtitle": f"💰 Giá: {product.get('Gia', '')}\n{product.get('MoTa', '')[:60]}..." if product.get('MoTa') else f"💰 Giá: {product.get('Gia', '')}",
-                "image_url": cdn_image_url,
+                "image_url": final_image_url,
                 "buttons": [
                     {
                         "type": "postback",
@@ -241,7 +238,7 @@ def send_carousel_template(recipient_id: str, products_data: list) -> str:
                         "title": "🛒 Chọn sản phẩm",
                         "url": order_link,
                         "webview_height_ratio": "tall",
-                        "messenger_extensions": True,
+                        "messenger_extensions": False,  # Đặt thành False vì domain chưa whitelist
                         "webview_share_button": "hide"
                     }
                 ]
@@ -279,7 +276,6 @@ def send_carousel_template(recipient_id: str, products_data: list) -> str:
             return message_id
         elif r.status_code == 400 and "2018062" in r.text:
             print("⚠️ LỖI CAROUSEL: Domain chưa được whitelist!")
-            print(f"⚠️ Vui lòng whitelist domain: {DOMAIN} trong Facebook App Settings")
             # Fallback: gửi dạng text thay vì carousel
             return ""
         return ""
@@ -309,60 +305,15 @@ def send_product_carousel(recipient_id: str) -> None:
 
 
 # ============================================
-# CDN IMAGE UPLOAD FUNCTION
+# CDN IMAGE UPLOAD FUNCTION (giữ lại cho các tính năng khác)
 # ============================================
 
 def rehost_image_to_cdn(image_url: str) -> str:
     """
-    Tải ảnh lên CDN (FreeImage.host) và trả về URL CDN
-    Sử dụng cache để tránh tải lại nhiều lần
+    Hàm này giữ lại nhưng chỉ trả về URL gốc do vấn đề whitelist domain
     """
-    # Kiểm tra cache trước
-    if image_url in IMAGE_REHOST_CACHE:
-        return IMAGE_REHOST_CACHE[image_url]
-    
-    # Kiểm tra API key
-    if not FREEIMAGE_API_KEY:
-        print("⚠️ FREEIMAGE_API_KEY chưa được cấu hình, sử dụng URL gốc")
-        IMAGE_REHOST_CACHE[image_url] = image_url
-        return image_url
-    
-    try:
-        # Tải ảnh từ URL gốc
-        response = requests.get(image_url, timeout=15)
-        if response.status_code != 200:
-            print(f"❌ Không thể tải ảnh: {image_url}")
-            IMAGE_REHOST_CACHE[image_url] = image_url
-            return image_url
-        
-        # Upload lên FreeImage.host
-        upload_url = "https://freeimage.host/api/1/upload"
-        
-        files = {
-            'key': (None, FREEIMAGE_API_KEY),
-            'action': (None, 'upload'),
-            'format': (None, 'json'),
-            'source': (None, response.content)
-        }
-        
-        upload_response = requests.post(upload_url, files=files, timeout=30)
-        
-        if upload_response.status_code == 200:
-            result = upload_response.json()
-            if result.get('status_code') == 200:
-                cdn_url = result['image']['url']
-                print(f"✅ Đã upload ảnh lên CDN: {cdn_url}")
-                IMAGE_REHOST_CACHE[image_url] = cdn_url
-                return cdn_url
-        
-        print(f"❌ Upload lên CDN thất bại: {image_url}")
-        IMAGE_REHOST_CACHE[image_url] = image_url
-        return image_url
-        
-    except Exception as e:
-        print(f"❌ Lỗi khi rehost ảnh: {e}")
-        IMAGE_REHOST_CACHE[image_url] = image_url
-        return image_url
+    # Vì Facebook không cho whitelist domain, chúng ta sử dụng URL gốc
+    return image_url
 
 
 # ============================================
@@ -848,17 +799,15 @@ def send_product_info(uid: str, ms: str, force_send_images: bool = True):
     order_link = f"{domain}/order-form?ms={ms}&uid={uid}"
     send_message(uid, f"📋 Anh/chị có thể đặt hàng ngay tại đây:\n{order_link}")
 
-    # Gửi 5 ảnh (sử dụng CDN URL)
+    # Gửi 5 ảnh (sử dụng URL gốc)
     if force_send_images:
         images_field = row.get("Images", "")
         urls = parse_image_urls(images_field)
         urls = urls[:5]  # Gửi 5 ảnh đầu tiên
         
         for u in urls:
-            cdn_url = rehost_image_to_cdn(u)
-            if cdn_url:
-                send_image(uid, cdn_url)
-                time.sleep(0.2)  # Giảm thời gian chờ
+            send_image(uid, u)
+            time.sleep(0.2)  # Giảm thời gian chờ
     
     # Cập nhật thời gian
     ctx["product_info_sent_ms"] = ms
@@ -1064,6 +1013,25 @@ def webhook():
                 
                 payload = ev["postback"].get("payload")
                 print(f"[POSTBACK] User {sender_id}: {payload}")
+                
+                # XỬ LÝ GET_STARTED_PAYLOAD - CHỈ CHẠY 1 LẦN
+                if payload == "GET_STARTED_PAYLOAD":
+                    # Kiểm tra đã xử lý GET_STARTED chưa
+                    if ctx.get("get_started_processed"):
+                        print(f"[POSTBACK SKIP] Đã xử lý GET_STARTED cho user {sender_id}")
+                        return "ok"
+                    
+                    # Đánh dấu đã xử lý GET_STARTED
+                    ctx["get_started_processed"] = True
+                    
+                    # Chỉ gửi chào hỏi nếu chưa chào
+                    if not ctx["greeted"]:
+                        maybe_greet(sender_id, ctx, has_ms=False)
+                    
+                    # Chỉ gửi tin nhắn nhắc nếu chưa gửi carousel
+                    if not ctx["carousel_sent"]:
+                        send_message(sender_id, "Anh/chị cho em biết đang quan tâm mẫu nào hoặc gửi ảnh mẫu để em xem giúp ạ.")
+                    return "ok"
                 
                 if payload == "ORDER_PROVIDE_NAME":
                     ctx["order_state"] = "waiting_name"
