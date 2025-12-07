@@ -18,12 +18,12 @@ from openai import OpenAI
 app = Flask(__name__)
 
 # ============================================
-# ENV & CONFIG
+# ENV & CONFIG (ĐÃ SỬA: DÙNG SHEET_CSV_URL THAY VÌ GOOGLE_SHEET_CSV_URL)
 # ============================================
 PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN", "").strip()
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "").strip()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
-GOOGLE_SHEET_CSV_URL = os.getenv("GOOGLE_SHEET_CSV_URL", "").strip()
+GOOGLE_SHEET_CSV_URL = os.getenv("SHEET_CSV_URL", "").strip()  # ĐÃ SỬA
 DOMAIN = os.getenv("DOMAIN", "").strip() or "fb-gpt-chatbot.onrender.com"
 FANPAGE_NAME = os.getenv("FANPAGE_NAME", "Shop thời trang")
 FCHAT_WEBHOOK_URL = os.getenv("FCHAT_WEBHOOK_URL", "").strip()
@@ -117,22 +117,44 @@ ORDER_KEYWORDS = [
 ]
 
 # ============================================
-# HELPER: SEND MESSAGE
+# HELPER: SEND MESSAGE (ĐÃ SỬA)
 # ============================================
 
-def call_facebook_send_api(payload: dict):
+def call_facebook_send_api(payload: dict, retry_count=2):
+    """Gửi tin nhắn qua Facebook API với cơ chế retry và xử lý lỗi"""
     if not PAGE_ACCESS_TOKEN:
         print("[WARN] PAGE_ACCESS_TOKEN chưa được cấu hình, bỏ qua gửi tin nhắn.")
         return {}
+    
     url = f"https://graph.facebook.com/v12.0/me/messages?access_token={PAGE_ACCESS_TOKEN}"
-    try:
-        resp = requests.post(url, json=payload, timeout=10)
-        if not resp.ok:
-            print("Facebook Send API error:", resp.text)
-        return resp.json()
-    except Exception as e:
-        print("Facebook Send API exception:", e)
-        return {}
+    
+    for attempt in range(retry_count):
+        try:
+            resp = requests.post(url, json=payload, timeout=10)
+            
+            if resp.status_code == 200:
+                return resp.json()
+            else:
+                error_data = resp.json()
+                error_code = error_data.get("error", {}).get("code")
+                error_subcode = error_data.get("error", {}).get("error_subcode")
+                
+                # Lỗi 2018001: người dùng đã chặn/hủy kết nối
+                if error_code == 100 and error_subcode == 2018001:
+                    print(f"[ERROR] Người dùng đã chặn/hủy kết nối với trang. Không thể gửi tin nhắn.")
+                    return {}
+                
+                print(f"Facebook Send API error (attempt {attempt+1}):", resp.text)
+                
+                if attempt < retry_count - 1:
+                    time.sleep(0.5)  # Chờ 0.5 giây trước khi retry
+                    
+        except Exception as e:
+            print(f"Facebook Send API exception (attempt {attempt+1}):", e)
+            if attempt < retry_count - 1:
+                time.sleep(0.5)
+    
+    return {}
 
 
 def send_message(recipient_id: str, text: str):
@@ -509,7 +531,7 @@ def handle_image(uid: str, image_url: str):
 
 
 # ============================================
-# HANDLE TEXT
+# HANDLE TEXT (ĐÃ SỬA)
 # ============================================
 
 def detect_ms_from_text(text: str):
@@ -582,6 +604,11 @@ def send_product_info_debounced(uid: str, ms: str):
 
 
 def handle_text(uid: str, text: str):
+    """Xử lý tin nhắn văn bản từ người dùng (đã tối ưu)"""
+    # Kiểm tra nhanh trước khi xử lý
+    if not text or len(text.strip()) == 0:
+        return
+    
     ctx = USER_CONTEXT[uid]
 
     if ctx.get("processing_lock"):
@@ -591,6 +618,7 @@ def handle_text(uid: str, text: str):
     ctx["processing_lock"] = True
 
     try:
+        # Load products nếu cần (cache vẫn giữ 300s)
         load_products()
 
         # Reset postback counter khi có text mới
@@ -598,6 +626,7 @@ def handle_text(uid: str, text: str):
 
         # Xử lý order form trước
         if handle_order_form_step(uid, text):
+            ctx["processing_lock"] = False
             return
 
         # Thử lấy mã sản phẩm từ text
@@ -608,26 +637,34 @@ def handle_text(uid: str, text: str):
         if ms and ms in PRODUCTS:
             USER_CONTEXT[uid]["last_ms"] = ms
 
-        # Gọi GPT trả lời
+        # Gọi GPT trả lời (có thể chậm, nhưng cần thiết)
         reply = build_chatgpt_reply(uid, text, ms)
 
         # Chỉ gửi reply nếu không phải đang trong order process
         if not ctx.get("order_state"):
             send_message(uid, reply)
 
-        # Kiểm tra từ khóa đặt hàng
+        # Kiểm tra từ khóa đặt hàng (xử lý nhanh)
         lower = text.lower()
         if ms and ms in PRODUCTS and any(kw in lower for kw in ORDER_KEYWORDS):
             domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
             order_link = f"{domain}/order-form?ms={ms}&uid={uid}"
             send_message(uid, f"📋 Anh/chị có thể đặt hàng ngay tại đây:\n{order_link}")
 
+    except Exception as e:
+        print(f"Error in handle_text for {uid}: {e}")
+        # Gửi thông báo lỗi nhanh
+        try:
+            send_message(uid, "Dạ em đang gặp chút trục trặc, anh/chị vui lòng thử lại sau ít phút ạ.")
+        except:
+            pass
     finally:
+        # Luôn đảm bảo mở khóa
         ctx["processing_lock"] = False
 
 
 # ============================================
-# WEBHOOK HANDLER
+# WEBHOOK HANDLER (ĐÃ SỬA)
 # ============================================
 
 @app.route("/", methods=["GET"])
@@ -641,9 +678,15 @@ def webhook():
         mode = request.args.get("hub.mode")
         token = request.args.get("hub.verify_token")
         challenge = request.args.get("hub.challenge")
+        
+        print(f"[WEBHOOK VERIFY] Mode: {mode}, Token: {token}, Expected: {VERIFY_TOKEN}")
+        
         if mode == "subscribe" and token == VERIFY_TOKEN:
+            print("[WEBHOOK VERIFY] Success!")
             return challenge, 200
-        return "Verification token mismatch", 403
+        else:
+            print("[WEBHOOK VERIFY] Failed!")
+            return "Verification token mismatch", 403
 
     data = request.get_json() or {}
     print("Webhook received:", json.dumps(data, ensure_ascii=False))
@@ -656,6 +699,11 @@ def webhook():
             if not sender_id:
                 continue
 
+            # BỎ QUA tin nhắn "echo" từ bot
+            if m.get("message", {}).get("is_echo"):
+                print(f"[ECHO] Bỏ qua tin nhắn từ bot: {sender_id}")
+                continue
+            
             # Echo handler
             if "message" in m:
                 msg = m["message"]
@@ -1071,6 +1119,23 @@ def api_submit_order():
 @app.route("/static/<path:path>")
 def static_files(path):
     return send_from_directory("static", path)
+
+
+# ============================================
+# HEALTH CHECK (MỚI THÊM)
+# ============================================
+
+@app.route("/health", methods=["GET"])
+def health_check():
+    """Kiểm tra tình trạng server và bot"""
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "products_loaded": len(PRODUCTS),
+        "last_load_time": LAST_LOAD,
+        "openai_configured": bool(client),
+        "facebook_configured": bool(PAGE_ACCESS_TOKEN)
+    }, 200
 
 
 # ============================================
