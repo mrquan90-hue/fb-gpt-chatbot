@@ -50,6 +50,9 @@ USER_CONTEXT = defaultdict(lambda: {
     "postback_count": 0,
     "product_info_sent_ms": None,
     "last_product_info_time": 0,
+    # Mới: Quản lý postback trùng lặp
+    "last_postback_time": 0,
+    "processed_postbacks": set(),
 })
 PRODUCTS = {}
 LAST_LOAD = 0
@@ -177,6 +180,11 @@ def call_facebook_send_api(payload: dict, retry_count=2):
 def send_message(recipient_id: str, text: str):
     if not text:
         return
+    # Cắt tin nhắn nếu quá dài (>2000 ký tự)
+    if len(text) > 2000:
+        print(f"[WARN] Tin nhắn quá dài ({len(text)} ký tự), cắt ngắn lại")
+        text = text[:1997] + "..."
+    
     payload = {
         "recipient": {"id": recipient_id},
         "message": {"text": text},
@@ -573,13 +581,15 @@ def find_latest_ms_in_context(uid: str):
 
 
 def send_product_info_debounced(uid: str, ms: str):
+    """Gửi thông tin chi tiết sản phẩm theo cấu trúc mới - ĐÃ SỬA"""
     ctx = USER_CONTEXT[uid]
     now = time.time()
 
     last_ms = ctx.get("product_info_sent_ms")
     last_time = ctx.get("last_product_info_time", 0)
 
-    if last_ms == ms and (now - last_time) < 5:
+    # Kiểm tra debounce - chỉ cho phép gửi lại sau 3 giây
+    if last_ms == ms and (now - last_time) < 3:
         print(f"[DEBOUNCE] Bỏ qua gửi lại thông tin sản phẩm {ms} cho user {uid}")
         return
 
@@ -592,32 +602,129 @@ def send_product_info_debounced(uid: str, ms: str):
         send_message(uid, "Em không tìm thấy sản phẩm này trong hệ thống, anh/chị kiểm tra lại mã giúp em ạ.")
         return
 
-    # Gửi ảnh sản phẩm (1 ảnh đại diện)
-    images_field = product.get("Images", "")
-    urls = parse_image_urls(images_field)
-    main_image = ""
-    for u in urls:
-        if should_use_as_first_image(u):
-            main_image = u
-            break
-    if main_image:
-        send_image(uid, main_image)
-
-    # Mô tả ngắn gọn, đủ ý
-    short_desc = product.get("ShortDesc") or short_description(product.get("MoTa", ""))
-    detail = (
-        f"📌 Thông tin sản phẩm [{ms}] {product.get('Ten','')}:\n"
-        f"- Giá: {product.get('Gia','')}\n"
-        f"- Màu: {product.get('màu (Thuộc tính)','')}\n"
-        f"- Size: {product.get('size (Thuộc tính)','')}\n"
-        f"- Tồn kho: {product.get('Tồn kho','')}\n\n"
-        f"{short_desc}"
-    )
-    send_message(uid, detail)
-
-    domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
-    order_link = f"{domain}/order-form?ms={ms}&uid={uid}"
-    send_message(uid, f"📋 Anh/chị có thể đặt hàng ngay tại đây:\n{order_link}")
+    try:
+        # 1. Tạo thông tin chi tiết sản phẩm theo cấu trúc mới
+        product_name = product.get('Ten', '')
+        
+        # Màu sắc
+        colors_field = product.get("màu (Thuộc tính)", "")
+        colors_list = []
+        if colors_field:
+            colors_list = [c.strip() for c in colors_field.split(",") if c.strip()]
+        
+        # Size
+        sizes_field = product.get("size (Thuộc tính)", "")
+        sizes_list = []
+        if sizes_field:
+            sizes_list = [s.strip() for s in sizes_field.split(",") if s.strip()]
+        
+        # Lấy tất cả biến thể
+        variants = product.get("variants", [])
+        
+        # Nhóm các biến thể có cùng giá
+        price_groups = {}
+        for variant in variants:
+            mau = variant.get("mau", "").strip() or "Không xác định"
+            size = variant.get("size", "").strip() or "Không xác định"
+            gia_raw = variant.get("gia_raw", "").strip()
+            gia_int = variant.get("gia", 0)
+            
+            # Format giá
+            if gia_int and gia_int > 0:
+                price_display = f"{gia_int:,.0f} đ"
+            elif gia_raw:
+                price_display = gia_raw
+            else:
+                price_display = "Liên hệ"
+            
+            # Tạo key cho nhóm giá
+            group_key = f"{mau}|{price_display}"
+            if group_key not in price_groups:
+                price_groups[group_key] = {
+                    "mau": mau,
+                    "price": price_display,
+                    "sizes": set()
+                }
+            price_groups[group_key]["sizes"].add(size)
+        
+        # Mô tả chi tiết - cắt ngắn để tránh quá dài
+        mo_ta = product.get("MoTa", "")
+        if mo_ta and len(mo_ta) > 1000:
+            mo_ta = mo_ta[:1000] + "..."
+        
+        # 2. Tạo tin nhắn chi tiết (NGẮN GỌN, <2000 ký tự)
+        detail_parts = []
+        
+        # Tiêu đề
+        detail_parts.append(f"📌 {product_name}")
+        detail_parts.append(f"🔢 Mã sản phẩm: {ms}")
+        
+        # Màu sắc - hiển thị ngắn gọn
+        if colors_list:
+            colors_display = ", ".join(colors_list[:3])  # Chỉ hiển thị 3 màu đầu
+            if len(colors_list) > 3:
+                colors_display += f" và {len(colors_list)-3} màu khác"
+            detail_parts.append(f"🎨 Màu sắc: {colors_display}")
+        
+        # Size - hiển thị ngắn gọn
+        if sizes_list:
+            sizes_display = ", ".join(sizes_list[:3])  # Chỉ hiển thị 3 size đầu
+            if len(sizes_list) > 3:
+                sizes_display += f" và {len(sizes_list)-3} size khác"
+            detail_parts.append(f"📏 Size: {sizes_display}")
+        
+        # Giá - hiển thị ngắn gọn
+        if price_groups:
+            detail_parts.append("💰 Giá:")
+            # Lấy giá đầu tiên để hiển thị (có thể thêm chi tiết trong phần tiếp theo nếu cần)
+            first_group = list(price_groups.values())[0]
+            detail_parts.append(f"  • Từ: {first_group['price']}")
+        
+        # Mô tả ngắn
+        if mo_ta:
+            mo_ta_short = mo_ta[:300] + "..." if len(mo_ta) > 300 else mo_ta
+            detail_parts.append(f"📝 Mô tả: {mo_ta_short}")
+        
+        # Thêm thông báo
+        detail_parts.append("💡 Gõ 'mua sản phẩm' hoặc nhấn nút dưới đây để đặt hàng!")
+        
+        # Gửi tin nhắn chi tiết (đảm bảo dưới 2000 ký tự)
+        detail_message = "\n".join(detail_parts)
+        
+        # Kiểm tra độ dài
+        if len(detail_message) > 2000:
+            # Cắt bớt nếu quá dài
+            detail_message = detail_message[:1997] + "..."
+        
+        send_message(uid, detail_message)
+        
+        # 3. Gửi link đặt hàng (riêng biệt)
+        domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
+        order_link = f"{domain}/order-form?ms={ms}&uid={uid}"
+        send_message(uid, f"📋 Đặt hàng ngay tại đây:\n{order_link}")
+        
+        # 4. Gửi ảnh (tối đa 2 ảnh để tránh spam)
+        images_field = product.get("Images", "")
+        urls = parse_image_urls(images_field)
+        unique_images = []
+        seen = set()
+        for u in urls:
+            if u and u not in seen:
+                seen.add(u)
+                unique_images.append(u)
+        
+        for image_url in unique_images[:2]:  # Chỉ gửi 2 ảnh đầu
+            if image_url:
+                send_image(uid, image_url)
+                time.sleep(0.5)  # Delay nhẹ giữa các ảnh
+        
+    except Exception as e:
+        print(f"Lỗi khi gửi thông tin sản phẩm: {str(e)}")
+        # Gửi thông báo lỗi đơn giản
+        send_message(uid, f"📌 Sản phẩm: {product.get('Ten', '')}\n🔢 Mã: {ms}\n\nĐể xem chi tiết và đặt hàng, vui lòng truy cập link dưới đây:")
+        domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
+        order_link = f"{domain}/order-form?ms={ms}&uid={uid}"
+        send_message(uid, order_link)
 
 
 def handle_text(uid: str, text: str):
@@ -646,10 +753,10 @@ def handle_text(uid: str, text: str):
             ctx["processing_lock"] = False
             return
 
-        # KIỂM TRA TỪ KHÓA CAROUSEL - DÙNG BIẾN TOÀN CỤC CAROUSEL_KEYWORDS
+        # KIỂM TRA TỪ KHÓA CAROUSEL
         lower = text.lower()
         
-        if any(kw in lower for kw in CAROUSEL_KEYWORDS):  # SỬA: dùng biến toàn cục
+        if any(kw in lower for kw in CAROUSEL_KEYWORDS):
             if PRODUCTS:
                 # Gửi thông báo đang tải
                 send_message(uid, "Dạ, em đang lấy danh sách sản phẩm cho anh/chị...")
@@ -743,7 +850,7 @@ def handle_text(uid: str, text: str):
 
 
 # ============================================
-# WEBHOOK HANDLER (ĐÃ SỬA)
+# WEBHOOK HANDLER (ĐÃ SỬA - THÊM XỬ LÝ POSTBACK TRÙNG LẶP)
 # ============================================
 
 @app.route("/", methods=["GET"])
@@ -783,6 +890,44 @@ def webhook():
                 print(f"[ECHO] Bỏ qua tin nhắn từ bot: {sender_id}")
                 continue
             
+            # BỎ QUA các sự kiện delivery, read, etc.
+            if m.get("delivery") or m.get("read"):
+                continue
+            
+            # Xử lý postback (có kiểm tra trùng lặp)
+            if "postback" in m:
+                payload = m["postback"].get("payload")
+                if payload:
+                    # Kiểm tra trùng lặp postback
+                    ctx = USER_CONTEXT[sender_id]
+                    postback_id = m["postback"].get("mid")
+                    now = time.time()
+                    
+                    # Kiểm tra nếu postback đã được xử lý trong vòng 5 giây
+                    if postback_id and postback_id in ctx.get("processed_postbacks", set()):
+                        print(f"[POSTBACK DUPLICATE] Bỏ qua postback trùng: {postback_id}")
+                        continue
+                    
+                    # Kiểm tra thời gian giữa các postback (chống spam)
+                    last_postback_time = ctx.get("last_postback_time", 0)
+                    if now - last_postback_time < 1:  # 1 giây
+                        print(f"[POSTBACK SPAM] User {sender_id} gửi postback quá nhanh")
+                        continue
+                    
+                    # Lưu postback đã xử lý
+                    if postback_id:
+                        if "processed_postbacks" not in ctx:
+                            ctx["processed_postbacks"] = set()
+                        ctx["processed_postbacks"].add(postback_id)
+                        # Giữ tối đa 10 postback gần nhất
+                        if len(ctx["processed_postbacks"]) > 10:
+                            # Xóa phần tử cũ nhất
+                            ctx["processed_postbacks"] = set(list(ctx["processed_postbacks"])[-10:])
+                    
+                    ctx["last_postback_time"] = now
+                    handle_postback(sender_id, payload)
+                    continue
+            
             # Echo handler
             if "message" in m:
                 msg = m["message"]
@@ -797,16 +942,11 @@ def webhook():
                             if image_url:
                                 handle_image(sender_id, image_url)
 
-            if "postback" in m:
-                payload = m["postback"].get("payload")
-                if payload:
-                    handle_postback(sender_id, payload)
-
     return "OK", 200
 
 
 # ============================================
-# POSTBACK HANDLER (ĐÃ THÊM XỬ LÝ CAROUSEL)
+# POSTBACK HANDLER (ĐÃ THÊM XỬ LÝ CAROUSEL - ĐÃ SỬA LỖI)
 # ============================================
 
 def handle_postback(uid: str, payload: str):
@@ -836,6 +976,8 @@ def handle_postback(uid: str, payload: str):
         ms = payload.replace("ADVICE_", "")
         if ms in PRODUCTS:
             send_product_info_debounced(uid, ms)
+        else:
+            send_message(uid, "❌ Em không tìm thấy sản phẩm này trong hệ thống. Anh/chị vui lòng kiểm tra lại mã sản phẩm ạ.")
         return
 
     # Các postback khác do bạn tự định nghĩa nếu cần
@@ -1170,8 +1312,8 @@ def api_submit_order():
     data = request.get_json() or {}
     ms = (data.get("ms") or "").upper()
     uid = data.get("uid") or ""
-    color = (data.get("color") or "").strip()
-    size = (data.get("size") or "").strip()
+    color = data.get("color") or ""
+    size = data.get("size") or ""
     quantity = int(data.get("quantity") or 1)
     customerName = data.get("customerName") or ""
     phone = data.get("phone") or ""
