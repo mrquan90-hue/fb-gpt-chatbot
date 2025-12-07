@@ -646,17 +646,10 @@ def handle_text(uid: str, text: str):
             ctx["processing_lock"] = False
             return
 
-        # KIỂM TRA TỪ KHÓA CAROUSEL
+        # KIỂM TRA TỪ KHÓA CAROUSEL - DÙNG BIẾN TOÀN CỤC CAROUSEL_KEYWORDS
         lower = text.lower()
         
-        # Từ khóa kích hoạt carousel
-        carousel_keywords = [
-            "xem sản phẩm", "show sản phẩm", "có gì hot", "sản phẩm mới",
-            "danh sách sản phẩm", "giới thiệu sản phẩm", "tất cả sản phẩm",
-            "cho xem sản phẩm", "có mẫu nào", "mẫu mới", "hàng mới", "xem hàng", "show hàng"
-        ]
-        
-        if any(kw in lower for kw in carousel_keywords):
+        if any(kw in lower for kw in CAROUSEL_KEYWORDS):  # SỬA: dùng biến toàn cục
             if PRODUCTS:
                 # Gửi thông báo đang tải
                 send_message(uid, "Dạ, em đang lấy danh sách sản phẩm cho anh/chị...")
@@ -672,11 +665,13 @@ def handle_text(uid: str, text: str):
                     # Tạo mô tả ngắn
                     short_desc = product.get("ShortDesc", "") or short_description(product.get("MoTa", ""))
                     
-                    # Tạo element cho carousel
+                    # Tạo element cho carousel (ĐÃ SỬA THEO YÊU CẦU)
                     element = {
-                        "title": f"[{ms}] {product.get('Ten', '')}",
+                        # 1. Chỉ hiển thị tên sản phẩm (đã chứa mã sản phẩm)
+                        "title": product.get('Ten', ''),
                         "image_url": image_url,
-                        "subtitle": f"💰 {product.get('Gia', '0')}\n{short_desc[:80]}..." if short_desc else f"💰 {product.get('Gia', '0')}",
+                        # 2. Không hiển thị giá, chỉ hiển thị mô tả ngắn
+                        "subtitle": short_desc[:80] + "..." if short_desc and len(short_desc) > 80 else (short_desc if short_desc else ""),
                         "default_action": {
                             "type": "web_url",
                             "url": f"{DOMAIN if DOMAIN.startswith('http') else 'https://' + DOMAIN}/order-form?ms={ms}&uid={uid}",
@@ -688,9 +683,10 @@ def handle_text(uid: str, text: str):
                                 "url": f"{DOMAIN if DOMAIN.startswith('http') else 'https://' + DOMAIN}/order-form?ms={ms}&uid={uid}",
                                 "title": "🛒 Đặt ngay"
                             },
+                            # 3. Đổi tên nút từ "Tư vấn" thành "Xem chi tiết"
                             {
                                 "type": "postback",
-                                "title": "💬 Tư vấn",
+                                "title": "🔍 Xem chi tiết",
                                 "payload": f"ADVICE_{ms}"
                             }
                         ]
