@@ -1,57 +1,59 @@
 import os
-import re
-import csv
 import json
+import re
 import time
-import hmac
+import csv
 import hashlib
-import threading
 from collections import defaultdict
+from urllib.parse import quote
+from datetime import datetime
 
 import requests
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, send_from_directory
+from openai import OpenAI
 
 # ============================================
-# CẤU HÌNH CƠ BẢN
+# FLASK APP
 # ============================================
+app = Flask(__name__)
 
-PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN", "")
-VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "verify_token_mau")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-FANPAGE_NAME = os.getenv("FANPAGE_NAME", "Shop Thời Trang")
-DOMAIN = os.getenv("DOMAIN", "https://example.com")
+# ============================================
+# ENV & CONFIG
+# ============================================
+PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN", "").strip()
+VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "").strip()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+GOOGLE_SHEET_CSV_URL = os.getenv("GOOGLE_SHEET_CSV_URL", "").strip()
+DOMAIN = os.getenv("DOMAIN", "").strip() or "fb-gpt-chatbot.onrender.com"
+FANPAGE_NAME = os.getenv("FANPAGE_NAME", "Shop thời trang")
+FCHAT_WEBHOOK_URL = os.getenv("FCHAT_WEBHOOK_URL", "").strip()
+FCHAT_TOKEN = os.getenv("FCHAT_TOKEN", "").strip()
 
-# URL Google Sheet CSV
-GOOGLE_SHEET_CSV_URL = os.getenv("GOOGLE_SHEET_CSV_URL", "")
+# Nếu không truyền biến môi trường thì dùng URL mặc định
+if not GOOGLE_SHEET_CSV_URL:
+    GOOGLE_SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/18eI8Yn-WG8xN0YK8mWqgIOvn-USBhmXBH3sR2drvWus/export?format=csv"
 
-# Cache sản phẩm
+# ============================================
+# OPENAI CLIENT
+# ============================================
+client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+
+# ============================================
+# GLOBAL STATE
+# ============================================
+USER_CONTEXT = defaultdict(lambda: {
+    "last_msg_time": 0,
+    "last_ms": None,
+    "order_state": None,
+    "order_data": {},
+    "processing_lock": False,
+    "postback_count": 0,
+    "product_info_sent_ms": None,
+    "last_product_info_time": 0,
+})
 PRODUCTS = {}
 LAST_LOAD = 0
-LOAD_TTL = 300  # 300 giây
-
-# Đảm bảo thread-safe cho USER_CONTEXT
-USER_CONTEXT = defaultdict(
-    lambda: {
-        "history": [],
-        "last_ms": None,
-        "current_product_ms": None,
-        "greeted": False,
-        "carousel_sent": False,
-        "processing_lock": False,
-        "last_postback_payload": None,
-        "last_postback_time": 0,
-        "postback_count": 0,
-        "order_state": None,
-        "order_info": {},
-        "last_message_time": 0,
-        "product_info_sent_ms": None,
-        "last_product_info_time": 0,
-        "sent_message_ids": set(),
-    }
-)
-
-# Khóa dùng cho debounce gửi sản phẩm theo mã
-DEBOUNCE_LOCK = threading.Lock()
+LOAD_TTL = 300
 
 # Các từ khóa liên quan đến đặt hàng
 ORDER_KEYWORDS = [
@@ -115,39 +117,27 @@ ORDER_KEYWORDS = [
 ]
 
 # ============================================
-# HÀM GỌI FACEBOOK SEND API
+# HELPER: SEND MESSAGE
 # ============================================
-
 
 def call_facebook_send_api(payload: dict):
     if not PAGE_ACCESS_TOKEN:
-        print("PAGE_ACCESS_TOKEN chưa được cấu hình.")
-        return ""
-    url = f"https://graph.facebook.com/v16.0/me/messages?access_token={PAGE_ACCESS_TOKEN}"
+        print("[WARN] PAGE_ACCESS_TOKEN chưa được cấu hình, bỏ qua gửi tin nhắn.")
+        return {}
+    url = f"https://graph.facebook.com/v12.0/me/messages?access_token={PAGE_ACCESS_TOKEN}"
     try:
-        print("SEND PAYLOAD:", json.dumps(payload, ensure_ascii=False))
-        r = requests.post(url, json=payload, timeout=15)
-        r.raise_for_status()
-        data = r.json()
-        print("SEND RESPONSE:", json.dumps(data, ensure_ascii=False))
-
-        # Lưu lại message_id để tránh xử lý echo
-        if "message_id" in data.get("message", {}):
-            message_id = data["message"]["message_id"]
-            recipient_id = payload.get("recipient", {}).get("id")
-            if recipient_id:
-                ctx = USER_CONTEXT[recipient_id]
-                ctx["sent_message_ids"].add(message_id)
-            return message_id
-        return ""
+        resp = requests.post(url, json=payload, timeout=10)
+        if not resp.ok:
+            print("Facebook Send API error:", resp.text)
+        return resp.json()
     except Exception as e:
-        print("SEND MSG ERROR:", e)
-        return ""
+        print("Facebook Send API exception:", e)
+        return {}
 
 
 def send_message(recipient_id: str, text: str):
     if not text:
-        return ""
+        return
     payload = {
         "recipient": {"id": recipient_id},
         "message": {"text": text},
@@ -178,7 +168,10 @@ def send_carousel_template(recipient_id: str, elements: list):
         "message": {
             "attachment": {
                 "type": "template",
-                "payload": {"template_type": "generic", "elements": elements},
+                "payload": {
+                    "template_type": "generic",
+                    "elements": elements[:10],
+                },
             }
         },
     }
@@ -186,19 +179,24 @@ def send_carousel_template(recipient_id: str, elements: list):
 
 
 def send_quick_replies(recipient_id: str, text: str, quick_replies: list):
-    if not quick_replies:
-        return send_message(recipient_id, text)
     payload = {
         "recipient": {"id": recipient_id},
-        "message": {"text": text, "quick_replies": quick_replies},
+        "message": {
+            "text": text,
+            "quick_replies": quick_replies,
+        },
     }
     return call_facebook_send_api(payload)
 
 
+# ============================================
+# HELPER: PRODUCTS
+# ============================================
+
 def parse_image_urls(raw: str):
     if not raw:
         return []
-    parts = re.split(r"[,\n;|]+", raw)
+    parts = re.split(r'[,\n;|]+', raw)
     urls = []
     for p in parts:
         p = p.strip()
@@ -250,15 +248,15 @@ def extract_price_int(price_str: str):
 def load_products(force=False):
     """
     Đọc dữ liệu từ Google Sheet CSV, cache trong 300s.
-
-    PHƯƠNG ÁN A:
-    - Mỗi dòng trong sheet = 1 biến thể (màu/size/giá/tồn kho).
-    - Gom các biến thể cùng Mã sản phẩm.
-    - Vẫn giữ cấu trúc row cũ để không phá vỡ logic khác.
+    PHƯƠNG ÁN A: Mỗi dòng = 1 biến thể, gom theo Mã sản phẩm và lưu danh sách variants.
     """
     global PRODUCTS, LAST_LOAD
     now = time.time()
     if not force and PRODUCTS and (now - LAST_LOAD) < LOAD_TTL:
+        return
+
+    if not GOOGLE_SHEET_CSV_URL:
+        print("❌ GOOGLE_SHEET_CSV_URL chưa được cấu hình! Không thể load sản phẩm.")
         return
 
     try:
@@ -269,7 +267,8 @@ def load_products(force=False):
         content = r.text
 
         reader = csv.DictReader(content.splitlines())
-        products: dict[str, dict] = {}
+        products = {}
+
         for raw_row in reader:
             row = dict(raw_row)
 
@@ -289,7 +288,6 @@ def load_products(force=False):
             mau = (row.get("màu (Thuộc tính)") or "").strip()
             size = (row.get("size (Thuộc tính)") or "").strip()
 
-            # Chuẩn hóa giá & tồn kho cho biến thể
             gia_int = extract_price_int(gia_raw)
             try:
                 tonkho_int = int(str(tonkho_raw)) if str(tonkho_raw).strip() else None
@@ -297,7 +295,6 @@ def load_products(force=False):
                 tonkho_int = None
 
             if ms not in products:
-                # Khởi tạo sản phẩm gốc, giữ cấu trúc như cũ
                 base = {
                     "MS": ms,
                     "Ten": ten,
@@ -316,11 +313,17 @@ def load_products(force=False):
 
             p = products[ms]
 
-            # Cập nhật ảnh/video nếu chưa có
+            # Cập nhật thông tin chung nếu còn thiếu
             if not p.get("Images") and images:
                 p["Images"] = images
             if not p.get("Videos") and videos:
                 p["Videos"] = videos
+            if not p.get("MoTa") and mota:
+                p["MoTa"] = mota
+            if not p.get("Gia") and gia_raw:
+                p["Gia"] = gia_raw
+            if not p.get("Tồn kho") and tonkho_raw:
+                p["Tồn kho"] = tonkho_raw
 
             # Thêm biến thể
             variant = {
@@ -332,34 +335,17 @@ def load_products(force=False):
             }
             p["variants"].append(variant)
 
-            # Gom màu & size tổng hợp
             if mau:
                 p["all_colors"].add(mau)
             if size:
                 p["all_sizes"].add(size)
 
-            # Nếu chưa có mô tả thì dùng mô tả của dòng hiện tại
-            if not p.get("MoTa") and mota:
-                p["MoTa"] = mota
-
-            # Nếu chưa có giá hiển thị thì dùng giá dòng đầu tiên
-            if not p.get("Gia") and gia_raw:
-                p["Gia"] = gia_raw
-
-            # Tồn kho tổng (tạm để dòng đầu tiên)
-            if not p.get("Tồn kho") and tonkho_raw:
-                p["Tồn kho"] = tonkho_raw
-
-        # Hậu xử lý: chuyển set → chuỗi và tạo mô tả ngắn
+        # Hậu xử lý: gộp màu/size & tạo mô tả ngắn
         for ms, p in products.items():
             colors = sorted(list(p.get("all_colors") or []))
             sizes = sorted(list(p.get("all_sizes") or []))
-            p["màu (Thuộc tính)"] = (
-                ", ".join(colors) if colors else p.get("màu (Thuộc tính)", "")
-            )
-            p["size (Thuộc tính)"] = (
-                ", ".join(sizes) if sizes else p.get("size (Thuộc tính)", "")
-            )
+            p["màu (Thuộc tính)"] = ", ".join(colors) if colors else p.get("màu (Thuộc tính)", "")
+            p["size (Thuộc tính)"] = ", ".join(sizes) if sizes else p.get("size (Thuộc tính)", "")
             p["ShortDesc"] = short_description(p.get("MoTa", ""))
 
         PRODUCTS = products
@@ -373,21 +359,20 @@ def load_products(force=False):
 # GPT PROMPT
 # ============================================
 
-
 def build_product_system_prompt(product: dict | None, ms: str | None):
     base = (
         "Bạn là trợ lý bán hàng thời trang cho shop Facebook. "
         "Nhiệm vụ của bạn là tư vấn size, màu, chất liệu, giá, tồn kho và hỗ trợ chốt đơn. "
         "Luôn trả lời bằng tiếng Việt thân thiện, xưng 'em' và gọi khách là 'anh/chị'. "
-        "Nếu không chắc thông tin (ví dụ thiếu trong dữ liệu sản phẩm) thì nói rõ là không chắc, "
-        "và gợi ý khách inbox để được hỗ trợ thêm.\n\n"
+        "Nếu không chắc thông tin (ví dụ thiếu trong dữ liệu sản phẩm) "
+        "thì nói rõ là không chắc, và gợi ý khách inbox để được hỗ trợ thêm.\n"
     )
 
     if not product or not ms:
         base += (
-            "Hiện tại bạn KHÔNG có dữ liệu chi tiết sản phẩm. "
+            "\nHiện tại bạn KHÔNG có dữ liệu chi tiết sản phẩm. "
             "Hãy trả lời chung chung, khéo léo xin khách gửi mã sản phẩm hoặc hình ảnh "
-            "để bạn kiểm tra lại trên hệ thống.\n"
+            "để bạn kiểm tra lại trên hệ thống."
         )
         return base
 
@@ -398,671 +383,154 @@ def build_product_system_prompt(product: dict | None, ms: str | None):
     tonkho = product.get("Tồn kho", "")
     mota = product.get("MoTa", "")
 
-    base += f"Thông tin sản phẩm hiện tại (Mã: {ms}):\n"
-    base += f"- Tên: {ten}\n"
-    base += f"- Giá: {gia}\n"
-    if mau:
-        base += f"- Màu: {mau}\n"
-    if size:
-        base += f"- Size: {size}\n"
-    if tonkho:
-        base += f"- Tồn kho: {tonkho}\n"
-    if mota:
-        base += f"- Mô tả: {mota}\n"
-
     base += (
-        "\nKhi khách hỏi về sản phẩm này, hãy ưu tiên dùng các thông tin trên. "
-        "Câu trả lời cần ngắn gọn, dễ hiểu, không lặp lại toàn bộ mô tả dài nếu không cần thiết. "
-        "Luôn kết thúc bằng việc gợi ý khách để lại SĐT và địa chỉ để chốt đơn nhanh nếu khách đã ưng.\n"
+        f"\nDưới đây là thông tin sản phẩm hiện tại trong hệ thống:\n"
+        f"- Mã sản phẩm: {ms}\n"
+        f"- Tên: {ten}\n"
+        f"- Giá: {gia}\n"
+        f"- Màu: {mau}\n"
+        f"- Size: {size}\n"
+        f"- Tồn kho: {tonkho}\n"
+        f"- Mô tả: {mota}\n\n"
+        "Khi khách hỏi về sản phẩm này, ưu tiên dựa vào các thông tin trên để tư vấn. "
+        "Nếu khách hỏi những câu chung chung (ví dụ: còn hàng không, có màu/size nào, "
+        "bao lâu nhận được hàng, phí ship, cách đổi trả, v.v.) thì trả lời rõ ràng, "
+        "kèm theo gợi ý đặt hàng."
     )
 
     return base
 
 
-# ============================================
-# GPT CHAT FUNCTION
-# ============================================
-
-
-def gpt_reply(history: list, product: dict | None, ms: str | None) -> str:
+def build_chatgpt_reply(uid: str, text: str, ms: str | None):
     """
-    Gọi OpenAI GPT để trả lời.
+    Gọi OpenAI để trả lời câu hỏi của khách hàng.
     """
-    if not OPENAI_API_KEY:
-        return (
-            "Dạ hiện tại em chưa được cấu hình API để tư vấn thông minh hơn. "
-            "Anh/chị có thể hỏi trực tiếp về giá, size, màu hoặc để lại SĐT để shop gọi tư vấn ạ."
-        )
+    if not client or not OPENAI_API_KEY:
+        return "Hiện tại hệ thống AI đang tạm thời bảo trì, anh/chị inbox trực tiếp để shop hỗ trợ ạ."
 
-    system_msg = build_product_system_prompt(product, ms)
+    load_products()
+    product = PRODUCTS.get(ms) if ms else None
 
-    messages = [{"role": "system", "content": system_msg}]
-    for item in history[-10:]:
-        messages.append(item)
+    system_prompt = build_product_system_prompt(product, ms)
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": text},
+    ]
 
     try:
-        url = "https://api.openai.com/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {OPENAI_API_KEY}",
-            "Content-Type": "application/json",
-        }
-        payload = {
-            "model": "gpt-4o-mini",
-            "messages": messages,
-            "temperature": 0.7,
-            "max_tokens": 500,
-        }
-
-        print("GPT REQUEST:", json.dumps(payload, ensure_ascii=False))
-        r = requests.post(url, headers=headers, json=payload, timeout=30)
-        r.raise_for_status()
-        data = r.json()
-        print("GPT RESPONSE:", json.dumps(data, ensure_ascii=False))
-
-        reply = data["choices"][0]["message"]["content"]
-        return reply.strip()
-    except Exception as e:
-        print("GPT ERROR:", e)
-        return (
-            "Dạ hiện tại em đang gặp chút trục trặc khi tư vấn tự động. "
-            "Anh/chị cho em xin mã sản phẩm hoặc hình ảnh, em sẽ hỗ trợ theo thông tin có sẵn ạ."
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=messages,
+            temperature=0.4,
+            max_tokens=500,
         )
+        reply = resp.choices[0].message.content.strip()
+        return reply
+    except Exception as e:
+        print("OpenAI error:", e)
+        return "Hiện tại em đang gặp chút trục trặc kỹ thuật, anh/chị vui lòng nhắn lại sau ít phút giúp em ạ."
 
 
 # ============================================
-# HELPER XỬ LÝ MÃ SẢN PHẨM / SHORT CODE
+# HANDLE ORDER FORM STATE
 # ============================================
 
-
-def extract_ms(text: str) -> str | None:
-    if not text:
-        return None
-    # Mã sản phẩm dạng [MS0001] hoặc MS0001
-    m = re.search(r"\b(MS\d{6})\b", text.upper())
-    if m:
-        return m.group(1)
-    return None
-
-
-def extract_short_code(text: str) -> str | None:
-    """
-    Tìm short code dạng S1, S01, A1, B2,... trong câu.
-    """
-    if not text:
-        return None
-    m = re.search(r"\b([A-Z]\d{1,2})\b", text.upper())
-    if m:
-        return m.group(1)
-    return None
-
-
-def find_ms_by_short_code(short_code: str) -> str | None:
-    """
-    Dò trong PRODUCTS xem có cột nào chứa short_code (ví dụ cột 'Mã mẫu mã' hoặc 'Keyword mẫu mã').
-    Ở đây giả sử Google Sheet đã có những cột đó.
-    """
-    if not short_code:
-        return None
-    load_products()
-    sc = short_code.upper()
-    for ms, row in PRODUCTS.items():
-        for col in ["Mã mẫu mã", "Keyword mẫu mã"]:
-            val = (row.get(col) or "").upper()
-            if sc in val.split():
-                return ms
-    return None
-
-
-# ============================================
-# ORDER FORM STATE MACHINE
-# ============================================
-
-
-def reset_order_state(ctx: dict):
+def reset_order_state(uid: str):
+    ctx = USER_CONTEXT[uid]
     ctx["order_state"] = None
-    ctx["order_info"] = {}
+    ctx["order_data"] = {}
 
 
-def handle_order_form_step(uid: str, text: str) -> bool:
+def handle_order_form_step(uid: str, text: str):
     """
-    Xử lý từng bước trong quy trình nhập form đặt hàng qua chat.
-    Trả về True nếu tin nhắn đã được xử lý cho luồng order.
+    Xử lý luồng hỏi thông tin đặt hàng nếu user đang trong trạng thái order_state.
     """
     ctx = USER_CONTEXT[uid]
     state = ctx.get("order_state")
-
     if not state:
         return False
 
-    info = ctx.setdefault("order_info", {})
+    data = ctx.get("order_data", {})
 
-    if state == "waiting_name":
-        info["name"] = text.strip()
-        ctx["order_state"] = "waiting_phone"
-        send_message(uid, "📱 Anh/chị vui lòng nhập số điện thoại người nhận:")
+    if state == "ask_name":
+        data["customerName"] = text.strip()
+        ctx["order_state"] = "ask_phone"
+        send_message(uid, "Dạ em cảm ơn anh/chị. Anh/chị cho em xin số điện thoại ạ?")
         return True
 
-    if state == "waiting_phone":
-        phone = re.sub(r"\D", "", text)
+    if state == "ask_phone":
+        phone = re.sub(r"[^\d+]", "", text)
         if len(phone) < 9:
-            send_message(
-                uid,
-                "Số điện thoại chưa đúng định dạng ạ. Anh/chị nhập lại giúp em (ít nhất 9 số) ạ.",
-            )
+            send_message(uid, "Số điện thoại chưa đúng lắm, anh/chị nhập lại giúp em (tối thiểu 9 số) ạ?")
             return True
-        info["phone"] = phone
-        ctx["order_state"] = "waiting_address"
-        send_message(uid, "🏠 Anh/chị cho em xin địa chỉ nhận hàng chi tiết:")
+        data["phone"] = phone
+        ctx["order_state"] = "ask_address"
+        send_message(uid, "Dạ vâng. Anh/chị cho em xin địa chỉ nhận hàng (đầy đủ: số nhà, đường, phường/xã, quận/huyện, tỉnh/thành) ạ?")
         return True
 
-    if state == "waiting_address":
-        info["address"] = text.strip()
-        ctx["order_state"] = "confirm"
+    if state == "ask_address":
+        data["address"] = text.strip()
+        ctx["order_state"] = None
+        ctx["order_data"] = data
+
+        # Xác nhận lại đơn
         summary = (
-            "✅ Thông tin anh/chị cung cấp:\n"
-            f"- Họ tên: {info.get('name','')}\n"
-            f"- SĐT: {info.get('phone','')}\n"
-            f"- Địa chỉ: {info.get('address','')}\n"
+            "Dạ em tóm tắt lại đơn hàng của anh/chị:\n"
+            f"- Sản phẩm: {data.get('productName', '')}\n"
+            f"- Mã: {data.get('ms', '')}\n"
+            f"- Phân loại: {data.get('color', '')} / {data.get('size', '')}\n"
+            f"- Số lượng: {data.get('quantity', '1')}\n"
+            f"- Thành tiền dự kiến: {data.get('total', '')}\n"
+            f"- Người nhận: {data.get('customerName', '')}\n"
+            f"- SĐT: {data.get('phone', '')}\n"
+            f"- Địa chỉ: {data.get('address', '')}\n\n"
+            "Anh/chị kiểm tra giúp em xem đã đúng chưa ạ?"
         )
         send_message(uid, summary)
-        send_quick_replies(
-            uid,
-            "Anh/chị kiểm tra lại giúp em. Nếu đúng rồi bấm 'Xác nhận', nếu muốn sửa bấm 'Sửa thông tin' ạ.",
-            [
-                {
-                    "content_type": "text",
-                    "title": "Xác nhận",
-                    "payload": "ORDER_CONFIRM",
-                },
-                {
-                    "content_type": "text",
-                    "title": "Sửa thông tin",
-                    "payload": "ORDER_EDIT",
-                },
-            ],
-        )
         return True
 
     return False
 
 
 # ============================================
-# GỬI CAROUSEL TOP SẢN PHẨM
+# HANDLE IMAGE
 # ============================================
-
-
-def send_top_products_carousel(uid: str, limit=5):
-    load_products()
-    elements = []
-    count = 0
-    for ms, row in PRODUCTS.items():
-        if count >= limit:
-            break
-        title = row.get("Ten", f"Sản phẩm {ms}")
-        subtitle = row.get("Gia", "")
-        images = parse_image_urls(row.get("Images", ""))
-        image_url = images[0] if images else ""
-
-        domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
-        order_link = f"{domain}/order-form?ms={ms}&uid={uid}"
-
-        buttons = [
-            {
-                "type": "postback",
-                "title": "Xem chi tiết",
-                "payload": f"VIEW_{ms}",
-            },
-            {
-                "type": "web_url",
-                "url": order_link,
-                "title": "Đặt hàng nhanh",
-            },
-        ]
-
-        elements.append(
-            {
-                "title": f"[{ms}] {title}",
-                "subtitle": subtitle,
-                "image_url": image_url,
-                "buttons": buttons,
-            }
-        )
-        count += 1
-
-    if elements:
-        send_carousel_template(uid, elements)
-        ctx = USER_CONTEXT[uid]
-        ctx["carousel_sent"] = True
-
-
-# ============================================
-# OPENAI SIGNATURE (CHO CÁC TÍNH NĂNG NÂNG CAO, NẾU CÓ)
-# ============================================
-
-
-def verify_openai_signature(req) -> bool:
-    """
-    Hàm mẫu nếu sau này bạn cần verify signature của OpenAI Webhook (không bắt buộc).
-    """
-    return True
-
-
-# ============================================
-# GREETING
-# ============================================
-
-
-def maybe_greet(uid: str, ctx: dict, has_ms: bool):
-    now = time.time()
-    if ctx["greeted"]:
-        return
-    if now - ctx.get("last_message_time", 0) < 5:
-        return
-
-    ctx["greeted"] = True
-    ctx["last_message_time"] = now
-
-    send_message(
-        uid,
-        "Em chào anh/chị 😊\nEm là trợ lý chăm sóc khách hàng của shop, hỗ trợ anh/chị xem mẫu, tư vấn size và chốt đơn nhanh ạ.",
-    )
-
 
 def handle_image(uid: str, image_url: str):
     """
-    Khi khách gửi ảnh, bot sẽ gửi sang Fchat nếu có cấu hình,
-    đồng thời nhắc khách cung cấp thêm thông tin.
+    Khi khách gửi ảnh, ta không có OCR nên chỉ trả lời chung chung.
     """
-    ctx = USER_CONTEXT[uid]
-    ctx["last_message_time"] = time.time()
-
     send_message(
         uid,
-        "Dạ em đã nhận được hình anh/chị gửi ạ. Em sẽ kiểm tra mẫu tương tự cho anh/chị.\n"
-        "Trong lúc chờ, anh/chị cho em xin thêm thông tin về size/màu anh/chị thích nhé.",
+        "Dạ em cảm ơn anh/chị đã gửi ảnh.\n"
+        "Hiện tại em chưa xem được chi tiết trong hình. "
+        "Anh/chị giúp em gửi kèm mã sản phẩm hoặc mô tả sản phẩm cần tư vấn nhé.",
     )
 
 
 # ============================================
-# XỬ LÝ TEXT
+# HANDLE TEXT
 # ============================================
 
+def detect_ms_from_text(text: str):
+    """
+    Tìm mã sản phẩm dạng [MS000123] trong tin nhắn.
+    """
+    ms_list = re.findall(r"\[MS(\d{6})\]", text.upper())
+    if ms_list:
+        return "MS" + ms_list[0]
+    return None
 
-def handle_text(uid: str, text: str):
+
+def find_latest_ms_in_context(uid: str):
+    """
+    Lấy mã sản phẩm gần nhất trong context của user (nếu có).
+    """
     ctx = USER_CONTEXT[uid]
-    ctx["last_message_time"] = time.time()
-
-    load_products()
-
-    # Reset postback counter khi có text mới
-    ctx["postback_count"] = 0
-
-    # Xử lý order form trước
-    if handle_order_form_step(uid, text):
-        return
-
-    # Tìm mã sản phẩm trong tin nhắn
-    ms_from_text = extract_ms(text)
-    if not ms_from_text:
-        short = extract_short_code(text)
-        if short:
-            ms_from_text = find_ms_by_short_code(short)
-
-    # Cập nhật last_ms nếu tìm thấy mã
-    if ms_from_text:
-        ctx["last_ms"] = ms_from_text
-        ctx["current_product_ms"] = ms_from_text
-        print(f"[TEXT] User {uid} đang hỏi về sản phẩm {ms_from_text}")
-
-    ms = ctx.get("current_product_ms")
-    product = PRODUCTS.get(ms) if ms else None
-
-    # Lưu history
-    ctx["history"].append({"role": "user", "content": text})
-
-    lower_text = text.lower()
-
-    # Trả lời nhanh dựa trên sản phẩm hiện tại nếu có
-    if product and ms:
-        if any(keyword in lower_text for keyword in ["giá", "bao nhiêu tiền", "nhiêu tiền"]):
-            reply = f"Dạ sản phẩm [{ms}] {product.get('Ten','')} đang có giá {product.get('Gia','')} ạ.\nAnh/chị muốn em tư vấn thêm về size hoặc màu không ạ?"
-            send_message(uid, reply)
-            ctx["history"].append({"role": "assistant", "content": reply})
-            return
-        elif any(
-            keyword in lower_text
-            for keyword in ["size nào", "có size", "size gì", "size nào", "size bao nhiêu"]
-        ):
-            size_info = product.get("size (Thuộc tính)", "Không có thông tin")
-            reply = f"Dạ sản phẩm này có các size: {size_info}\n\nAnh/chị quan tâm size nào ạ?"
-            send_message(uid, reply)
-            ctx["history"].append({"role": "assistant", "content": reply})
-            return
-        elif any(
-            keyword in lower_text
-            for keyword in ["màu nào", "có màu", "màu gì", "màu nào", "màu sắc"]
-        ):
-            color_info = product.get("màu (Thuộc tính)", "Không có thông tin")
-            reply = f"Dạ sản phẩm này có các màu: {color_info}\n\nAnh/chị quan tâm màu nào ạ?"
-            send_message(uid, reply)
-            ctx["history"].append({"role": "assistant", "content": reply})
-            return
-        elif any(
-            keyword in lower_text
-            for keyword in ["tồn kho", "còn hàng", "hết hàng", "bao nhiêu cái"]
-        ):
-            stock_info = product.get("Tồn kho", "Không có thông tin")
-            reply = f"Dạ sản phẩm này hiện còn {stock_info} cái trong kho ạ.\n\nAnh/chị muốn đặt bao nhiêu ạ?"
-            send_message(uid, reply)
-            ctx["history"].append({"role": "assistant", "content": reply})
-            return
-        elif any(
-            keyword in lower_text
-            for keyword in ["xem hàng", "xem sản phẩm", "xem mẫu", "có được xem"]
-        ):
-            desc = product.get("MoTa", "Sản phẩm có sẵn để xem và đặt hàng ạ.")
-            reply = (
-                f"Dạ anh/chị có thể xem hàng qua hình ảnh em đã gửi. {desc[:100]}...\n\n"
-                "Anh/chị muốn xem thêm hình ảnh nào không ạ?"
-            )
-            send_message(uid, reply)
-            ctx["history"].append({"role": "assistant", "content": reply})
-            return
-
-    # Gọi GPT để trả lời với thông tin sản phẩm hiện tại
-    reply = gpt_reply(ctx["history"], product, ms)
-    ctx["history"].append({"role": "assistant", "content": reply})
-
-    # Chỉ gửi reply nếu không phải đang trong order process
-    if not ctx.get("order_state"):
-        send_message(uid, reply)
-
-    # Kiểm tra từ khóa đặt hàng
-    lower = text.lower()
-    if ms and ms in PRODUCTS and any(kw in lower for kw in ORDER_KEYWORDS):
-        domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
-        order_link = f"{domain}/order-form?ms={ms}&uid={uid}"
-        send_message(uid, f"📋 Anh/chị có thể đặt hàng ngay tại đây:\n{order_link}")
-
-
-# ============================================
-# ECHO & REF / FCHAT
-# ============================================
-
-
-def extract_ms_from_ref(ref: str | None):
-    if not ref:
-        return None
-    return extract_ms(ref)
-
-
-def handle_echo_outgoing(page_id: str, user_id: str, text: str, mid: str = ""):
-    if not user_id:
-        return
-    ms = extract_ms(text)
-    if ms:
-        ctx = USER_CONTEXT[user_id]
-        ctx["last_ms"] = ms
-        ctx["current_product_ms"] = ms
-        ctx["history"].append({"role": "assistant", "content": text})
-        print(f"[ECHO OUTGOING] page={page_id}, user={user_id}, ms={ms}, mid={mid}")
-
-
-# ============================================
-# WEBHOOK
-# ============================================
-
-app = Flask(__name__)
-
-
-@app.route("/webhook", methods=["GET", "POST"])
-def webhook():
-    if request.method == "GET":
-        if request.args.get("hub.verify_token") == VERIFY_TOKEN:
-            return request.args.get("hub.challenge")
-        return "Token không hợp lệ", 403
-
-    data = request.get_json() or {}
-    print("WEBHOOK:", json.dumps(data, ensure_ascii=False))
-
-    for entry in data.get("entry", []):
-        for ev in entry.get("messaging", []):
-            sender_id = ev.get("sender", {}).get("id")
-            recipient_id = ev.get("recipient", {}).get("id")
-            message = ev.get("message", {})
-            postback = ev.get("postback")
-            is_echo = message.get("is_echo", False)
-
-            if not sender_id:
-                continue
-
-            # BỎ QUA ECHO CỦA BOT (đã có message_id)
-            if is_echo:
-                mid = message.get("mid")
-                text = message.get("text", "")
-                attachments = message.get("attachments", [])
-
-                ctx = USER_CONTEXT[recipient_id or sender_id]
-                if mid and mid in ctx.get("sent_message_ids", set()):
-                    print(f"[ECHO SKIP] Bỏ qua echo của tin nhắn bot đã gửi: {mid}")
-                    continue
-
-                if text:
-                    handle_echo_outgoing(
-                        page_id=sender_id, user_id=recipient_id, text=text, mid=mid
-                    )
-                elif attachments:
-                    print(f"[ECHO SKIP] Bỏ qua echo attachments từ bot: {mid}")
-                continue
-
-            ctx = USER_CONTEXT[sender_id]
-
-            # KIỂM TRA LOCK ĐỂ TRÁNH XỬ LÝ TRÙNG
-            if ctx.get("processing_lock"):
-                # Nếu lock đã giữ quá 5s thì coi như bị kẹt và mở lại
-                if time.time() - ctx.get("last_message_time", 0) > 5:
-                    ctx["processing_lock"] = False
-                else:
-                    print(f"[SKIP] User {sender_id} đang được xử lý, bỏ qua sự kiện mới")
-                    return "ok"
-
-            # SET LOCK
-            ctx["processing_lock"] = True
-            ctx["last_message_time"] = time.time()
-            try:
-                if "postback" in ev:
-                    current_time = time.time()
-                    payload = ev["postback"].get("payload")
-
-                    # KIỂM TRA DEBOUNCE: NẾU CÙNG PAYLOAD TRONG VÒNG 3 GIÂY THÌ BỎ QUA
-                    if (
-                        payload == ctx.get("last_postback_payload")
-                        and current_time - ctx.get("last_postback_time", 0) < 3
-                    ):
-                        print(
-                            f"[DEBOUNCE] Bỏ qua postback trùng lặp payload={payload} user={sender_id}"
-                        )
-                        return "ok"
-
-                    ctx["last_postback_payload"] = payload
-                    ctx["last_postback_time"] = current_time
-                    ctx["postback_count"] = ctx.get("postback_count", 0) + 1
-
-                    # Nếu postback quá nhiều trong thời gian ngắn -> gửi cảnh báo nhẹ
-                    if ctx["postback_count"] > 5:
-                        send_message(
-                            sender_id,
-                            "Dạ em thấy anh/chị thao tác khá nhiều, nếu cần hỗ trợ gì cứ nhắn cho em nhé.",
-                        )
-
-                    # XỬ LÝ NÚT BẤM ORDER FORM
-                    if payload and payload.startswith("ORDER_"):
-                        if payload == "ORDER_PROVIDE_NAME":
-                            ctx["order_state"] = "waiting_name"
-                            send_message(
-                                sender_id, "👤 Vui lòng nhập họ tên người nhận hàng:"
-                            )
-                            return "ok"
-                        elif payload == "ORDER_PROVIDE_PHONE":
-                            ctx["order_state"] = "waiting_phone"
-                            send_message(
-                                sender_id,
-                                "📱 Vui lòng nhập số điện thoại (ví dụ: 0912345678 hoặc +84912345678):",
-                            )
-                            return "ok"
-                        elif payload == "ORDER_PROVIDE_ADDRESS":
-                            ctx["order_state"] = "waiting_address"
-                            send_message(
-                                sender_id, "🏠 Vui lòng nhập địa chỉ giao hàng chi tiết:"
-                            )
-                            return "ok"
-                        elif payload == "ORDER_CONFIRM":
-                            send_order_confirmation(sender_id)
-                            return "ok"
-                        elif payload == "ORDER_EDIT":
-                            ctx["order_state"] = "waiting_name"
-                            send_message(
-                                sender_id,
-                                "✏️ Vui lòng nhập lại họ tên người nhận:",
-                            )
-                            return "ok"
-
-                    # XỬ LÝ VIEW PRODUCT
-                    if payload and payload.startswith("VIEW_"):
-                        product_code = payload.replace("VIEW_", "")
-
-                        # KIỂM TRA NẾU ĐÃ GỬI SẢN PHẨM NÀY GẦN ĐÂY (10 GIÂY)
-                        if (
-                            ctx.get("product_info_sent_ms") == product_code
-                            and current_time - ctx.get("last_product_info_time", 0) < 10
-                        ):
-                            print(
-                                f"[PRODUCT INFO SKIP] Đã gửi {product_code} gần đây"
-                            )
-                            send_message(
-                                sender_id,
-                                f"Bạn đang xem sản phẩm {product_code}. Cần em hỗ trợ gì thêm không ạ?",
-                            )
-                            return "ok"
-
-                        if product_code in PRODUCTS:
-                            ctx["last_ms"] = product_code
-                            ctx["current_product_ms"] = product_code
-                            send_product_info_debounced(sender_id, product_code)
-                        else:
-                            send_message(
-                                sender_id,
-                                f"Dạ em không tìm thấy sản phẩm mã {product_code} ạ.",
-                            )
-                        return "ok"
-
-                    elif payload and payload.startswith("SELECT_"):
-                        product_code = payload.replace("SELECT_", "")
-                        if product_code in PRODUCTS:
-                            ctx["last_ms"] = product_code
-                            ctx["current_product_ms"] = product_code
-                            send_product_info_debounced(sender_id, product_code)
-                        else:
-                            send_message(
-                                sender_id,
-                                f"Dạ em không tìm thấy sản phẩm mã {product_code} ạ.",
-                            )
-                        return "ok"
-
-                    elif payload == "SHOW_MORE_PRODUCTS":
-                        send_top_products_carousel(sender_id, limit=10)
-                        return "ok"
-
-                    elif payload == "CHAT_WITH_STAFF":
-                        send_message(
-                            sender_id,
-                            "Dạ anh/chị chờ một chút, em sẽ chuyển thông tin cho nhân viên hỗ trợ ạ.",
-                        )
-                        return "ok"
-
-                    elif payload == "VIEW_ORDER_FORM":
-                        ms = ctx.get("current_product_ms") or ctx.get("last_ms")
-                        if not ms or ms not in PRODUCTS:
-                            send_message(
-                                sender_id,
-                                "Dạ em chưa biết anh/chị đang quan tâm mẫu nào. Anh/chị gửi giúp em mã sản phẩm hoặc hình ảnh ạ.",
-                            )
-                            return "ok"
-
-                        domain = (
-                            DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
-                        )
-                        order_link = f"{domain}/order-form?ms={ms}&uid={sender_id}"
-                        send_message(
-                            sender_id,
-                            f"📋 Anh/chị có thể đặt hàng sản phẩm [{ms}] ngay tại đây:\n{order_link}",
-                        )
-                        return "ok"
-
-                    # XỬ LÝ REFERRAL
-                    ref = ev["postback"].get("referral", {}).get("ref")
-                    if ref:
-                        ms_ref = extract_ms_from_ref(ref)
-                        if ms_ref:
-                            ctx["inbox_entry_ms"] = ms_ref
-                            ctx["last_ms"] = ms_ref
-                            ctx["current_product_ms"] = ms_ref
-                            print(f"[REF] Nhận mã từ referral: {ms_ref}")
-                            ctx["greeted"] = True
-                            send_product_info_debounced(sender_id, ms_ref)
-                            return "ok"
-
-                    # DEFAULT RESPONSE
-                    if not ctx["greeted"]:
-                        maybe_greet(sender_id, ctx, has_ms=False)
-                    send_message(
-                        sender_id,
-                        "Anh/chị cho em biết đang quan tâm mẫu nào hoặc gửi ảnh mẫu để em xem giúp ạ.",
-                    )
-                    return "ok"
-
-                # XỬ LÝ REFERRAL TỪ MESSAGING
-                ref = ev.get("referral", {}).get("ref") or ev.get(
-                    "postback", {}
-                ).get("referral", {}).get("ref")
-                if ref:
-                    ms_ref = extract_ms_from_ref(ref)
-                    if ms_ref:
-                        ctx["inbox_entry_ms"] = ms_ref
-                        ctx["last_ms"] = ms_ref
-                        ctx["current_product_ms"] = ms_ref
-                        print(f"[REF] Nhận mã từ referral messaging: {ms_ref}")
-                        send_product_info_debounced(sender_id, ms_ref)
-                        return "ok"
-
-                # XỬ LÝ ATTACHMENTS (ẢNH)
-                if "message" in ev and "attachments" in message:
-                    for att in message.get("attachments", []):
-                        if att.get("type") == "image":
-                            image_url = att.get("payload", {}).get("url")
-                            handle_image(sender_id, image_url)
-                            return "ok"
-
-                # XỬ LÝ TEXT MESSAGE
-                if "message" in ev and "text" in message:
-                    if not message.get("is_echo"):
-                        text = message.get("text", "")
-                        handle_text(sender_id, text)
-                        return "ok"
-
-            finally:
-                # RELEASE LOCK
-                ctx["processing_lock"] = False
-                # Reset postback counter sau 10 giây
-                if time.time() - ctx.get("last_postback_time", 0) > 10:
-                    ctx["postback_count"] = 0
-
-    return "ok"
-
-
-# ============================================
-# SEND PRODUCT INFO (DEBOUNCED)
-# ============================================
+    ms = ctx.get("last_ms")
+    if ms and ms in PRODUCTS:
+        return ms
+    return None
 
 
 def send_product_info_debounced(uid: str, ms: str):
@@ -1082,21 +550,21 @@ def send_product_info_debounced(uid: str, ms: str):
     load_products()
     product = PRODUCTS.get(ms)
     if not product:
-        send_message(uid, f"Em không tìm thấy thông tin sản phẩm [{ms}] ạ.")
+        send_message(uid, "Em không tìm thấy sản phẩm này trong hệ thống, anh/chị kiểm tra lại mã giúp em ạ.")
         return
 
-    images = parse_image_urls(product.get("Images", ""))
-    sent_first = False
-    for url in images[:5]:
-        if not should_use_as_first_image(url):
-            continue
-        if not sent_first:
-            send_image(uid, url)
-            sent_first = True
-        else:
-            send_image(uid, url)
-        time.sleep(0.3)
+    # Gửi ảnh sản phẩm (1 ảnh đại diện)
+    images_field = product.get("Images", "")
+    urls = parse_image_urls(images_field)
+    main_image = ""
+    for u in urls:
+        if should_use_as_first_image(u):
+            main_image = u
+            break
+    if main_image:
+        send_image(uid, main_image)
 
+    # Mô tả ngắn gọn, đủ ý
     short_desc = product.get("ShortDesc") or short_description(product.get("MoTa", ""))
     detail = (
         f"📌 Thông tin sản phẩm [{ms}] {product.get('Ten','')}:\n"
@@ -1106,7 +574,6 @@ def send_product_info_debounced(uid: str, ms: str):
         f"- Tồn kho: {product.get('Tồn kho','')}\n\n"
         f"{short_desc}"
     )
-
     send_message(uid, detail)
 
     domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
@@ -1114,245 +581,334 @@ def send_product_info_debounced(uid: str, ms: str):
     send_message(uid, f"📋 Anh/chị có thể đặt hàng ngay tại đây:\n{order_link}")
 
 
-# ============================================
-# ORDER FORM & API - CẢI THIỆN
-# ============================================
+def handle_text(uid: str, text: str):
+    ctx = USER_CONTEXT[uid]
+
+    if ctx.get("processing_lock"):
+        print(f"[TEXT SKIP] User {uid} đang được xử lý")
+        return
+
+    ctx["processing_lock"] = True
+
+    try:
+        load_products()
+
+        # Reset postback counter khi có text mới
+        ctx["postback_count"] = 0
+
+        # Xử lý order form trước
+        if handle_order_form_step(uid, text):
+            return
+
+        # Thử lấy mã sản phẩm từ text
+        ms = detect_ms_from_text(text)
+        if not ms:
+            ms = find_latest_ms_in_context(uid)
+
+        if ms and ms in PRODUCTS:
+            USER_CONTEXT[uid]["last_ms"] = ms
+
+        # Gọi GPT trả lời
+        reply = build_chatgpt_reply(uid, text, ms)
+
+        # Chỉ gửi reply nếu không phải đang trong order process
+        if not ctx.get("order_state"):
+            send_message(uid, reply)
+
+        # Kiểm tra từ khóa đặt hàng
+        lower = text.lower()
+        if ms and ms in PRODUCTS and any(kw in lower for kw in ORDER_KEYWORDS):
+            domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
+            order_link = f"{domain}/order-form?ms={ms}&uid={uid}"
+            send_message(uid, f"📋 Anh/chị có thể đặt hàng ngay tại đây:\n{order_link}")
+
+    finally:
+        ctx["processing_lock"] = False
 
 
-@app.route("/order-form")
+# ============================================
+# WEBHOOK HANDLER
+# ============================================
+
+@app.route("/", methods=["GET"])
+def home():
+    return "OK", 200
+
+
+@app.route("/webhook", methods=["GET", "POST"])
+def webhook():
+    if request.method == "GET":
+        mode = request.args.get("hub.mode")
+        token = request.args.get("hub.verify_token")
+        challenge = request.args.get("hub.challenge")
+        if mode == "subscribe" and token == VERIFY_TOKEN:
+            return challenge, 200
+        return "Verification token mismatch", 403
+
+    data = request.get_json() or {}
+    print("Webhook received:", json.dumps(data, ensure_ascii=False))
+
+    entry = data.get("entry", [])
+    for e in entry:
+        messaging = e.get("messaging", [])
+        for m in messaging:
+            sender_id = m.get("sender", {}).get("id")
+            if not sender_id:
+                continue
+
+            # Echo handler
+            if "message" in m:
+                msg = m["message"]
+                text = msg.get("text")
+                attachments = msg.get("attachments") or []
+                if text:
+                    handle_text(sender_id, text)
+                elif attachments:
+                    for att in attachments:
+                        if att.get("type") == "image":
+                            image_url = att.get("payload", {}).get("url")
+                            if image_url:
+                                handle_image(sender_id, image_url)
+
+            if "postback" in m:
+                payload = m["postback"].get("payload")
+                if payload:
+                    handle_postback(sender_id, payload)
+
+    return "OK", 200
+
+
+# ============================================
+# POSTBACK HANDLER
+# ============================================
+
+def handle_postback(uid: str, payload: str):
+    ctx = USER_CONTEXT[uid]
+    ctx["postback_count"] = ctx.get("postback_count", 0) + 1
+
+    if payload == "GET_STARTED":
+        send_message(
+            uid,
+            f"Em chào anh/chị, em là trợ lý bán hàng của {FANPAGE_NAME}. "
+            "Anh/chị cần em tư vấn sản phẩm hoặc hỗ trợ đặt hàng gì không ạ?",
+        )
+        return
+
+    # Các postback khác do bạn tự định nghĩa nếu cần
+    send_message(uid, "Dạ em đã nhận được thao tác của anh/chị ạ.")
+
+
+# ============================================
+# ORDER FORM PAGE
+# ============================================
+
+@app.route("/order-form", methods=["GET"])
 def order_form():
     ms = (request.args.get("ms") or "").upper()
     uid = request.args.get("uid") or ""
+    if not ms:
+        return (
+            """
+        <html>
+        <body style="text-align: center; padding: 50px; font-family: Arial, sans-serif;">
+            <h2 style="color: #FF3B30;">⚠️ Không tìm thấy sản phẩm</h2>
+            <p>Vui lòng quay lại Messenger và chọn sản phẩm để đặt hàng.</p>
+            <a href="/" style="color: #1DB954; text-decoration: none; font-weight: bold;">Quay về trang chủ</a>
+        </body>
+        </html>
+        """,
+            400,
+        )
 
     load_products()
     if ms not in PRODUCTS:
-        return "Không tìm thấy sản phẩm.", 404
+        return (
+            """
+        <html>
+        <body style="text-align: center; padding: 50px; font-family: Arial, sans-serif;">
+            <h2 style="color: #FF3B30;">⚠️ Sản phẩm không tồn tại</h2>
+            <p>Vui lòng quay lại Messenger và chọn sản phẩm khác giúp shop ạ.</p>
+            <a href="/" style="color: #1DB954; text-decoration: none; font-weight: bold;">Quay về trang chủ</a>
+        </body>
+        </html>
+        """,
+            404,
+        )
 
     row = PRODUCTS[ms]
     images_field = row.get("Images", "")
     urls = parse_image_urls(images_field)
-    image = urls[0] if urls else ""
+    image = ""
+    for u in urls:
+        if should_use_as_first_image(u):
+            image = u
+            break
+    if not image and urls:
+        image = urls[0]
 
     size_field = row.get("size (Thuộc tính)", "")
     color_field = row.get("màu (Thuộc tính)", "")
 
-    # Xử lý size - tách bằng dấu phẩy
     sizes = []
     if size_field:
         sizes = [s.strip() for s in size_field.split(",") if s.strip()]
 
-    # Xử lý màu - tách bằng dấu phẩy
     colors = []
     if color_field:
         colors = [c.strip() for c in color_field.split(",") if c.strip()]
 
-    # Nếu không có size/color thì dùng mặc định
     if not sizes:
         sizes = ["Mặc định"]
     if not colors:
         colors = ["Mặc định"]
 
-    page_name = FANPAGE_NAME or "Trang Facebook"
+    price_str = row.get("Gia", "0")
+    price_int = extract_price_int(price_str) or 0
 
-    # Template HTML đơn giản
     html = f"""
-<!DOCTYPE html>
-<html lang="vi">
-<head>
-    <meta charset="UTF-8" />
-    <title>Đặt hàng - {page_name}</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <style>
-        body {{
-            font-family: Arial, sans-serif;
-            margin: 0; padding: 0;
-            background: #f5f5f5;
-        }}
-        .container {{
-            max-width: 500px;
-            margin: 0 auto;
-            background: #fff;
-            padding: 16px;
-        }}
-        .product {{
-            display: flex;
-            gap: 10px;
-        }}
-        .product img {{
-            max-width: 150px;
-            border-radius: 4px;
-        }}
-        .field {{
-            margin-bottom: 12px;
-        }}
-        label {{
-            display: block;
-            font-weight: bold;
-            margin-bottom: 4px;
-        }}
-        input, select, textarea {{
-            width: 100%;
-            padding: 8px;
-            box-sizing: border-box;
-        }}
-        button {{
-            background: #2b7cff;
-            color: #fff;
-            border: none;
-            border-radius: 4px;
-            padding: 10px 16px;
-            cursor: pointer;
-            font-size: 16px;
-        }}
-        button:disabled {{
-            background: #ccc;
-            cursor: not-allowed;
-        }}
-        .price-display {{
-            font-size: 18px;
-            font-weight: bold;
-            color: #e53935;
-        }}
-        .note {{
-            font-size: 12px;
-            color: #666;
-        }}
-    </style>
-</head>
-<body>
-<div class="container">
-    <h2>Đặt hàng sản phẩm</h2>
-    <div class="product">
-        <div>
-            <img src="{image}" alt="Sản phẩm" />
-        </div>
-        <div>
-            <div><strong>{row.get("Ten","")}</strong></div>
-            <div>Mã: <strong>{ms}</strong></div>
-            <div class="price-display" id="priceDisplay">Đang tải giá...</div>
-        </div>
-    </div>
+    <html>
+    <head>
+        <meta charset="utf-8" />
+        <title>Đặt hàng - {row.get('Ten','')}</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+    </head>
+    <body style="font-family: Arial, sans-serif; margin: 0; padding: 0; background: #f5f5f5;">
+        <div style="max-width: 480px; margin: 0 auto; background: #fff; min-height: 100vh;">
+            <div style="padding: 16px; border-bottom: 1px solid #eee; text-align: center;">
+                <h2 style="margin: 0; font-size: 18px;">ĐẶT HÀNG - {FANPAGE_NAME}</h2>
+            </div>
+            <div style="padding: 16px;">
+                <div style="display: flex; gap: 12px;">
+                    <div style="width: 120px; height: 120px; overflow: hidden; border-radius: 8px; background: #f0f0f0;">
+                        {"<img src='" + image + "' style='width: 100%; height: 100%; object-fit: cover;' />" if image else ""}
+                    </div>
+                    <div style="flex: 1;">
+                        <h3 style="margin-top: 0; font-size: 16px;">[{ms}] {row.get('Ten','')}</h3>
+                        <div style="color: #FF3B30; font-weight: bold; font-size: 16px;" id="price-display">
+                            {price_int:,.0f} đ
+                        </div>
+                    </div>
+                </div>
 
-    <hr />
+                <div style="margin-top: 16px;">
+                    <label for="color" style="display: block; margin-bottom: 4px; font-size: 14px;">Màu sắc:</label>
+                    <select id="color" style="width: 100%; padding: 8px; border-radius: 4px; border: 1px solid #ccc;">
+                        {''.join(f"<option value='{c}'>{c}</option>" for c in colors)}
+                    </select>
+                </div>
 
-    <form id="orderForm">
-        <input type="hidden" name="ms" value="{ms}" />
-        <input type="hidden" name="uid" value="{uid}" />
+                <div style="margin-top: 12px;">
+                    <label for="size" style="display: block; margin-bottom: 4px; font-size: 14px;">Size:</label>
+                    <select id="size" style="width: 100%; padding: 8px; border-radius: 4px; border: 1px solid #ccc;">
+                        {''.join(f"<option value='{s}'>{s}</option>" for s in sizes)}
+                    </select>
+                </div>
 
-        <div class="field">
-            <label for="color">Màu sắc</label>
-            <select name="color" id="color">
-                {''.join(f'<option value="{{c}}">{{c}}</option>' for c in colors)}
-            </select>
+                <div style="margin-top: 12px;">
+                    <label for="quantity" style="display: block; margin-bottom: 4px; font-size: 14px;">Số lượng:</label>
+                    <input type="number" id="quantity" value="1" min="1" style="width: 100%; padding: 8px; border-radius: 4px; border: 1px solid #ccc;" />
+                </div>
+
+                <div style="margin-top: 16px; padding: 12px; background: #f9f9f9; border-radius: 8px;">
+                    <div style="font-size: 14px; margin-bottom: 4px;">Tạm tính:</div>
+                    <div id="total-display" style="font-size: 18px; color: #FF3B30; font-weight: bold;">
+                        {price_int:,.0f} đ
+                    </div>
+                </div>
+
+                <div style="margin-top: 16px;">
+                    <label for="customerName" style="display: block; margin-bottom: 4px; font-size: 14px;">Họ và tên:</label>
+                    <input type="text" id="customerName" style="width: 100%; padding: 8px; border-radius: 4px; border: 1px solid #ccc;" />
+                </div>
+
+                <div style="margin-top: 12px;">
+                    <label for="phone" style="display: block; margin-bottom: 4px; font-size: 14px;">Số điện thoại:</label>
+                    <input type="tel" id="phone" style="width: 100%; padding: 8px; border-radius: 4px; border: 1px solid #ccc;" />
+                </div>
+
+                <div style="margin-top: 12px;">
+                    <label for="address" style="display: block; margin-bottom: 4px; font-size: 14px;">Địa chỉ nhận hàng:</label>
+                    <textarea id="address" rows="3" style="width: 100%; padding: 8px; border-radius: 4px; border: 1px solid #ccc;"></textarea>
+                </div>
+
+                <button onclick="submitOrder()" style="margin-top: 20px; width: 100%; padding: 12px; border-radius: 999px; border: none; background: #1DB954; color: #fff; font-size: 16px; font-weight: bold;">
+                    ĐẶT HÀNG NGAY
+                </button>
+
+                <p style="margin-top: 12px; font-size: 12px; color: #666; text-align: center;">
+                    Shop sẽ gọi xác nhận trong 5-10 phút. Thanh toán khi nhận hàng (COD).
+                </p>
+            </div>
         </div>
 
-        <div class="field">
-            <label for="size">Size</label>
-            <select name="size" id="size">
-                {''.join(f'<option value="{{s}}">{{s}}</option>' for s in sizes)}
-            </select>
-        </div>
+        <script>
+            const basePrice = {price_int};
 
-        <div class="field">
-            <label for="name">Họ tên người nhận</label>
-            <input type="text" id="name" name="name" required />
-        </div>
+            function formatPrice(n) {{
+                return n.toLocaleString('vi-VN') + ' đ';
+            }}
 
-        <div class="field">
-            <label for="phone">Số điện thoại</label>
-            <input type="tel" id="phone" name="phone" required />
-        </div>
+            async function updatePriceByVariant() {{
+                const color = document.getElementById('color').value;
+                const size = document.getElementById('size').value;
+                const quantity = parseInt(document.getElementById('quantity').value || '1');
 
-        <div class="field">
-            <label for="address">Địa chỉ nhận hàng</label>
-            <textarea id="address" name="address" rows="3" required></textarea>
-        </div>
+                try {{
+                    const res = await fetch(`/api/get-variant-price?ms={ms}&color=${{encodeURIComponent(color)}}&size=${{encodeURIComponent(size)}}`);
+                    if (!res.ok) throw new Error('request failed');
+                    const data = await res.json();
+                    const price = data.price || basePrice;
 
-        <div class="field">
-            <label for="note">Ghi chú thêm</label>
-            <textarea id="note" name="note" rows="2"></textarea>
-        </div>
+                    document.getElementById('price-display').innerText = formatPrice(price);
+                    document.getElementById('total-display').innerText = formatPrice(price * quantity);
+                }} catch (e) {{
+                    document.getElementById('price-display').innerText = formatPrice(basePrice);
+                    document.getElementById('total-display').innerText = formatPrice(basePrice * quantity);
+                }}
+            }}
 
-        <button type="submit" id="submitBtn">Gửi đơn hàng</button>
-        <p class="note">
-            Sau khi gửi, shop sẽ liên hệ xác nhận đơn trước khi giao hàng.
-        </p>
-    </form>
-</div>
+            document.getElementById('color').addEventListener('change', updatePriceByVariant);
+            document.getElementById('size').addEventListener('change', updatePriceByVariant);
+            document.getElementById('quantity').addEventListener('input', updatePriceByVariant);
 
-<script>
-const ms = "{ms}";
+            async function submitOrder() {{
+                const color = document.getElementById('color').value;
+                const size = document.getElementById('size').value;
+                const quantity = parseInt(document.getElementById('quantity').value || '1');
+                const customerName = document.getElementById('customerName').value;
+                const phone = document.getElementById('phone').value;
+                const address = document.getElementById('address').value;
 
-async function updatePrice() {{
-    const colorEl = document.getElementById("color");
-    const sizeEl = document.getElementById("size");
-    const priceDisplay = document.getElementById("priceDisplay");
+                const res = await fetch('/api/submit-order', {{
+                    method: 'POST',
+                    headers: {{
+                        'Content-Type': 'application/json'
+                    }},
+                    body: JSON.stringify({{
+                        ms: "{ms}",
+                        uid: "{uid}",
+                        color,
+                        size,
+                        quantity,
+                        customerName,
+                        phone,
+                        address
+                    }})
+                }});
 
-    const color = colorEl ? colorEl.value : "";
-    const size = sizeEl ? sizeEl.value : "";
-
-    priceDisplay.textContent = "Đang cập nhật giá...";
-
-    try {{
-        const url = `/api/get-variant-price?ms=${{encodeURIComponent(ms)}}&color=${{encodeURIComponent(color)}}&size=${{encodeURIComponent(size)}}`;
-        const res = await fetch(url);
-        if (!res.ok) {{
-            throw new Error("Không lấy được giá");
-        }}
-        const data = await res.json();
-        if (data.price_display) {{
-            priceDisplay.textContent = "Giá: " + data.price_display;
-        }} else {{
-            priceDisplay.textContent = "Giá: Liên hệ";
-        }}
-    }} catch (err) {{
-        console.error(err);
-        priceDisplay.textContent = "Giá: Liên hệ";
-    }}
-}}
-
-document.getElementById("color").addEventListener("change", updatePrice);
-document.getElementById("size").addEventListener("change", updatePrice);
-
-document.addEventListener("DOMContentLoaded", updatePrice);
-
-const form = document.getElementById("orderForm");
-form.addEventListener("submit", async function(e) {{
-    e.preventDefault();
-    const submitBtn = document.getElementById("submitBtn");
-    submitBtn.disabled = true;
-    submitBtn.textContent = "Đang gửi...";
-
-    const formData = new FormData(form);
-    const payload = {{}};
-    for (const [key, value] of formData.entries()) {{
-        payload[key] = value;
-    }}
-
-    try {{
-        const res = await fetch("/api/order", {{
-            method: "POST",
-            headers: {{
-                "Content-Type": "application/json"
-            }},
-            body: JSON.stringify(payload)
-        }});
-        const data = await res.json();
-        alert(data.message || "Đã gửi đơn hàng thành công!");
-    }} catch (err) {{
-        console.error(err);
-        alert("Có lỗi xảy ra khi gửi đơn hàng. Anh/chị thử lại giúp em nhé.");
-    }} finally {{
-        submitBtn.disabled = false;
-        submitBtn.textContent = "Gửi đơn hàng";
-    }}
-}});
-</script>
-</body>
-</html>
-"""
+                const data = await res.json();
+                alert(data.message || 'Đã gửi đơn hàng thành công, shop sẽ liên hệ lại anh/chị sớm nhất!');
+            }}
+        </script>
+    </body>
+    </html>
+    """
     return html
 
+
+# ============================================
+# API: GET PRODUCT (CHO FORM)
+# ============================================
 
 @app.route("/api/get-product")
 def api_get_product():
@@ -1369,17 +925,14 @@ def api_get_product():
     size_field = row.get("size (Thuộc tính)", "")
     color_field = row.get("màu (Thuộc tính)", "")
 
-    # Xử lý size - tách bằng dấu phẩy
     sizes = []
     if size_field:
         sizes = [s.strip() for s in size_field.split(",") if s.strip()]
 
-    # Xử lý màu - tách bằng dấu phẩy
     colors = []
     if color_field:
         colors = [c.strip() for c in color_field.split(",") if c.strip()]
 
-    # Nếu không có size/color thì dùng mặc định
     if not sizes:
         sizes = ["Mặc định"]
     if not colors:
@@ -1391,103 +944,17 @@ def api_get_product():
     return {
         "ms": ms,
         "name": row.get("Ten", ""),
-        "price": price_int,
-        "price_display": row.get("Gia", "0"),
-        "desc": short_description(row.get("MoTa", "")),
         "image": image,
-        "page_name": FANPAGE_NAME,
         "sizes": sizes,
         "colors": colors,
-        "all_sizes": sizes,
-        "all_colors": colors,
+        "price": price_int,
+        "price_display": f"{price_int:,.0f} đ",
     }
 
 
-@app.route("/api/order", methods=["POST"])
-def api_order():
-    data = request.get_json() or {}
-    ms = (data.get("ms") or "").upper()
-    uid = data.get("uid") or ""
-    name = (data.get("name") or "").strip()
-    phone = re.sub(r"\D", "", data.get("phone") or "")
-    address = (data.get("address") or "").strip()
-    note = (data.get("note") or "").strip()
-    color = (data.get("color") or "").strip()
-    size = (data.get("size") or "").strip()
-
-    if not ms or ms not in PRODUCTS:
-        return {"error": "Sản phẩm không tồn tại."}, 400
-
-    if not name or not phone or not address:
-        return {"error": "Thiếu thông tin bắt buộc."}, 400
-
-    row = PRODUCTS[ms]
-
-    # Ở đây bạn có thể tích hợp gửi đơn qua Fchat, Google Sheet, v.v.
-    print("====== NEW ORDER ======")
-    print("UID:", uid)
-    print("Mã SP:", ms)
-    print("Tên SP:", row.get("Ten", ""))
-    print("Màu:", color)
-    print("Size:", size)
-    print("Tên khách:", name)
-    print("SĐT:", phone)
-    print("Địa chỉ:", address)
-    print("Ghi chú:", note)
-    print("=======================")
-
-    # Gửi lại xác nhận cho khách (nếu uid là PSID)
-    if uid:
-        msg = (
-            f"Dạ em đã nhận được đơn hàng của anh/chị.\n"
-            f"Sản phẩm: [{ms}] {row.get('Ten','')}\n"
-            f"Màu: {color}\n"
-            f"Size: {size}\n"
-            f"Người nhận: {name}\n"
-            f"SĐT: {phone}\n"
-            f"Địa chỉ: {address}\n\n"
-            "⏰ Shop sẽ gọi điện xác nhận trong 5-10 phút.\n"
-            "💳 Thanh toán khi nhận hàng (COD)\n"
-            "────────────────────\n"
-            "Cảm ơn anh/chị đã đặt hàng! ❤️"
-        )
-        send_message(uid, msg)
-
-    return {"status": "ok", "message": "Đơn hàng đã được tiếp nhận"}
-
-
-def get_variant_price(product: dict, color: str, size: str):
-    """Trả về giá theo đúng biến thể màu/size. Nếu không tìm được thì trả về giá nhỏ nhất."""
-    color = (color or "").strip()
-    size = (size or "").strip()
-    variants = product.get("variants") or []
-
-    # Ưu tiên khớp cả màu & size (bỏ qua 'Mặc định')
-    for v in variants:
-        vm = (v.get("mau") or "").strip()
-        vs = (v.get("size") or "").strip()
-        if color and color.lower() != "mặc định" and vm and vm != color:
-            continue
-        if size and size.lower() != "mặc định" and vs and vs != size:
-            continue
-        gia_int = v.get("gia")
-        if isinstance(gia_int, int):
-            return gia_int
-
-    # Nếu không khớp chính xác, lấy giá nhỏ nhất
-    min_price = None
-    for v in variants:
-        gia_int = v.get("gia")
-        if isinstance(gia_int, int):
-            if min_price is None or gia_int < min_price:
-                min_price = gia_int
-    return min_price
-
-
 # ============================================
-# API LẤY GIÁ THEO BIẾN THỂ
+# API: GET VARIANT PRICE
 # ============================================
-
 
 @app.route("/api/get-variant-price")
 def api_get_variant_price():
@@ -1500,32 +967,116 @@ def api_get_variant_price():
         return {"error": "not_found"}, 404
 
     product = PRODUCTS[ms]
-    price_int = get_variant_price(product, color, size)
+    variants = product.get("variants") or []
 
-    if price_int is None:
-        price_int = extract_price_int(product.get("Gia", "0")) or 0
+    chosen = None
+    # Ưu tiên khớp cả màu & size (nếu có truyền)
+    for v in variants:
+        vm = (v.get("mau") or "").strip().lower()
+        vs = (v.get("size") or "").strip().lower()
+        want_color = color.strip().lower()
+        want_size = size.strip().lower()
 
-    price_display = f"{price_int:,}đ" if isinstance(price_int, int) else str(price_int)
+        if want_color and vm != want_color:
+            continue
+        if want_size and vs != want_size:
+            continue
+        chosen = v
+        break
+
+    # Nếu không match chính xác, lấy biến thể đầu tiên (nếu có)
+    if not chosen and variants:
+        chosen = variants[0]
+
+    price = 0
+    price_display = product.get("Gia", "0")
+
+    if chosen:
+        if chosen.get("gia") is not None:
+            price = chosen["gia"]
+            price_display = chosen.get("gia_raw") or price_display
+        else:
+            # Thử parse từ chuỗi giá biến thể
+            p_int = extract_price_int(chosen.get("gia_raw"))
+            if p_int is not None:
+                price = p_int
+                price_display = chosen.get("gia_raw") or price_display
+            else:
+                p_int = extract_price_int(product.get("Gia", "0"))
+                price = p_int or 0
+    else:
+        p_int = extract_price_int(product.get("Gia", "0"))
+        price = p_int or 0
 
     return {
         "ms": ms,
         "color": color,
         "size": size,
-        "price": price_int,
+        "price": int(price),
         "price_display": price_display,
     }
 
 
 # ============================================
-# MAIN
+# API: SUBMIT ORDER
 # ============================================
 
+@app.route("/api/submit-order", methods=["POST"])
+def api_submit_order():
+    data = request.get_json() or {}
+    ms = (data.get("ms") or "").upper()
+    uid = data.get("uid") or ""
+    color = (data.get("color") or "").strip()
+    size = (data.get("size") or "").strip()
+    quantity = int(data.get("quantity") or 1)
+    customerName = data.get("customerName") or ""
+    phone = data.get("phone") or ""
+    address = data.get("address") or ""
 
-@app.route("/")
-def index():
-    return "OK"
+    load_products()
+    row = PRODUCTS.get(ms)
+    if not row:
+        return {"error": "not_found", "message": "Sản phẩm không tồn tại"}, 404
 
+    price_str = row.get("Gia", "0")
+    price_int = extract_price_int(price_str) or 0
+    total = price_int * quantity
+
+    # Gửi tin nhắn xác nhận về Messenger
+    if uid:
+        msg = (
+            "🎉 Shop đã nhận được đơn hàng mới:\n"
+            f"🛍 Sản phẩm: [{ms}] {row.get('Ten','')}\n"
+            f"🎨 Phân loại: {color} / {size}\n"
+            f"📦 Số lượng: {quantity}\n"
+            f"💰 Thành tiền: {total:,.0f} đ\n"
+            f"👤 Người nhận: {customerName}\n"
+            f"📱 SĐT: {phone}\n"
+            f"🏠 Địa chỉ: {address}\n"
+            "────────────────────\n"
+            "⏰ Shop sẽ gọi điện xác nhận trong 5-10 phút.\n"
+            "💳 Thanh toán khi nhận hàng (COD)\n"
+            "────────────────────\n"
+            "Cảm ơn anh/chị đã đặt hàng! ❤️"
+        )
+        send_message(uid, msg)
+
+    return {"status": "ok", "message": "Đơn hàng đã được tiếp nhận"}
+
+
+# ============================================
+# STATIC
+# ============================================
+
+@app.route("/static/<path:path>")
+def static_files(path):
+    return send_from_directory("static", path)
+
+
+# ============================================
+# MAIN (LOCAL RUN)
+# ============================================
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", "5000"))
-    app.run(host="0.0.0.0", port=port, debug=True)
+    print("Starting app on http://0.0.0.0:5000")
+    app.run(host="0.0.0.0", port=5000, debug=True)
