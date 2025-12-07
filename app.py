@@ -554,6 +554,114 @@ def generate_product_advantage(product_name: str, description: str) -> str:
         return "Sản phẩm chất lượng cao với thiết kế thời trang"
 
 
+def generate_product_description_bullets(description: str) -> str:
+    """Tạo mô tả sản phẩm dạng bullet points từ mô tả gốc"""
+    try:
+        # Nếu có OpenAI, dùng GPT để tạo bullet points
+        if client and OPENAI_API_KEY:
+            # Loại bỏ hashtag trước khi gửi cho GPT
+            clean_desc = re.sub(r'#\S+', '', description)
+            clean_desc = re.sub(r'@\S+', '', clean_desc)
+            clean_desc = ' '.join(clean_desc.split())
+            
+            prompt = f"""
+            Dựa trên mô tả sản phẩm sau, hãy tạo ra 3-5 bullet points ngắn gọn, dễ hiểu, dễ nhìn (mỗi bullet tối đa 15 từ).
+            Mỗi bullet point bắt đầu bằng dấu • và cách nhau bởi dòng mới.
+            Loại bỏ tất cả hashtag và ký tự đặc biệt không cần thiết.
+            Chỉ trả về các bullet points, không thêm bất kỳ văn bản nào khác.
+            
+            Mô tả: {clean_desc[:500]}
+            
+            Yêu cầu:
+            1. 3-5 bullet points
+            2. Mỗi bullet ngắn gọn, dễ hiểu
+            3. Sử dụng tiếng Việt
+            4. Không chứa hashtag
+            5. Không chứa emoji hoặc ký tự đặc biệt
+            """
+            
+            try:
+                resp = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": "Bạn là chuyên gia tóm tắt sản phẩm. Hãy tạo bullet points ngắn gọn, rõ ràng từ mô tả."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.5,
+                    max_tokens=200,
+                    timeout=10
+                )
+                bullets = resp.choices[0].message.content.strip()
+                
+                # Kiểm tra và làm sạch kết quả
+                if bullets:
+                    # Loại bỏ dấu ngoặc kép
+                    bullets = bullets.strip('"\'')
+                    # Đảm bảo mỗi bullet bắt đầu bằng dấu •
+                    lines = bullets.split('\n')
+                    cleaned_lines = []
+                    for line in lines:
+                        line = line.strip()
+                        if line and not line.startswith('•'):
+                            line = f"• {line}"
+                        if line:
+                            cleaned_lines.append(line)
+                    
+                    # Giới hạn 5 bullet points
+                    cleaned_lines = cleaned_lines[:5]
+                    return "\n".join(cleaned_lines)
+            except Exception as e:
+                print(f"Lỗi khi tạo bullet points bằng GPT: {e}")
+                # Nếu lỗi thì dùng phương pháp dự phòng
+        
+        # Phương pháp dự phòng: tạo bullet points đơn giản
+        # Loại bỏ hashtag và ký tự đặc biệt
+        clean_desc = re.sub(r'#\S+', '', description)
+        clean_desc = re.sub(r'@\S+', '', clean_desc)
+        clean_desc = ' '.join(clean_desc.split())
+        
+        # Tách câu đơn giản
+        sentences = re.split(r'[.!?\n;]+', clean_desc)
+        sentences = [s.strip() for s in sentences if s.strip()]
+        
+        # Lọc câu có độ dài hợp lý và tạo bullet points
+        bullets = []
+        for sent in sentences:
+            if 5 <= len(sent.split()) <= 20:  # Câu có 5-20 từ
+                bullets.append(f"• {sent}")
+            if len(bullets) >= 5:  # Giới hạn 5 bullet points
+                break
+        
+        # Nếu không đủ bullet points, tách theo dấu phẩy
+        if len(bullets) < 3:
+            parts = re.split(r'[,;]+', clean_desc)
+            for part in parts:
+                part = part.strip()
+                if 3 <= len(part.split()) <= 15:
+                    bullets.append(f"• {part}")
+                if len(bullets) >= 5:
+                    break
+        
+        # Nếu vẫn không đủ, trả về mô tả đã làm sạch
+        if bullets:
+            return "\n".join(bullets[:5])  # Giới hạn 5 bullet points
+        else:
+            # Cắt ngắn mô tả nếu quá dài
+            if len(clean_desc) > 300:
+                clean_desc = clean_desc[:297] + "..."
+            return clean_desc
+            
+    except Exception as e:
+        print(f"Lỗi trong generate_product_description_bullets: {e}")
+        # Trả về mô tả gốc đã làm sạch
+        clean_desc = re.sub(r'#\S+', '', description)
+        clean_desc = re.sub(r'@\S+', '', clean_desc)
+        clean_desc = ' '.join(clean_desc.split())
+        if len(clean_desc) > 300:
+            clean_desc = clean_desc[:297] + "..."
+        return clean_desc
+
+
 # ============================================
 # SEND PRODUCT INFO (MỚI HOÀN TOÀN)
 # ============================================
@@ -617,27 +725,18 @@ def send_product_info_debounced(uid: str, ms: str):
         
         time.sleep(0.5)
 
-        # Messenger 3: Mô tả sản phẩm (loại bỏ hashtag)
+        # Messenger 3: Mô tả sản phẩm (dạng bullet points)
         mo_ta = product.get("MoTa", "")
         
-        # Loại bỏ hashtag và ký tự đặc biệt
         if mo_ta:
-            # Loại bỏ hashtag (#) và các từ sau đó
-            mo_ta_clean = re.sub(r'#\S+', '', mo_ta)
-            # Loại bỏ @mention
-            mo_ta_clean = re.sub(r'@\S+', '', mo_ta_clean)
-            # Chuẩn hóa khoảng trắng
-            mo_ta_clean = ' '.join(mo_ta_clean.split())
-            
-            if mo_ta_clean.strip():
-                # Cắt ngắn nếu quá dài
-                if len(mo_ta_clean) > 1500:
-                    mo_ta_clean = mo_ta_clean[:1497] + "..."
-                send_message(uid, f"📝 MÔ TẢ SẢN PHẨM:\n{mo_ta_clean}")
+            # Tạo mô tả dạng bullet points
+            description_bullets = generate_product_description_bullets(mo_ta)
+            if description_bullets.strip():
+                send_message(uid, f"📝 THÔNG TIN SẢN PHẨM:\n{description_bullets}")
             else:
-                send_message(uid, "📝 Sản phẩm hiện chưa có mô tả chi tiết ạ.")
+                send_message(uid, "📝 Sản phẩm hiện chưa có thông tin chi tiết ạ.")
         else:
-            send_message(uid, "📝 Sản phẩm hiện chưa có mô tả chi tiết ạ.")
+            send_message(uid, "📝 Sản phẩm hiện chưa có thông tin chi tiết ạ.")
         
         time.sleep(0.5)
 
