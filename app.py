@@ -116,6 +116,23 @@ ORDER_KEYWORDS = [
     "order nhé",
 ]
 
+# Từ khóa kích hoạt carousel
+CAROUSEL_KEYWORDS = [
+    "xem sản phẩm",
+    "show sản phẩm",
+    "có gì hot",
+    "sản phẩm mới",
+    "danh sách sản phẩm",
+    "giới thiệu sản phẩm",
+    "tất cả sản phẩm",
+    "cho xem sản phẩm",
+    "có mẫu nào",
+    "mẫu mới",
+    "hàng mới",
+    "xem hàng",
+    "show hàng",
+]
+
 # ============================================
 # HELPER: SEND MESSAGE (ĐÃ SỬA)
 # ============================================
@@ -531,7 +548,7 @@ def handle_image(uid: str, image_url: str):
 
 
 # ============================================
-# HANDLE TEXT (ĐÃ SỬA)
+# HANDLE TEXT (ĐÃ SỬA VÀ THÊM CAROUSEL)
 # ============================================
 
 def detect_ms_from_text(text: str):
@@ -604,7 +621,7 @@ def send_product_info_debounced(uid: str, ms: str):
 
 
 def handle_text(uid: str, text: str):
-    """Xử lý tin nhắn văn bản từ người dùng (đã tối ưu)"""
+    """Xử lý tin nhắn văn bản từ người dùng (đã tối ưu và thêm carousel)"""
     # Kiểm tra nhanh trước khi xử lý
     if not text or len(text.strip()) == 0:
         return
@@ -628,6 +645,72 @@ def handle_text(uid: str, text: str):
         if handle_order_form_step(uid, text):
             ctx["processing_lock"] = False
             return
+
+        # KIỂM TRA TỪ KHÓA CAROUSEL
+        lower = text.lower()
+        
+        # Từ khóa kích hoạt carousel
+        carousel_keywords = [
+            "xem sản phẩm", "show sản phẩm", "có gì hot", "sản phẩm mới",
+            "danh sách sản phẩm", "giới thiệu sản phẩm", "tất cả sản phẩm",
+            "cho xem sản phẩm", "có mẫu nào", "mẫu mới", "hàng mới", "xem hàng", "show hàng"
+        ]
+        
+        if any(kw in lower for kw in carousel_keywords):
+            if PRODUCTS:
+                # Gửi thông báo đang tải
+                send_message(uid, "Dạ, em đang lấy danh sách sản phẩm cho anh/chị...")
+                
+                # Lấy 5 sản phẩm đầu tiên cho carousel
+                carousel_elements = []
+                for i, (ms, product) in enumerate(list(PRODUCTS.items())[:5]):
+                    # Lấy ảnh
+                    images_field = product.get("Images", "")
+                    urls = parse_image_urls(images_field)
+                    image_url = urls[0] if urls else ""
+                    
+                    # Tạo mô tả ngắn
+                    short_desc = product.get("ShortDesc", "") or short_description(product.get("MoTa", ""))
+                    
+                    # Tạo element cho carousel
+                    element = {
+                        "title": f"[{ms}] {product.get('Ten', '')}",
+                        "image_url": image_url,
+                        "subtitle": f"💰 {product.get('Gia', '0')}\n{short_desc[:80]}..." if short_desc else f"💰 {product.get('Gia', '0')}",
+                        "default_action": {
+                            "type": "web_url",
+                            "url": f"{DOMAIN if DOMAIN.startswith('http') else 'https://' + DOMAIN}/order-form?ms={ms}&uid={uid}",
+                            "webview_height_ratio": "tall"
+                        },
+                        "buttons": [
+                            {
+                                "type": "web_url",
+                                "url": f"{DOMAIN if DOMAIN.startswith('http') else 'https://' + DOMAIN}/order-form?ms={ms}&uid={uid}",
+                                "title": "🛒 Đặt ngay"
+                            },
+                            {
+                                "type": "postback",
+                                "title": "💬 Tư vấn",
+                                "payload": f"ADVICE_{ms}"
+                            }
+                        ]
+                    }
+                    carousel_elements.append(element)
+                
+                if carousel_elements:
+                    # Gửi carousel
+                    send_carousel_template(uid, carousel_elements)
+                    # Gửi thêm tin nhắn hướng dẫn
+                    send_message(uid, "📱 Anh/chị vuốt sang trái/phải để xem thêm sản phẩm nhé!\n💬 Gõ mã sản phẩm (ví dụ: [MS123456]) để xem chi tiết.")
+                else:
+                    send_message(uid, "Hiện tại shop chưa có sản phẩm nào để hiển thị ạ.")
+                
+                ctx["processing_lock"] = False
+                return
+            else:
+                send_message(uid, "Hiện tại shop chưa có sản phẩm nào ạ. Vui lòng quay lại sau!")
+                ctx["processing_lock"] = False
+                return
 
         # Thử lấy mã sản phẩm từ text
         ms = detect_ms_from_text(text)
@@ -727,7 +810,7 @@ def webhook():
 
 
 # ============================================
-# POSTBACK HANDLER
+# POSTBACK HANDLER (ĐÃ THÊM XỬ LÝ CAROUSEL)
 # ============================================
 
 def handle_postback(uid: str, payload: str):
@@ -738,8 +821,25 @@ def handle_postback(uid: str, payload: str):
         send_message(
             uid,
             f"Em chào anh/chị, em là trợ lý bán hàng của {FANPAGE_NAME}. "
-            "Anh/chị cần em tư vấn sản phẩm hoặc hỗ trợ đặt hàng gì không ạ?",
+            "Anh/chị cần em tư vấn sản phẩm hoặc hỗ trợ đặt hàng gì không ạ?\n\n"
+            "📢 Gõ 'xem sản phẩm' để xem danh sách sản phẩm nhé!",
         )
+        return
+    
+    # Xử lý postback từ carousel
+    elif payload.startswith("ORDER_"):
+        ms = payload.replace("ORDER_", "")
+        if ms in PRODUCTS:
+            domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
+            order_link = f"{domain}/order-form?ms={ms}&uid={uid}"
+            product_name = PRODUCTS[ms].get('Ten', '')
+            send_message(uid, f"🎯 Anh/chị chọn sản phẩm [{ms}] {product_name}!\n\n📋 Đặt hàng ngay tại đây:\n{order_link}")
+        return
+    
+    elif payload.startswith("ADVICE_"):
+        ms = payload.replace("ADVICE_", "")
+        if ms in PRODUCTS:
+            send_product_info_debounced(uid, ms)
         return
 
     # Các postback khác do bạn tự định nghĩa nếu cần
