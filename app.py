@@ -573,7 +573,6 @@ def find_latest_ms_in_context(uid: str):
 
 
 def send_product_info_debounced(uid: str, ms: str):
-    """Gửi thông tin chi tiết sản phẩm theo cấu trúc mới"""
     ctx = USER_CONTEXT[uid]
     now = time.time()
 
@@ -593,154 +592,29 @@ def send_product_info_debounced(uid: str, ms: str):
         send_message(uid, "Em không tìm thấy sản phẩm này trong hệ thống, anh/chị kiểm tra lại mã giúp em ạ.")
         return
 
-    # 1. Gửi tất cả ảnh sản phẩm (loại bỏ trùng)
+    # Gửi ảnh sản phẩm (1 ảnh đại diện)
     images_field = product.get("Images", "")
     urls = parse_image_urls(images_field)
-    
-    # Loại bỏ ảnh trùng
-    seen_images = set()
-    unique_images = []
+    main_image = ""
     for u in urls:
-        if u and u not in seen_images:
-            seen_images.add(u)
-            unique_images.append(u)
-    
-    # Gửi tối đa 10 ảnh để tránh spam
-    for image_url in unique_images[:10]:
-        if image_url:
-            send_image(uid, image_url)
-    
-    # 2. Gửi thông tin chi tiết sản phẩm theo cấu trúc mới
-    product_name = product.get('Ten', '')
-    
-    # Màu sắc
-    colors_field = product.get("màu (Thuộc tính)", "")
-    colors_list = []
-    if colors_field:
-        colors_list = [c.strip() for c in colors_field.split(",") if c.strip()]
-    
-    # Size
-    sizes_field = product.get("size (Thuộc tính)", "")
-    sizes_list = []
-    if sizes_field:
-        sizes_list = [s.strip() for s in sizes_field.split(",") if s.strip()]
-    
-    # Giá theo từng biến thể - trình bày ngắn gọn
-    variants = product.get("variants", [])
-    
-    # Nhóm các biến thể có cùng giá
-    price_groups = {}
-    for variant in variants:
-        mau = variant.get("mau", "").strip() or "Không xác định"
-        size = variant.get("size", "").strip() or "Không xác định"
-        gia_raw = variant.get("gia_raw", "").strip()
-        gia_int = variant.get("gia", 0)
-        
-        # Format giá
-        if gia_int and gia_int > 0:
-            price_display = f"{gia_int:,.0f} đ"
-        elif gia_raw:
-            price_display = gia_raw
-        else:
-            price_display = "Liên hệ"
-        
-        # Tạo key cho nhóm giá (màu + giá)
-        group_key = f"{mau}|{price_display}"
-        if group_key not in price_groups:
-            price_groups[group_key] = {
-                "mau": mau,
-                "price": price_display,
-                "sizes": set()
-            }
-        price_groups[group_key]["sizes"].add(size)
-    
-    # Mô tả chi tiết
-    mo_ta = product.get("MoTa", "")
-    
-    # Tạo tin nhắn chi tiết
-    detail_parts = []
-    
-    # Tiêu đề
-    detail_parts.append(f"📌 {product_name}")
-    
-    # Màu sắc
-    if colors_list:
-        colors_str = ", ".join(colors_list)
-        detail_parts.append(f"🎨 Màu: {colors_str}")
-    else:
-        # Lấy màu từ biến thể nếu cột tổng hợp trống
-        unique_colors = set()
-        for variant in variants:
-            mau = variant.get("mau", "").strip()
-            if mau:
-                unique_colors.add(mau)
-        if unique_colors:
-            colors_str = ", ".join(sorted(unique_colors))
-            detail_parts.append(f"🎨 Màu: {colors_str}")
-        else:
-            detail_parts.append("🎨 Màu: Không xác định")
-    
-    # Size
-    if sizes_list:
-        sizes_str = ", ".join(sizes_list)
-        detail_parts.append(f"📏 Size: {sizes_str}")
-    else:
-        # Lấy size từ biến thể nếu cột tổng hợp trống
-        unique_sizes = set()
-        for variant in variants:
-            size = variant.get("size", "").strip()
-            if size:
-                unique_sizes.add(size)
-        if unique_sizes:
-            sizes_str = ", ".join(sorted(unique_sizes))
-            detail_parts.append(f"📏 Size: {sizes_str}")
-        else:
-            detail_parts.append("📏 Size: Không xác định")
-    
-    # Giá - trình bày ngắn gọn
-    if price_groups:
-        detail_parts.append("💰 Giá:")
-        
-        # Nhóm theo màu
-        color_price_map = {}
-        for group_key, group_info in price_groups.items():
-            mau = group_info["mau"]
-            price = group_info["price"]
-            sizes_str = "/".join(sorted(group_info["sizes"]))
-            
-            if mau not in color_price_map:
-                color_price_map[mau] = []
-            color_price_map[mau].append(f"{sizes_str}: {price}")
-        
-        # Hiển thị theo từng màu
-        for mau in sorted(color_price_map.keys()):
-            price_entries = color_price_map[mau]
-            if len(price_entries) == 1:
-                # Nếu chỉ có 1 mức giá cho tất cả size
-                detail_parts.append(f"  • {mau}: {price_entries[0]}")
-            else:
-                # Nếu có nhiều mức giá
-                detail_parts.append(f"  • {mau}:")
-                for entry in price_entries:
-                    detail_parts.append(f"    {entry}")
-    else:
-        # Nếu không có biến thể, lấy giá chung
-        gia_chung = product.get("Gia", "")
-        if gia_chung:
-            detail_parts.append(f"💰 Giá: {gia_chung}")
-        else:
-            detail_parts.append("💰 Giá: Liên hệ")
-    
-    # Mô tả chi tiết sản phẩm (ưu điểm sản phẩm)
-    if mo_ta:
-        mo_ta_clean = re.sub(r'\s+', ' ', mo_ta).strip()
-        detail_parts.append(f"\n📝 Ưu điểm sản phẩm:\n{mo_ta_clean}")
-    
-    # Gửi tin nhắn chi tiết
-    detail_message = "\n".join(detail_parts)
-    send_message(uid, detail_message)
-    
-    # 3. Link đặt hàng
+        if should_use_as_first_image(u):
+            main_image = u
+            break
+    if main_image:
+        send_image(uid, main_image)
+
+    # Mô tả ngắn gọn, đủ ý
+    short_desc = product.get("ShortDesc") or short_description(product.get("MoTa", ""))
+    detail = (
+        f"📌 Thông tin sản phẩm [{ms}] {product.get('Ten','')}:\n"
+        f"- Giá: {product.get('Gia','')}\n"
+        f"- Màu: {product.get('màu (Thuộc tính)','')}\n"
+        f"- Size: {product.get('size (Thuộc tính)','')}\n"
+        f"- Tồn kho: {product.get('Tồn kho','')}\n\n"
+        f"{short_desc}"
+    )
+    send_message(uid, detail)
+
     domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
     order_link = f"{domain}/order-form?ms={ms}&uid={uid}"
     send_message(uid, f"📋 Anh/chị có thể đặt hàng ngay tại đây:\n{order_link}")
@@ -772,10 +646,10 @@ def handle_text(uid: str, text: str):
             ctx["processing_lock"] = False
             return
 
-        # KIỂM TRA TỪ KHÓA CAROUSEL
+        # KIỂM TRA TỪ KHÓA CAROUSEL - DÙNG BIẾN TOÀN CỤC CAROUSEL_KEYWORDS
         lower = text.lower()
         
-        if any(kw in lower for kw in CAROUSEL_KEYWORDS):
+        if any(kw in lower for kw in CAROUSEL_KEYWORDS):  # SỬA: dùng biến toàn cục
             if PRODUCTS:
                 # Gửi thông báo đang tải
                 send_message(uid, "Dạ, em đang lấy danh sách sản phẩm cho anh/chị...")
