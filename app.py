@@ -53,6 +53,8 @@ USER_CONTEXT = defaultdict(lambda: {
     # Mới: Quản lý postback trùng lặp
     "last_postback_time": 0,
     "processed_postbacks": set(),
+    # Mới: Quản lý trạng thái gửi ảnh để tránh lặp
+    "last_product_images_sent": {},
 })
 PRODUCTS = {}
 LAST_LOAD = 0
@@ -478,6 +480,227 @@ def build_chatgpt_reply(uid: str, text: str, ms: str | None):
         return "Hiện tại em đang gặp chút trục trặc kỹ thuật, anh/chị vui lòng nhắn lại sau ít phút giúp em ạ."
 
 
+def generate_product_advantage(product_name: str, description: str) -> str:
+    """Tạo ưu điểm sản phẩm ngắn gọn từ tên và mô tả"""
+    try:
+        # Nếu có OpenAI, dùng GPT để tạo ưu điểm
+        if client and OPENAI_API_KEY:
+            # Giới hạn mô tả để tiết kiệm token
+            desc_short = description[:300] if description else ""
+            
+            prompt = f"""
+            Dựa trên tên sản phẩm và mô tả dưới đây, hãy tạo ra MỘT câu ưu điểm ngắn gọn, hấp dẫn (tối đa 15 từ) bằng tiếng Việt:
+            
+            Tên sản phẩm: {product_name}
+            Mô tả: {desc_short}
+            
+            Yêu cầu:
+            1. Chỉ trả về MỘT câu duy nhất
+            2. Ngắn gọn, dễ hiểu (tối đa 15 từ)
+            3. Nhấn mạnh ưu điểm nổi bật nhất
+            4. Không chứa hashtag, ký tự đặc biệt
+            5. Bắt đầu bằng động từ hoặc tính từ tích cực
+            6. Không chứa từ "ưu điểm" trong câu trả lời
+            
+            Ưu điểm:
+            """
+            
+            try:
+                resp = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": "Bạn là chuyên gia marketing, hãy tạo ưu điểm sản phẩm ngắn gọn, hấp dẫn."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.7,
+                    max_tokens=80,
+                    timeout=10
+                )
+                advantage = resp.choices[0].message.content.strip()
+                # Loại bỏ dấu ngoặc kép và khoảng trắng thừa
+                advantage = advantage.strip('"\'').strip()
+                # Cắt ngắn nếu quá dài
+                if len(advantage.split()) > 20:
+                    words = advantage.split()[:15]
+                    advantage = " ".join(words) + "..."
+                return advantage
+            except Exception as e:
+                print(f"Lỗi khi tạo ưu điểm bằng GPT: {e}")
+                # Nếu lỗi thì dùng phương pháp dự phòng
+        
+        # Phương pháp dự phòng: tạo ưu điểm đơn giản từ tên sản phẩm
+        name_lower = product_name.lower()
+        
+        # Kiểm tra loại sản phẩm
+        if any(word in name_lower for word in ['áo', 'áo thun', 't-shirt', 'shirt']):
+            return "Chất liệu cotton mềm mại, thấm hút mồ hôi tốt, form dáng chuẩn"
+        elif any(word in name_lower for word in ['quần', 'pants', 'jeans', 'trousers']):
+            return "Chất liệu bền đẹp, co giãn tốt, thiết kế thời trang"
+        elif any(word in name_lower for word in ['váy', 'đầm', 'dress', 'skirt']):
+            return "Thiết kế nữ tính, dáng ôm body, chất liệu cao cấp"
+        elif any(word in name_lower for word in ['giày', 'dép', 'sandal', 'sneaker']):
+            return "Thiết kế đẹp, êm ái, chất liệu bền đẹp, dễ phối đồ"
+        elif any(word in name_lower for word in ['túi', 'balo', 'ví', 'bag', 'backpack']):
+            return "Thiết kế sang trọng, nhiều ngăn tiện lợi, chất liệu cao cấp"
+        elif any(word in name_lower for word in ['phụ kiện', 'vòng', 'nhẫn', 'lắc', 'trang sức']):
+            return "Thiết kế tinh tế, chất liệu cao cấp, phù hợp nhiều phong cách"
+        elif any(word in name_lower for word in ['set', 'combo', 'bộ']):
+            return "Phối đồ đẹp, tiện lợi, chất liệu cao cấp, dễ mix & match"
+        else:
+            return "Chất lượng cao cấp, thiết kế thời trang, giá cả hợp lý"
+            
+    except Exception as e:
+        print(f"Lỗi trong generate_product_advantage: {e}")
+        return "Sản phẩm chất lượng cao với thiết kế thời trang"
+
+
+# ============================================
+# SEND PRODUCT INFO (MỚI HOÀN TOÀN)
+# ============================================
+
+def send_product_info_debounced(uid: str, ms: str):
+    """Gửi thông tin chi tiết sản phẩm theo cấu trúc 6 messenger"""
+    ctx = USER_CONTEXT[uid]
+    now = time.time()
+
+    last_ms = ctx.get("product_info_sent_ms")
+    last_time = ctx.get("last_product_info_time", 0)
+
+    # KIỂM TRA DEBOUNCE CHẶT CHẼ: 10 giây cho cùng sản phẩm
+    if last_ms == ms and (now - last_time) < 10:
+        print(f"[DEBOUNCE] Bỏ qua gửi lại thông tin sản phẩm {ms} cho user {uid} (chưa đủ 10s)")
+        return
+
+    # Đánh dấu đang gửi
+    ctx["product_info_sent_ms"] = ms
+    ctx["last_product_info_time"] = now
+    ctx["processing_lock"] = True
+
+    try:
+        load_products()
+        product = PRODUCTS.get(ms)
+        if not product:
+            send_message(uid, "Em không tìm thấy sản phẩm này trong hệ thống, anh/chị kiểm tra lại mã giúp em ạ.")
+            ctx["processing_lock"] = False
+            return
+
+        # Messenger 1: Tên sản phẩm
+        product_name = product.get('Ten', 'Sản phẩm')
+        send_message(uid, f"📌 {product_name}")
+        time.sleep(0.5)  # Delay giữa các tin nhắn
+
+        # Messenger 2: Ảnh sản phẩm (tối đa 5 ảnh)
+        images_field = product.get("Images", "")
+        urls = parse_image_urls(images_field)
+        
+        # Loại trừ ảnh trùng
+        unique_images = []
+        seen = set()
+        for u in urls:
+            if u and u not in seen:
+                seen.add(u)
+                unique_images.append(u)
+        
+        # Lưu số ảnh đã gửi vào context
+        ctx["last_product_images_sent"][ms] = len(unique_images[:5])
+        
+        # Gửi 5 ảnh đầu tiên
+        sent_count = 0
+        for image_url in unique_images[:5]:
+            if image_url:
+                send_image(uid, image_url)
+                sent_count += 1
+                time.sleep(0.7)  # Delay giữa các ảnh để tránh rate limit
+        
+        if sent_count == 0:
+            send_message(uid, "📷 Sản phẩm chưa có hình ảnh ạ.")
+        
+        time.sleep(0.5)
+
+        # Messenger 3: Mô tả sản phẩm (loại bỏ hashtag)
+        mo_ta = product.get("MoTa", "")
+        
+        # Loại bỏ hashtag và ký tự đặc biệt
+        if mo_ta:
+            # Loại bỏ hashtag (#) và các từ sau đó
+            mo_ta_clean = re.sub(r'#\S+', '', mo_ta)
+            # Loại bỏ @mention
+            mo_ta_clean = re.sub(r'@\S+', '', mo_ta_clean)
+            # Chuẩn hóa khoảng trắng
+            mo_ta_clean = ' '.join(mo_ta_clean.split())
+            
+            if mo_ta_clean.strip():
+                # Cắt ngắn nếu quá dài
+                if len(mo_ta_clean) > 1500:
+                    mo_ta_clean = mo_ta_clean[:1497] + "..."
+                send_message(uid, f"📝 MÔ TẢ SẢN PHẨM:\n{mo_ta_clean}")
+            else:
+                send_message(uid, "📝 Sản phẩm hiện chưa có mô tả chi tiết ạ.")
+        else:
+            send_message(uid, "📝 Sản phẩm hiện chưa có mô tả chi tiết ạ.")
+        
+        time.sleep(0.5)
+
+        # Messenger 4: Ưu điểm sản phẩm
+        advantage = generate_product_advantage(product_name, mo_ta)
+        send_message(uid, f"✨ ƯU ĐIỂM NỔI BẬT:\n{advantage}")
+        
+        time.sleep(0.5)
+
+        # Messenger 5: Giá bán
+        variants = product.get("variants", [])
+        prices = []
+        
+        # Thu thập tất cả giá từ các biến thể
+        for variant in variants:
+            gia_int = variant.get("gia")
+            if gia_int and gia_int > 0:
+                prices.append(gia_int)
+        
+        # Nếu không có giá từ biến thể, thử lấy từ cột Giá bán
+        if not prices:
+            gia_raw = product.get("Gia", "")
+            gia_int = extract_price_int(gia_raw)
+            if gia_int and gia_int > 0:
+                prices.append(gia_int)
+        
+        # Xử lý hiển thị giá
+        if len(prices) == 0:
+            price_msg = "💰 Giá đang cập nhật, vui lòng liên hệ shop để biết chi tiết"
+        elif len(set(prices)) == 1:
+            # Tất cả biến thể cùng 1 giá
+            price = prices[0]
+            price_msg = f"💰 Giá ưu đãi hôm nay chỉ có {price:,.0f}đ"
+        else:
+            # Các biến thể có giá khác nhau
+            min_price = min(prices)
+            max_price = max(prices)
+            price_msg = f"💰 Giá chỉ từ {min_price:,.0f}đ đến {max_price:,.0f}đ, bấm đặt mua để biết giá chi tiết cho từng phân loại"
+        
+        send_message(uid, price_msg)
+        
+        time.sleep(0.5)
+
+        # Messenger 6: Link form đặt hàng
+        domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
+        order_link = f"{domain}/order-form?ms={ms}&uid={uid}"
+        send_message(uid, f"📋 Đặt hàng ngay tại đây:\n{order_link}")
+
+    except Exception as e:
+        print(f"Lỗi khi gửi thông tin sản phẩm: {str(e)}")
+        # Gửi thông báo lỗi đơn giản
+        try:
+            send_message(uid, f"📌 Sản phẩm: {product.get('Ten', '')}\n\nCó lỗi khi tải thông tin chi tiết. Vui lòng truy cập link dưới đây để đặt hàng:")
+            domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
+            order_link = f"{domain}/order-form?ms={ms}&uid={uid}"
+            send_message(uid, order_link)
+        except:
+            pass
+    finally:
+        # Đảm bảo mở khóa
+        ctx["processing_lock"] = False
+
+
 # ============================================
 # HANDLE ORDER FORM STATE
 # ============================================
@@ -580,153 +803,6 @@ def find_latest_ms_in_context(uid: str):
     return None
 
 
-def send_product_info_debounced(uid: str, ms: str):
-    """Gửi thông tin chi tiết sản phẩm theo cấu trúc mới - ĐÃ SỬA"""
-    ctx = USER_CONTEXT[uid]
-    now = time.time()
-
-    last_ms = ctx.get("product_info_sent_ms")
-    last_time = ctx.get("last_product_info_time", 0)
-
-    # Kiểm tra debounce - chỉ cho phép gửi lại sau 3 giây
-    if last_ms == ms and (now - last_time) < 3:
-        print(f"[DEBOUNCE] Bỏ qua gửi lại thông tin sản phẩm {ms} cho user {uid}")
-        return
-
-    ctx["product_info_sent_ms"] = ms
-    ctx["last_product_info_time"] = now
-
-    load_products()
-    product = PRODUCTS.get(ms)
-    if not product:
-        send_message(uid, "Em không tìm thấy sản phẩm này trong hệ thống, anh/chị kiểm tra lại mã giúp em ạ.")
-        return
-
-    try:
-        # 1. Tạo thông tin chi tiết sản phẩm theo cấu trúc mới
-        product_name = product.get('Ten', '')
-        
-        # Màu sắc
-        colors_field = product.get("màu (Thuộc tính)", "")
-        colors_list = []
-        if colors_field:
-            colors_list = [c.strip() for c in colors_field.split(",") if c.strip()]
-        
-        # Size
-        sizes_field = product.get("size (Thuộc tính)", "")
-        sizes_list = []
-        if sizes_field:
-            sizes_list = [s.strip() for s in sizes_field.split(",") if s.strip()]
-        
-        # Lấy tất cả biến thể
-        variants = product.get("variants", [])
-        
-        # Nhóm các biến thể có cùng giá
-        price_groups = {}
-        for variant in variants:
-            mau = variant.get("mau", "").strip() or "Không xác định"
-            size = variant.get("size", "").strip() or "Không xác định"
-            gia_raw = variant.get("gia_raw", "").strip()
-            gia_int = variant.get("gia", 0)
-            
-            # Format giá
-            if gia_int and gia_int > 0:
-                price_display = f"{gia_int:,.0f} đ"
-            elif gia_raw:
-                price_display = gia_raw
-            else:
-                price_display = "Liên hệ"
-            
-            # Tạo key cho nhóm giá
-            group_key = f"{mau}|{price_display}"
-            if group_key not in price_groups:
-                price_groups[group_key] = {
-                    "mau": mau,
-                    "price": price_display,
-                    "sizes": set()
-                }
-            price_groups[group_key]["sizes"].add(size)
-        
-        # Mô tả chi tiết - cắt ngắn để tránh quá dài
-        mo_ta = product.get("MoTa", "")
-        if mo_ta and len(mo_ta) > 1000:
-            mo_ta = mo_ta[:1000] + "..."
-        
-        # 2. Tạo tin nhắn chi tiết (NGẮN GỌN, <2000 ký tự)
-        detail_parts = []
-        
-        # Tiêu đề
-        detail_parts.append(f"📌 {product_name}")
-        detail_parts.append(f"🔢 Mã sản phẩm: {ms}")
-        
-        # Màu sắc - hiển thị ngắn gọn
-        if colors_list:
-            colors_display = ", ".join(colors_list[:3])  # Chỉ hiển thị 3 màu đầu
-            if len(colors_list) > 3:
-                colors_display += f" và {len(colors_list)-3} màu khác"
-            detail_parts.append(f"🎨 Màu sắc: {colors_display}")
-        
-        # Size - hiển thị ngắn gọn
-        if sizes_list:
-            sizes_display = ", ".join(sizes_list[:3])  # Chỉ hiển thị 3 size đầu
-            if len(sizes_list) > 3:
-                sizes_display += f" và {len(sizes_list)-3} size khác"
-            detail_parts.append(f"📏 Size: {sizes_display}")
-        
-        # Giá - hiển thị ngắn gọn
-        if price_groups:
-            detail_parts.append("💰 Giá:")
-            # Lấy giá đầu tiên để hiển thị (có thể thêm chi tiết trong phần tiếp theo nếu cần)
-            first_group = list(price_groups.values())[0]
-            detail_parts.append(f"  • Từ: {first_group['price']}")
-        
-        # Mô tả ngắn
-        if mo_ta:
-            mo_ta_short = mo_ta[:300] + "..." if len(mo_ta) > 300 else mo_ta
-            detail_parts.append(f"📝 Mô tả: {mo_ta_short}")
-        
-        # Thêm thông báo
-        detail_parts.append("💡 Gõ 'mua sản phẩm' hoặc nhấn nút dưới đây để đặt hàng!")
-        
-        # Gửi tin nhắn chi tiết (đảm bảo dưới 2000 ký tự)
-        detail_message = "\n".join(detail_parts)
-        
-        # Kiểm tra độ dài
-        if len(detail_message) > 2000:
-            # Cắt bớt nếu quá dài
-            detail_message = detail_message[:1997] + "..."
-        
-        send_message(uid, detail_message)
-        
-        # 3. Gửi link đặt hàng (riêng biệt)
-        domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
-        order_link = f"{domain}/order-form?ms={ms}&uid={uid}"
-        send_message(uid, f"📋 Đặt hàng ngay tại đây:\n{order_link}")
-        
-        # 4. Gửi ảnh (tối đa 2 ảnh để tránh spam)
-        images_field = product.get("Images", "")
-        urls = parse_image_urls(images_field)
-        unique_images = []
-        seen = set()
-        for u in urls:
-            if u and u not in seen:
-                seen.add(u)
-                unique_images.append(u)
-        
-        for image_url in unique_images[:2]:  # Chỉ gửi 2 ảnh đầu
-            if image_url:
-                send_image(uid, image_url)
-                time.sleep(0.5)  # Delay nhẹ giữa các ảnh
-        
-    except Exception as e:
-        print(f"Lỗi khi gửi thông tin sản phẩm: {str(e)}")
-        # Gửi thông báo lỗi đơn giản
-        send_message(uid, f"📌 Sản phẩm: {product.get('Ten', '')}\n🔢 Mã: {ms}\n\nĐể xem chi tiết và đặt hàng, vui lòng truy cập link dưới đây:")
-        domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
-        order_link = f"{domain}/order-form?ms={ms}&uid={uid}"
-        send_message(uid, order_link)
-
-
 def handle_text(uid: str, text: str):
     """Xử lý tin nhắn văn bản từ người dùng (đã tối ưu và thêm carousel)"""
     # Kiểm tra nhanh trước khi xử lý
@@ -820,8 +896,12 @@ def handle_text(uid: str, text: str):
         if not ms:
             ms = find_latest_ms_in_context(uid)
 
+        # Nếu có mã sản phẩm trong text, gửi thông tin chi tiết
         if ms and ms in PRODUCTS:
             USER_CONTEXT[uid]["last_ms"] = ms
+            send_product_info_debounced(uid, ms)
+            ctx["processing_lock"] = False
+            return
 
         # Gọi GPT trả lời (có thể chậm, nhưng cần thiết)
         reply = build_chatgpt_reply(uid, text, ms)
@@ -846,7 +926,8 @@ def handle_text(uid: str, text: str):
             pass
     finally:
         # Luôn đảm bảo mở khóa
-        ctx["processing_lock"] = False
+        if ctx.get("processing_lock"):
+            ctx["processing_lock"] = False
 
 
 # ============================================
