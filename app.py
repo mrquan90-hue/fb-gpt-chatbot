@@ -55,6 +55,8 @@ USER_CONTEXT = defaultdict(lambda: {
     "processed_postbacks": set(),
     # Mới: Quản lý trạng thái gửi ảnh để tránh lặp
     "last_product_images_sent": {},
+    # Mới: Lưu lịch sử mã sản phẩm đã thảo luận
+    "product_history": [],
 })
 PRODUCTS = {}
 LAST_LOAD = 0
@@ -136,6 +138,29 @@ CAROUSEL_KEYWORDS = [
     "hàng mới",
     "xem hàng",
     "show hàng",
+]
+
+# Từ khóa yêu cầu tư vấn sản phẩm
+ADVICE_KEYWORDS = [
+    "tư vấn",
+    "cho hỏi",
+    "hỏi",
+    "thông tin",
+    "chi tiết",
+    "giới thiệu",
+    "mô tả",
+    "giá bao nhiêu",
+    "có size",
+    "có màu",
+    "còn hàng",
+    "tồn kho",
+    "chất liệu",
+    "kích thước",
+    "vận chuyển",
+    "ship",
+    "giao hàng",
+    "đổi trả",
+    "bảo hành",
 ]
 
 # ============================================
@@ -405,26 +430,27 @@ def load_products(force=False):
 
 
 # ============================================
-# GPT PROMPT
+# GPT PROMPT - ĐÃ SỬA ĐỂ CHỈ DỰA VÀO THÔNG TIN SẢN PHẨM
 # ============================================
 
 def build_product_system_prompt(product: dict | None, ms: str | None):
-    base = (
-        "Bạn là trợ lý bán hàng thời trang cho shop Facebook. "
-        "Nhiệm vụ của bạn là tư vấn size, màu, chất liệu, giá, tồn kho và hỗ trợ chốt đơn. "
-        "Luôn trả lời bằng tiếng Việt thân thiện, xưng 'em' và gọi khách là 'anh/chị'. "
-        "Nếu không chắc thông tin (ví dụ thiếu trong dữ liệu sản phẩm) "
-        "thì nói rõ là không chắc, và gợi ý khách inbox để được hỗ trợ thêm.\n"
-    )
-
-    if not product or not ms:
-        base += (
-            "\nHiện tại bạn KHÔNG có dữ liệu chi tiết sản phẩm. "
-            "Hãy trả lời chung chung, khéo léo xin khách gửi mã sản phẩm hoặc hình ảnh "
-            "để bạn kiểm tra lại trên hệ thống."
+    """Xây dựng prompt cho GPT - CHỈ dựa vào thông tin sản phẩm thực tế"""
+    
+    if not client or not OPENAI_API_KEY:
+        return None  # Không có GPT
+    
+    # Nếu không có mã sản phẩm hoặc không có sản phẩm trong hệ thống
+    if not ms or not product:
+        return (
+            "Bạn là trợ lý bán hàng cho shop Facebook. "
+            "Hiện tại bạn KHÔNG có thông tin về sản phẩm cụ thể nào. "
+            "Hãy trả lời một cách chung chung và đề nghị khách hàng cung cấp mã sản phẩm hoặc hình ảnh. "
+            "TUYỆT ĐỐI KHÔNG được tư vấn chi tiết về bất kỳ sản phẩm nào nếu không có thông tin cụ thể. "
+            "Chỉ được phép trả lời các câu hỏi chung về shop, chính sách mua hàng (nếu được hỏi cụ thể). "
+            "Nếu khách hỏi về sản phẩm mà không cung cấp mã, hãy đề nghị họ gửi mã sản phẩm [MSxxxxxx]."
         )
-        return base
-
+    
+    # Có thông tin sản phẩm - chỉ dựa vào thông tin này
     ten = product.get("Ten", "")
     gia = product.get("Gia", "")
     mau = product.get("màu (Thuộc tính)", "")
@@ -432,35 +458,56 @@ def build_product_system_prompt(product: dict | None, ms: str | None):
     tonkho = product.get("Tồn kho", "")
     mota = product.get("MoTa", "")
 
-    base += (
-        f"\nDưới đây là thông tin sản phẩm hiện tại trong hệ thống:\n"
-        f"- Mã sản phẩm: {ms}\n"
-        f"- Tên: {ten}\n"
-        f"- Giá: {gia}\n"
-        f"- Màu: {mau}\n"
-        f"- Size: {size}\n"
-        f"- Tồn kho: {tonkho}\n"
-        f"- Mô tả: {mota}\n\n"
-        "Khi khách hỏi về sản phẩm này, ưu tiên dựa vào các thông tin trên để tư vấn. "
-        "Nếu khách hỏi những câu chung chung (ví dụ: còn hàng không, có màu/size nào, "
-        "bao lâu nhận được hàng, phí ship, cách đổi trả, v.v.) thì trả lời rõ ràng, "
-        "kèm theo gợi ý đặt hàng."
-    )
+    # Lấy các biến thể
+    variants = product.get("variants", [])
+    
+    # Tạo prompt chi tiết với thông tin thực tế
+    prompt = f"""Bạn là trợ lý bán hàng cho shop Facebook. Bạn chỉ được phép tư vấn dựa TRÊN THÔNG TIN SẢN PHẨM SAU ĐÂY:
 
-    return base
+THÔNG TIN SẢN PHẨM:
+- Mã sản phẩm: {ms}
+- Tên sản phẩm: {ten}
+- Giá bán: {gia}
+- Màu sắc có sẵn: {mau if mau else "Không có thông tin"}
+- Size có sẵn: {size if size else "Không có thông tin"}
+- Tình trạng tồn kho: {tonkho if tonkho else "Không có thông tin"}
+- Mô tả: {mota if mota else "Không có mô tả chi tiết"}
+
+QUY TẮC TƯ VẤN:
+1. CHỈ sử dụng thông tin trên để tư vấn
+2. KHÔNG được bịa thêm bất kỳ thông tin nào không có trong dữ liệu
+3. Nếu khách hỏi thông tin không có trong dữ liệu (ví dụ: chất liệu cụ thể, trọng lượng, xuất xứ), hãy nói "Hiện tại em không có thông tin này trong hệ thống"
+4. Nếu khách hỏi về vận chuyển, đổi trả, hãy trả lời chung: "Shop hỗ trợ giao hàng toàn quốc, đổi trả trong 3 ngày nếu sản phẩm lỗi"
+5. Luôn kết thúc bằng việc đề nghị đặt hàng nếu khách quan tâm
+
+Hãy trả lời bằng tiếng Việt, thân thiện, xưng 'em' và gọi khách là 'anh/chị'."""
+    
+    return prompt
 
 
 def build_chatgpt_reply(uid: str, text: str, ms: str | None):
     """
-    Gọi OpenAI để trả lời câu hỏi của khách hàng.
+    Gọi OpenAI để trả lời câu hỏi của khách hàng - CHỈ khi có thông tin sản phẩm
     """
     if not client or not OPENAI_API_KEY:
         return "Hiện tại hệ thống AI đang tạm thời bảo trì, anh/chị inbox trực tiếp để shop hỗ trợ ạ."
 
     load_products()
-    product = PRODUCTS.get(ms) if ms else None
+    
+    # Chỉ lấy sản phẩm nếu có mã và sản phẩm tồn tại
+    product = None
+    if ms and ms in PRODUCTS:
+        product = PRODUCTS[ms]
+    else:
+        # Nếu không có sản phẩm, không gọi GPT
+        return "Em chưa có thông tin về sản phẩm này. Anh/chị vui lòng cung cấp mã sản phẩm (ví dụ: [MS123456]) để em kiểm tra chi tiết ạ."
 
     system_prompt = build_product_system_prompt(product, ms)
+    
+    # Nếu không có prompt (không có GPT hoặc không có sản phẩm)
+    if not system_prompt:
+        return "Hiện tại em chưa có thông tin chi tiết về sản phẩm này. Anh/chị vui lòng cung cấp mã sản phẩm để em kiểm tra ạ."
+
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": text},
@@ -470,10 +517,15 @@ def build_chatgpt_reply(uid: str, text: str, ms: str | None):
         resp = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=messages,
-            temperature=0.4,
-            max_tokens=500,
+            temperature=0.3,  # Giảm temperature để tránh bịa thông tin
+            max_tokens=300,   # Giới hạn token để tránh dài dòng
         )
         reply = resp.choices[0].message.content.strip()
+        
+        # Kiểm tra reply có hợp lệ không
+        if not reply or len(reply) < 10:
+            return "Em hiện chưa có đủ thông tin để trả lời câu hỏi này. Anh/chị vui lòng liên hệ trực tiếp với shop để được hỗ trợ chi tiết ạ."
+        
         return reply
     except Exception as e:
         print("OpenAI error:", e)
@@ -488,38 +540,29 @@ def generate_product_advantage(product_name: str, description: str) -> str:
             # Giới hạn mô tả để tiết kiệm token
             desc_short = description[:300] if description else ""
             
-            prompt = f"""
-            Dựa trên tên sản phẩm và mô tả dưới đây, hãy tạo ra MỘT câu ưu điểm ngắn gọn, hấp dẫn (tối đa 15 từ) bằng tiếng Việt:
+            prompt = f"""Dựa trên tên sản phẩm và mô tả dưới đây, hãy tạo ra MỘT câu ưu điểm ngắn gọn, hấp dẫn (tối đa 15 từ):
             
-            Tên sản phẩm: {product_name}
-            Mô tả: {desc_short}
-            
-            Yêu cầu:
-            1. Chỉ trả về MỘT câu duy nhất
-            2. Ngắn gọn, dễ hiểu (tối đa 15 từ)
-            3. Nhấn mạnh ưu điểm nổi bật nhất
-            4. Không chứa hashtag, ký tự đặc biệt
-            5. Bắt đầu bằng động từ hoặc tính từ tích cực
-            6. Không chứa từ "ưu điểm" trong câu trả lời
-            
-            Ưu điểm:
-            """
+Tên sản phẩm: {product_name}
+Mô tả: {desc_short}
+
+Yêu cầu:
+1. Chỉ dựa vào thông tin trên
+2. Không thêm thông tin không có trong mô tả
+3. Ngắn gọn, dễ hiểu"""
             
             try:
                 resp = client.chat.completions.create(
                     model="gpt-4o-mini",
                     messages=[
-                        {"role": "system", "content": "Bạn là chuyên gia marketing, hãy tạo ưu điểm sản phẩm ngắn gọn, hấp dẫn."},
+                        {"role": "system", "content": "Bạn là chuyên gia tóm tắt ưu điểm sản phẩm."},
                         {"role": "user", "content": prompt}
                     ],
-                    temperature=0.7,
-                    max_tokens=80,
+                    temperature=0.5,
+                    max_tokens=50,
                     timeout=10
                 )
                 advantage = resp.choices[0].message.content.strip()
-                # Loại bỏ dấu ngoặc kép và khoảng trắng thừa
                 advantage = advantage.strip('"\'').strip()
-                # Cắt ngắn nếu quá dài
                 if len(advantage.split()) > 20:
                     words = advantage.split()[:15]
                     advantage = " ".join(words) + "..."
@@ -528,30 +571,25 @@ def generate_product_advantage(product_name: str, description: str) -> str:
                 print(f"Lỗi khi tạo ưu điểm bằng GPT: {e}")
                 # Nếu lỗi thì dùng phương pháp dự phòng
         
-        # Phương pháp dự phòng: tạo ưu điểm đơn giản từ tên sản phẩm
+        # Phương pháp dự phòng
         name_lower = product_name.lower()
         
-        # Kiểm tra loại sản phẩm
         if any(word in name_lower for word in ['áo', 'áo thun', 't-shirt', 'shirt']):
-            return "Chất liệu cotton mềm mại, thấm hút mồ hôi tốt, form dáng chuẩn"
+            return "Chất liệu cotton mềm mại, form dáng chuẩn"
         elif any(word in name_lower for word in ['quần', 'pants', 'jeans', 'trousers']):
-            return "Chất liệu bền đẹp, co giãn tốt, thiết kế thời trang"
+            return "Chất liệu bền đẹp, thiết kế thời trang"
         elif any(word in name_lower for word in ['váy', 'đầm', 'dress', 'skirt']):
-            return "Thiết kế nữ tính, dáng ôm body, chất liệu cao cấp"
+            return "Thiết kế nữ tính, chất liệu cao cấp"
         elif any(word in name_lower for word in ['giày', 'dép', 'sandal', 'sneaker']):
-            return "Thiết kế đẹp, êm ái, chất liệu bền đẹp, dễ phối đồ"
+            return "Thiết kế đẹp, chất liệu bền đẹp"
         elif any(word in name_lower for word in ['túi', 'balo', 'ví', 'bag', 'backpack']):
-            return "Thiết kế sang trọng, nhiều ngăn tiện lợi, chất liệu cao cấp"
-        elif any(word in name_lower for word in ['phụ kiện', 'vòng', 'nhẫn', 'lắc', 'trang sức']):
-            return "Thiết kế tinh tế, chất liệu cao cấp, phù hợp nhiều phong cách"
-        elif any(word in name_lower for word in ['set', 'combo', 'bộ']):
-            return "Phối đồ đẹp, tiện lợi, chất liệu cao cấp, dễ mix & match"
+            return "Thiết kế sang trọng, nhiều ngăn tiện lợi"
         else:
-            return "Chất lượng cao cấp, thiết kế thời trang, giá cả hợp lý"
+            return "Chất lượng cao cấp, thiết kế thời trang"
             
     except Exception as e:
         print(f"Lỗi trong generate_product_advantage: {e}")
-        return "Sản phẩm chất lượng cao với thiết kế thời trang"
+        return "Sản phẩm chất lượng cao"
 
 
 def generate_product_description_bullets(description: str) -> str:
@@ -564,40 +602,33 @@ def generate_product_description_bullets(description: str) -> str:
             clean_desc = re.sub(r'@\S+', '', clean_desc)
             clean_desc = ' '.join(clean_desc.split())
             
-            prompt = f"""
-            Dựa trên mô tả sản phẩm sau, hãy tạo ra 3-5 bullet points ngắn gọn, dễ hiểu, dễ nhìn (mỗi bullet tối đa 15 từ).
-            Mỗi bullet point bắt đầu bằng dấu • và cách nhau bởi dòng mới.
-            Loại bỏ tất cả hashtag và ký tự đặc biệt không cần thiết.
-            Chỉ trả về các bullet points, không thêm bất kỳ văn bản nào khác.
+            if len(clean_desc) < 20:
+                return clean_desc
             
-            Mô tả: {clean_desc[:500]}
+            prompt = f"""Từ mô tả sau, tạo 3-5 bullet points ngắn gọn (mỗi bullet tối đa 15 từ):
             
-            Yêu cầu:
-            1. 3-5 bullet points
-            2. Mỗi bullet ngắn gọn, dễ hiểu
-            3. Sử dụng tiếng Việt
-            4. Không chứa hashtag
-            5. Không chứa emoji hoặc ký tự đặc biệt
-            """
+Mô tả: {clean_desc[:500]}
+
+Yêu cầu:
+1. Chỉ dùng thông tin từ mô tả
+2. Không thêm thông tin mới
+3. Ngắn gọn, rõ ràng"""
             
             try:
                 resp = client.chat.completions.create(
                     model="gpt-4o-mini",
                     messages=[
-                        {"role": "system", "content": "Bạn là chuyên gia tóm tắt sản phẩm. Hãy tạo bullet points ngắn gọn, rõ ràng từ mô tả."},
+                        {"role": "system", "content": "Bạn là chuyên gia tóm tắt thông tin sản phẩm."},
                         {"role": "user", "content": prompt}
                     ],
-                    temperature=0.5,
-                    max_tokens=200,
+                    temperature=0.4,
+                    max_tokens=150,
                     timeout=10
                 )
                 bullets = resp.choices[0].message.content.strip()
                 
-                # Kiểm tra và làm sạch kết quả
                 if bullets:
-                    # Loại bỏ dấu ngoặc kép
                     bullets = bullets.strip('"\'')
-                    # Đảm bảo mỗi bullet bắt đầu bằng dấu •
                     lines = bullets.split('\n')
                     cleaned_lines = []
                     for line in lines:
@@ -607,53 +638,39 @@ def generate_product_description_bullets(description: str) -> str:
                         if line:
                             cleaned_lines.append(line)
                     
-                    # Giới hạn 5 bullet points
                     cleaned_lines = cleaned_lines[:5]
-                    return "\n".join(cleaned_lines)
+                    if cleaned_lines:
+                        return "\n".join(cleaned_lines)
             except Exception as e:
                 print(f"Lỗi khi tạo bullet points bằng GPT: {e}")
-                # Nếu lỗi thì dùng phương pháp dự phòng
         
-        # Phương pháp dự phòng: tạo bullet points đơn giản
-        # Loại bỏ hashtag và ký tự đặc biệt
+        # Phương pháp dự phòng
         clean_desc = re.sub(r'#\S+', '', description)
         clean_desc = re.sub(r'@\S+', '', clean_desc)
         clean_desc = ' '.join(clean_desc.split())
         
-        # Tách câu đơn giản
+        if len(clean_desc) < 50:
+            return clean_desc
+        
         sentences = re.split(r'[.!?\n;]+', clean_desc)
         sentences = [s.strip() for s in sentences if s.strip()]
         
-        # Lọc câu có độ dài hợp lý và tạo bullet points
         bullets = []
         for sent in sentences:
-            if 5 <= len(sent.split()) <= 20:  # Câu có 5-20 từ
+            if 5 <= len(sent.split()) <= 20:
                 bullets.append(f"• {sent}")
-            if len(bullets) >= 5:  # Giới hạn 5 bullet points
+            if len(bullets) >= 5:
                 break
         
-        # Nếu không đủ bullet points, tách theo dấu phẩy
-        if len(bullets) < 3:
-            parts = re.split(r'[,;]+', clean_desc)
-            for part in parts:
-                part = part.strip()
-                if 3 <= len(part.split()) <= 15:
-                    bullets.append(f"• {part}")
-                if len(bullets) >= 5:
-                    break
-        
-        # Nếu vẫn không đủ, trả về mô tả đã làm sạch
         if bullets:
-            return "\n".join(bullets[:5])  # Giới hạn 5 bullet points
+            return "\n".join(bullets[:5])
         else:
-            # Cắt ngắn mô tả nếu quá dài
             if len(clean_desc) > 300:
                 clean_desc = clean_desc[:297] + "..."
             return clean_desc
             
     except Exception as e:
         print(f"Lỗi trong generate_product_description_bullets: {e}")
-        # Trả về mô tả gốc đã làm sạch
         clean_desc = re.sub(r'#\S+', '', description)
         clean_desc = re.sub(r'@\S+', '', clean_desc)
         clean_desc = ' '.join(clean_desc.split())
@@ -663,7 +680,79 @@ def generate_product_description_bullets(description: str) -> str:
 
 
 # ============================================
-# SEND PRODUCT INFO (MỚI HOÀN TOÀN)
+# CẢI THIỆN NGỮ CẢNH - CHỈ GPT KHI CÓ SẢN PHẨM
+# ============================================
+
+def update_product_context(uid: str, ms: str):
+    """Cập nhật ngữ cảnh sản phẩm cho user"""
+    ctx = USER_CONTEXT[uid]
+    
+    # Lưu mã sản phẩm cuối cùng
+    ctx["last_ms"] = ms
+    
+    # Thêm vào lịch sử (giới hạn 5 sản phẩm gần nhất)
+    if "product_history" not in ctx:
+        ctx["product_history"] = []
+    
+    # Nếu đã có trong lịch sử, xóa để thêm vào đầu
+    if ms in ctx["product_history"]:
+        ctx["product_history"].remove(ms)
+    
+    ctx["product_history"].insert(0, ms)
+    
+    # Giới hạn lịch sử
+    if len(ctx["product_history"]) > 5:
+        ctx["product_history"] = ctx["product_history"][:5]
+
+
+def should_use_gpt(text: str, ms: str | None) -> bool:
+    """
+    Kiểm tra xem có nên dùng GPT để trả lời không
+    Chỉ dùng GPT khi có mã sản phẩm VÀ câu hỏi liên quan đến tư vấn sản phẩm
+    """
+    if not ms:
+        return False
+    
+    lower = text.lower()
+    
+    # Chỉ dùng GPT cho các câu hỏi tư vấn cụ thể
+    advice_keywords = [
+        'tư vấn', 'hỏi', 'thông tin', 'chi tiết', 
+        'giá', 'size', 'màu', 'còn hàng', 'tồn kho',
+        'chất liệu', 'kích thước', 'vận chuyển', 'ship',
+        'đổi trả', 'bảo hành', 'mặc', 'phù hợp'
+    ]
+    
+    return any(keyword in lower for keyword in advice_keywords)
+
+
+def get_relevant_product_for_question(uid: str, text: str) -> str | None:
+    """
+    Tìm sản phẩm phù hợp nhất cho câu hỏi dựa trên ngữ cảnh
+    """
+    ctx = USER_CONTEXT[uid]
+    
+    # Ưu tiên 1: Mã sản phẩm trong tin nhắn hiện tại
+    ms_from_text = detect_ms_from_text(text)
+    if ms_from_text and ms_from_text in PRODUCTS:
+        return ms_from_text
+    
+    # Ưu tiên 2: Sản phẩm cuối cùng đang thảo luận
+    last_ms = ctx.get("last_ms")
+    if last_ms and last_ms in PRODUCTS:
+        return last_ms
+    
+    # Ưu tiên 3: Tìm trong lịch sử sản phẩm
+    product_history = ctx.get("product_history", [])
+    for ms in product_history:
+        if ms in PRODUCTS:
+            return ms
+    
+    return None
+
+
+# ============================================
+# SEND PRODUCT INFO
 # ============================================
 
 def send_product_info_debounced(uid: str, ms: str):
@@ -692,16 +781,18 @@ def send_product_info_debounced(uid: str, ms: str):
             ctx["processing_lock"] = False
             return
 
+        # Cập nhật ngữ cảnh
+        update_product_context(uid, ms)
+
         # Messenger 1: Tên sản phẩm
         product_name = product.get('Ten', 'Sản phẩm')
         send_message(uid, f"📌 {product_name}")
-        time.sleep(0.5)  # Delay giữa các tin nhắn
+        time.sleep(0.5)
 
         # Messenger 2: Ảnh sản phẩm (tối đa 5 ảnh)
         images_field = product.get("Images", "")
         urls = parse_image_urls(images_field)
         
-        # Loại trừ ảnh trùng
         unique_images = []
         seen = set()
         for u in urls:
@@ -709,16 +800,14 @@ def send_product_info_debounced(uid: str, ms: str):
                 seen.add(u)
                 unique_images.append(u)
         
-        # Lưu số ảnh đã gửi vào context
         ctx["last_product_images_sent"][ms] = len(unique_images[:5])
         
-        # Gửi 5 ảnh đầu tiên
         sent_count = 0
         for image_url in unique_images[:5]:
             if image_url:
                 send_image(uid, image_url)
                 sent_count += 1
-                time.sleep(0.7)  # Delay giữa các ảnh để tránh rate limit
+                time.sleep(0.7)
         
         if sent_count == 0:
             send_message(uid, "📷 Sản phẩm chưa có hình ảnh ạ.")
@@ -729,7 +818,6 @@ def send_product_info_debounced(uid: str, ms: str):
         mo_ta = product.get("MoTa", "")
         
         if mo_ta:
-            # Tạo mô tả dạng bullet points
             description_bullets = generate_product_description_bullets(mo_ta)
             if description_bullets.strip():
                 send_message(uid, f"📝 THÔNG TIN SẢN PHẨM:\n{description_bullets}")
@@ -750,28 +838,23 @@ def send_product_info_debounced(uid: str, ms: str):
         variants = product.get("variants", [])
         prices = []
         
-        # Thu thập tất cả giá từ các biến thể
         for variant in variants:
             gia_int = variant.get("gia")
             if gia_int and gia_int > 0:
                 prices.append(gia_int)
         
-        # Nếu không có giá từ biến thể, thử lấy từ cột Giá bán
         if not prices:
             gia_raw = product.get("Gia", "")
             gia_int = extract_price_int(gia_raw)
             if gia_int and gia_int > 0:
                 prices.append(gia_int)
         
-        # Xử lý hiển thị giá
         if len(prices) == 0:
             price_msg = "💰 Giá đang cập nhật, vui lòng liên hệ shop để biết chi tiết"
         elif len(set(prices)) == 1:
-            # Tất cả biến thể cùng 1 giá
             price = prices[0]
             price_msg = f"💰 Giá ưu đãi hôm nay chỉ có {price:,.0f}đ"
         else:
-            # Các biến thể có giá khác nhau
             min_price = min(prices)
             max_price = max(prices)
             price_msg = f"💰 Giá chỉ từ {min_price:,.0f}đ đến {max_price:,.0f}đ, bấm đặt mua để biết giá chi tiết cho từng phân loại"
@@ -787,7 +870,6 @@ def send_product_info_debounced(uid: str, ms: str):
 
     except Exception as e:
         print(f"Lỗi khi gửi thông tin sản phẩm: {str(e)}")
-        # Gửi thông báo lỗi đơn giản
         try:
             send_message(uid, f"📌 Sản phẩm: {product.get('Ten', '')}\n\nCó lỗi khi tải thông tin chi tiết. Vui lòng truy cập link dưới đây để đặt hàng:")
             domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
@@ -796,7 +878,6 @@ def send_product_info_debounced(uid: str, ms: str):
         except:
             pass
     finally:
-        # Đảm bảo mở khóa
         ctx["processing_lock"] = False
 
 
@@ -842,7 +923,6 @@ def handle_order_form_step(uid: str, text: str):
         ctx["order_state"] = None
         ctx["order_data"] = data
 
-        # Xác nhận lại đơn
         summary = (
             "Dạ em tóm tắt lại đơn hàng của anh/chị:\n"
             f"- Sản phẩm: {data.get('productName', '')}\n"
@@ -878,7 +958,7 @@ def handle_image(uid: str, image_url: str):
 
 
 # ============================================
-# HANDLE TEXT (ĐÃ SỬA VÀ THÊM CAROUSEL)
+# HANDLE TEXT - ĐÃ SỬA ĐỂ CẢI THIỆN NGỮ CẢNH
 # ============================================
 
 def detect_ms_from_text(text: str):
@@ -891,20 +971,8 @@ def detect_ms_from_text(text: str):
     return None
 
 
-def find_latest_ms_in_context(uid: str):
-    """
-    Lấy mã sản phẩm gần nhất trong context của user (nếu có).
-    """
-    ctx = USER_CONTEXT[uid]
-    ms = ctx.get("last_ms")
-    if ms and ms in PRODUCTS:
-        return ms
-    return None
-
-
 def handle_text(uid: str, text: str):
-    """Xử lý tin nhắn văn bản từ người dùng (đã tối ưu và thêm carousel)"""
-    # Kiểm tra nhanh trước khi xử lý
+    """Xử lý tin nhắn văn bản từ người dùng với cải thiện ngữ cảnh"""
     if not text or len(text.strip()) == 0:
         return
     
@@ -917,10 +985,7 @@ def handle_text(uid: str, text: str):
     ctx["processing_lock"] = True
 
     try:
-        # Load products nếu cần (cache vẫn giữ 300s)
         load_products()
-
-        # Reset postback counter khi có text mới
         ctx["postback_count"] = 0
 
         # Xử lý order form trước
@@ -928,31 +993,24 @@ def handle_text(uid: str, text: str):
             ctx["processing_lock"] = False
             return
 
-        # KIỂM TRA TỪ KHÓA CAROUSEL
         lower = text.lower()
         
+        # KIỂM TRA TỪ KHÓA CAROUSEL
         if any(kw in lower for kw in CAROUSEL_KEYWORDS):
             if PRODUCTS:
-                # Gửi thông báo đang tải
                 send_message(uid, "Dạ, em đang lấy danh sách sản phẩm cho anh/chị...")
                 
-                # Lấy 5 sản phẩm đầu tiên cho carousel
                 carousel_elements = []
                 for i, (ms, product) in enumerate(list(PRODUCTS.items())[:5]):
-                    # Lấy ảnh
                     images_field = product.get("Images", "")
                     urls = parse_image_urls(images_field)
                     image_url = urls[0] if urls else ""
                     
-                    # Tạo mô tả ngắn
                     short_desc = product.get("ShortDesc", "") or short_description(product.get("MoTa", ""))
                     
-                    # Tạo element cho carousel (ĐÃ SỬA THEO YÊU CẦU)
                     element = {
-                        # 1. Chỉ hiển thị tên sản phẩm (đã chứa mã sản phẩm)
                         "title": product.get('Ten', ''),
                         "image_url": image_url,
-                        # 2. Không hiển thị giá, chỉ hiển thị mô tả ngắn
                         "subtitle": short_desc[:80] + "..." if short_desc and len(short_desc) > 80 else (short_desc if short_desc else ""),
                         "default_action": {
                             "type": "web_url",
@@ -965,7 +1023,6 @@ def handle_text(uid: str, text: str):
                                 "url": f"{DOMAIN if DOMAIN.startswith('http') else 'https://' + DOMAIN}/order-form?ms={ms}&uid={uid}",
                                 "title": "🛒 Đặt ngay"
                             },
-                            # 3. Đổi tên nút từ "Tư vấn" thành "Xem chi tiết"
                             {
                                 "type": "postback",
                                 "title": "🔍 Xem chi tiết",
@@ -976,9 +1033,7 @@ def handle_text(uid: str, text: str):
                     carousel_elements.append(element)
                 
                 if carousel_elements:
-                    # Gửi carousel
                     send_carousel_template(uid, carousel_elements)
-                    # Gửi thêm tin nhắn hướng dẫn
                     send_message(uid, "📱 Anh/chị vuốt sang trái/phải để xem thêm sản phẩm nhé!\n💬 Gõ mã sản phẩm (ví dụ: [MS123456]) để xem chi tiết.")
                 else:
                     send_message(uid, "Hiện tại shop chưa có sản phẩm nào để hiển thị ạ.")
@@ -990,27 +1045,40 @@ def handle_text(uid: str, text: str):
                 ctx["processing_lock"] = False
                 return
 
-        # Thử lấy mã sản phẩm từ text
-        ms = detect_ms_from_text(text)
-        if not ms:
-            ms = find_latest_ms_in_context(uid)
-
+        # Tìm mã sản phẩm phù hợp nhất cho câu hỏi
+        ms = get_relevant_product_for_question(uid, text)
+        
         # Nếu có mã sản phẩm trong text, gửi thông tin chi tiết
-        if ms and ms in PRODUCTS:
-            USER_CONTEXT[uid]["last_ms"] = ms
+        detected_ms = detect_ms_from_text(text)
+        if detected_ms and detected_ms in PRODUCTS:
+            ms = detected_ms
+            update_product_context(uid, ms)
             send_product_info_debounced(uid, ms)
             ctx["processing_lock"] = False
             return
 
-        # Gọi GPT trả lời (có thể chậm, nhưng cần thiết)
-        reply = build_chatgpt_reply(uid, text, ms)
-
-        # Chỉ gửi reply nếu không phải đang trong order process
-        if not ctx.get("order_state"):
+        # CHỈ dùng GPT khi có mã sản phẩm VÀ câu hỏi cần tư vấn
+        if ms and ms in PRODUCTS and should_use_gpt(text, ms):
+            # Cập nhật ngữ cảnh
+            update_product_context(uid, ms)
+            
+            # Gọi GPT với thông tin sản phẩm
+            reply = build_chatgpt_reply(uid, text, ms)
             send_message(uid, reply)
+        elif ms and ms in PRODUCTS:
+            # Có mã sản phẩm nhưng không phải câu hỏi tư vấn -> gửi thông tin cơ bản
+            update_product_context(uid, ms)
+            product_name = PRODUCTS[ms].get('Ten', '')
+            send_message(uid, f"Dạ, anh/chị đang hỏi về sản phẩm [{ms}] {product_name}. Anh/chị cần em tư vấn gì về sản phẩm này ạ?")
+        else:
+            # Không có mã sản phẩm -> trả lời chung
+            if any(keyword in lower for keyword in ADVICE_KEYWORDS):
+                send_message(uid, "Dạ, em chưa biết anh/chị đang hỏi về sản phẩm nào. Anh/chị vui lòng cung cấp mã sản phẩm (ví dụ: [MS123456]) để em tư vấn chi tiết ạ.")
+            else:
+                # Câu chào hỏi thông thường
+                send_message(uid, f"Em chào anh/chị! Em là trợ lý bán hàng của {FANPAGE_NAME}. Anh/chị có thể gửi mã sản phẩm hoặc gõ 'xem sản phẩm' để xem danh sách sản phẩm ạ.")
 
-        # Kiểm tra từ khóa đặt hàng (xử lý nhanh)
-        lower = text.lower()
+        # Kiểm tra từ khóa đặt hàng
         if ms and ms in PRODUCTS and any(kw in lower for kw in ORDER_KEYWORDS):
             domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
             order_link = f"{domain}/order-form?ms={ms}&uid={uid}"
@@ -1018,19 +1086,17 @@ def handle_text(uid: str, text: str):
 
     except Exception as e:
         print(f"Error in handle_text for {uid}: {e}")
-        # Gửi thông báo lỗi nhanh
         try:
             send_message(uid, "Dạ em đang gặp chút trục trặc, anh/chị vui lòng thử lại sau ít phút ạ.")
         except:
             pass
     finally:
-        # Luôn đảm bảo mở khóa
         if ctx.get("processing_lock"):
             ctx["processing_lock"] = False
 
 
 # ============================================
-# WEBHOOK HANDLER (ĐÃ SỬA - THÊM XỬ LÝ POSTBACK TRÙNG LẶP)
+# WEBHOOK HANDLER
 # ============================================
 
 @app.route("/", methods=["GET"])
@@ -1074,41 +1140,34 @@ def webhook():
             if m.get("delivery") or m.get("read"):
                 continue
             
-            # Xử lý postback (có kiểm tra trùng lặp)
+            # Xử lý postback
             if "postback" in m:
                 payload = m["postback"].get("payload")
                 if payload:
-                    # Kiểm tra trùng lặp postback
                     ctx = USER_CONTEXT[sender_id]
                     postback_id = m["postback"].get("mid")
                     now = time.time()
                     
-                    # Kiểm tra nếu postback đã được xử lý trong vòng 5 giây
                     if postback_id and postback_id in ctx.get("processed_postbacks", set()):
                         print(f"[POSTBACK DUPLICATE] Bỏ qua postback trùng: {postback_id}")
                         continue
                     
-                    # Kiểm tra thời gian giữa các postback (chống spam)
                     last_postback_time = ctx.get("last_postback_time", 0)
-                    if now - last_postback_time < 1:  # 1 giây
+                    if now - last_postback_time < 1:
                         print(f"[POSTBACK SPAM] User {sender_id} gửi postback quá nhanh")
                         continue
                     
-                    # Lưu postback đã xử lý
                     if postback_id:
                         if "processed_postbacks" not in ctx:
                             ctx["processed_postbacks"] = set()
                         ctx["processed_postbacks"].add(postback_id)
-                        # Giữ tối đa 10 postback gần nhất
                         if len(ctx["processed_postbacks"]) > 10:
-                            # Xóa phần tử cũ nhất
                             ctx["processed_postbacks"] = set(list(ctx["processed_postbacks"])[-10:])
                     
                     ctx["last_postback_time"] = now
                     handle_postback(sender_id, payload)
                     continue
             
-            # Echo handler
             if "message" in m:
                 msg = m["message"]
                 text = msg.get("text")
@@ -1126,7 +1185,7 @@ def webhook():
 
 
 # ============================================
-# POSTBACK HANDLER (ĐÃ THÊM XỬ LÝ CAROUSEL - ĐÃ SỬA LỖI)
+# POSTBACK HANDLER
 # ============================================
 
 def handle_postback(uid: str, payload: str):
@@ -1137,12 +1196,10 @@ def handle_postback(uid: str, payload: str):
         send_message(
             uid,
             f"Em chào anh/chị, em là trợ lý bán hàng của {FANPAGE_NAME}. "
-            "Anh/chị cần em tư vấn sản phẩm hoặc hỗ trợ đặt hàng gì không ạ?\n\n"
-            "📢 Gõ 'xem sản phẩm' để xem danh sách sản phẩm nhé!",
+            "Anh/chị có thể gửi mã sản phẩm (ví dụ: [MS123456]) hoặc gõ 'xem sản phẩm' để xem danh sách sản phẩm ạ.",
         )
         return
     
-    # Xử lý postback từ carousel
     elif payload.startswith("ORDER_"):
         ms = payload.replace("ORDER_", "")
         if ms in PRODUCTS:
@@ -1160,12 +1217,11 @@ def handle_postback(uid: str, payload: str):
             send_message(uid, "❌ Em không tìm thấy sản phẩm này trong hệ thống. Anh/chị vui lòng kiểm tra lại mã sản phẩm ạ.")
         return
 
-    # Các postback khác do bạn tự định nghĩa nếu cần
     send_message(uid, "Dạ em đã nhận được thao tác của anh/chị ạ.")
 
 
 # ============================================
-# ORDER FORM PAGE
+# ORDER FORM PAGE (giữ nguyên)
 # ============================================
 
 @app.route("/order-form", methods=["GET"])
@@ -1373,7 +1429,7 @@ def order_form():
 
 
 # ============================================
-# API: GET PRODUCT (CHO FORM)
+# API ENDPOINTS (giữ nguyên)
 # ============================================
 
 @app.route("/api/get-product")
@@ -1418,10 +1474,6 @@ def api_get_product():
     }
 
 
-# ============================================
-# API: GET VARIANT PRICE
-# ============================================
-
 @app.route("/api/get-variant-price")
 def api_get_variant_price():
     ms = (request.args.get("ms") or "").upper()
@@ -1436,7 +1488,6 @@ def api_get_variant_price():
     variants = product.get("variants") or []
 
     chosen = None
-    # Ưu tiên khớp cả màu & size (nếu có truyền)
     for v in variants:
         vm = (v.get("mau") or "").strip().lower()
         vs = (v.get("size") or "").strip().lower()
@@ -1450,7 +1501,6 @@ def api_get_variant_price():
         chosen = v
         break
 
-    # Nếu không match chính xác, lấy biến thể đầu tiên (nếu có)
     if not chosen and variants:
         chosen = variants[0]
 
@@ -1462,7 +1512,6 @@ def api_get_variant_price():
             price = chosen["gia"]
             price_display = chosen.get("gia_raw") or price_display
         else:
-            # Thử parse từ chuỗi giá biến thể
             p_int = extract_price_int(chosen.get("gia_raw"))
             if p_int is not None:
                 price = p_int
@@ -1482,10 +1531,6 @@ def api_get_variant_price():
         "price_display": price_display,
     }
 
-
-# ============================================
-# API: SUBMIT ORDER
-# ============================================
 
 @app.route("/api/submit-order", methods=["POST"])
 def api_submit_order():
@@ -1508,7 +1553,6 @@ def api_submit_order():
     price_int = extract_price_int(price_str) or 0
     total = price_int * quantity
 
-    # Gửi tin nhắn xác nhận về Messenger
     if uid:
         msg = (
             "🎉 Shop đã nhận được đơn hàng mới:\n"
@@ -1530,18 +1574,10 @@ def api_submit_order():
     return {"status": "ok", "message": "Đơn hàng đã được tiếp nhận"}
 
 
-# ============================================
-# STATIC
-# ============================================
-
 @app.route("/static/<path:path>")
 def static_files(path):
     return send_from_directory("static", path)
 
-
-# ============================================
-# HEALTH CHECK (MỚI THÊM)
-# ============================================
 
 @app.route("/health", methods=["GET"])
 def health_check():
@@ -1557,7 +1593,7 @@ def health_check():
 
 
 # ============================================
-# MAIN (LOCAL RUN)
+# MAIN
 # ============================================
 
 if __name__ == "__main__":
