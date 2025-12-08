@@ -624,27 +624,31 @@ def generate_policy_response(product_description: str, question: str) -> str:
 
 
 # ============================================
-# GPT PROMPT - ĐÃ SỬA ĐỂ CHỈ DỰA VÀO THÔNG TIN SẢN PHẨM
+# GPT PROMPT - PHIÊN BẢN MỚI VỚI GIỌNG ĐIỆU TỰ NHIÊN
 # ============================================
 
 def build_product_system_prompt(product: dict | None, ms: str | None):
-    """Xây dựng prompt cho GPT - CHỈ dựa vào thông tin sản phẩm thực tế"""
-    
+    """
+    PROMPT mới – tối ưu giọng tư vấn tự nhiên, chuyên nghiệp, giống người bán hàng thật.
+    Không thay đổi logic gọi GPT, chỉ cải thiện cách GPT diễn đạt.
+    """
+
     if not client or not OPENAI_API_KEY:
-        return None  # Không có GPT
-    
-    # Nếu không có mã sản phẩm hoặc không có sản phẩm trong hệ thống
+        return None
+
+    # Trường hợp chưa có mã sản phẩm hoặc không có sản phẩm trong hệ thống
     if not ms or not product:
         return (
-            "Bạn là trợ lý bán hàng cho shop Facebook. "
-            "Hiện tại bạn KHÔNG có thông tin về sản phẩm cụ thể nào. "
-            "Hãy trả lời một cách chung chung và đề nghị khách hàng cung cấp mã sản phẩm hoặc hình ảnh. "
-            "TUYỆT ĐỐI KHÔNG được tư vấn chi tiết về bất kỳ sản phẩm nào nếu không có thông tin cụ thể. "
-            "Chỉ được phép trả lời các câu hỏi chung về shop, chính sách mua hàng (nếu được hỏi cụ thể). "
-            "Nếu khách hỏi về sản phẩm mà không cung cấp mã, hãy đề nghị họ gửi mã sản phẩm [MSxxxxxx]."
+            "Bạn là trợ lý bán hàng online của một shop thời trang trên Facebook. "
+            "Giọng điệu thân thiện, tự nhiên, chuyên nghiệp, xưng 'em', gọi khách là 'anh/chị'. "
+            "Hiện tại bạn CHƯA có thông tin sản phẩm cụ thể nào. "
+            "Khi khách hỏi về sản phẩm, hãy nhẹ nhàng đề nghị họ gửi mã sản phẩm dạng [MSxxxxx] "
+            "hoặc gửi hình ảnh sản phẩm để em tra cứu. "
+            "Không được bịa thông tin về sản phẩm khi chưa có dữ liệu thật. "
+            "Chỉ được phép trả lời các câu hỏi chung chung về quy trình mua hàng, cách đặt hàng, "
+            "nhưng vẫn nên hướng khách cung cấp mã sản phẩm để tư vấn chính xác hơn."
         )
-    
-    # Có thông tin sản phẩm - chỉ dựa vào thông tin này
+
     ten = product.get("Ten", "")
     gia = product.get("Gia", "")
     mau = product.get("màu (Thuộc tính)", "")
@@ -652,72 +656,86 @@ def build_product_system_prompt(product: dict | None, ms: str | None):
     tonkho = product.get("Tồn kho", "")
     mota = product.get("MoTa", "")
 
-    # Trích xuất thông tin chính sách từ mô tả
     policies = extract_policy_info_from_description(mota)
-    
-    # Tạo prompt chi tiết với thông tin thực tế
-    prompt_parts = [
-        f"Bạn là trợ lý bán hàng cho shop Facebook. Bạn chỉ được phép tư vấn dựa TRÊN THÔNG TIN SẢN PHẨM SAU ĐÂY:",
-        "",
-        "THÔNG TIN SẢN PHẨM:",
-        f"- Mã sản phẩm: {ms}",
-        f"- Tên sản phẩm: {ten}",
-        f"- Giá bán: {gia}",
-        f"- Màu sắc có sẵn: {mau if mau else 'Không có thông tin'}",
-        f"- Size có sẵn: {size if size else 'Không có thông tin'}",
-        f"- Tình trạng tồn kho: {tonkho if tonkho else 'Không có thông tin'}",
-        f"- Mô tả: {mota if mota else 'Không có mô tả chi tiết'}",
-    ]
-    
-    # Thêm thông tin chính sách nếu có
-    if policies:
-        prompt_parts.append("")
-        prompt_parts.append("THÔNG TIN CHÍNH SÁCH TỪ MÔ TẢ:")
-        for key, value in policies.items():
-            if key == 'shipping':
-                prompt_parts.append(f"- Chính sách vận chuyển: {value}")
-            elif key == 'return_warranty':
-                prompt_parts.append(f"- Chính sách đổi trả/bảo hành: {value}")
-            elif key == 'payment':
-                prompt_parts.append(f"- Chính sách thanh toán: {value}")
-    
-    prompt_parts.extend([
-        "",
-        "QUY TẮC TƯ VẤN:",
-        "1. CHỈ sử dụng thông tin trên để tư vấn",
-        "2. KHÔNG được bịa thêm bất kỳ thông tin nào không có trong dữ liệu",
-        "3. Nếu khách hỏi thông tin không có trong dữ liệu (ví dụ: chất liệu cụ thể, trọng lượng, xuất xứ), hãy nói 'Hiện tại em không có thông tin này trong hệ thống'",
-        "4. Nếu khách hỏi về chính sách mà không có trong thông tin trên, hãy trả lời chung: 'Shop hỗ trợ giao hàng toàn quốc, đổi trả trong 3 ngày nếu sản phẩm lỗi'",
-        "5. Luôn kết thúc bằng việc đề nghị đặt hàng nếu khách quan tâm",
-        "",
-        "Hãy trả lời bằng tiếng Việt, thân thiện, xưng 'em' và gọi khách là 'anh/chị'."
-    ])
-    
-    return "\n".join(prompt_parts)
+
+    prompt = f"""
+Bạn là TRỢ LÝ TƯ VẤN BÁN HÀNG CHUYÊN NGHIỆP của một shop thời trang trên Facebook.
+
+Phong cách giao tiếp:
+- Xưng "em", gọi khách là "anh/chị"
+- Giọng điệu: thân thiện, ấm áp, lễ phép, trả lời tự nhiên như đang chat Messenger
+- Tập trung giải thích đơn giản, dễ hiểu, ưu tiên lợi ích thực tế cho khách
+- Không dùng câu chữ quá máy móc, không liệt kê khô khan như robot
+
+Bạn CHỈ được phép tư vấn dựa trên dữ liệu SẢN PHẨM dưới đây, không được bịa thêm:
+
+• Mã sản phẩm: {ms}
+• Tên: {ten}
+• Giá bán: {gia}
+• Màu có sẵn: {mau or 'Không có thông tin'}
+• Size có sẵn: {size or 'Không có thông tin'}
+• Tồn kho: {tonkho or 'Không có thông tin'}
+• Mô tả: {mota or 'Không có mô tả chi tiết'}
+
+Thông tin chính sách trích từ mô tả (nếu có):
+"""
+
+    for k, v in policies.items():
+        if k == "shipping":
+            prompt += f"- Vận chuyển: {v}\n"
+        if k == "return_warranty":
+            prompt += f"- Đổi trả/Bảo hành: {v}\n"
+        if k == "payment":
+            prompt += f"- Thanh toán: {v}\n"
+
+    prompt += """
+QUY TẮC TRẢ LỜI:
+
+1. CHỈ sử dụng đúng thông tin có trong dữ liệu sản phẩm ở trên.
+2. KHÔNG được bịa thêm chất liệu, xuất xứ, bảo hành… nếu không có trong dữ liệu.
+3. Nếu khách hỏi thông tin mà hệ thống không có, hãy nói nhẹ nhàng kiểu:
+   "Dạ phần này trong hệ thống chưa có thông tin ạ, em sợ nói sai nên không dám khẳng định."
+4. Nếu không có thông tin chính sách cụ thể, có thể dùng chính sách chung:
+   - Giao hàng toàn quốc
+   - Hỗ trợ đổi trả khi sản phẩm lỗi, còn tem mác
+5. Luôn ưu tiên trả lời NGẮN – RÕ – DỄ HIỂU, không viết quá dài dòng.
+6. Cuối mỗi câu trả lời, hãy gợi ý khéo:
+   - "Anh/chị thích mẫu này màu nào, size gì để em tư vấn chuẩn hơn ạ?"
+   - Hoặc: "Nếu anh/chị ưng rồi thì cho em xin thông tin để em lên đơn luôn giúp mình nhé."
+
+Hãy trả lời 100% bằng tiếng Việt, tự nhiên như một nhân viên tư vấn bán hàng đang chat với khách trên Messenger.
+"""
+
+    return prompt
 
 
 def build_chatgpt_reply(uid: str, text: str, ms: str | None):
     """
-    Gọi OpenAI để trả lời câu hỏi của khách hàng - CHỈ khi có thông tin sản phẩm
+    Gọi OpenAI để trả lời câu hỏi của khách hàng.
+    Giữ nguyên logic cũ, chỉ tối ưu giọng trả lời cho tự nhiên hơn.
     """
     if not client or not OPENAI_API_KEY:
-        return "Hiện tại hệ thống AI đang tạm thời bảo trì, anh/chị inbox trực tiếp để shop hỗ trợ ạ."
+        return "Hiện tại hệ thống trợ lý AI đang bảo trì, anh/chị nhắn trực tiếp để shop hỗ trợ giúp em với ạ."
 
     load_products()
-    
-    # Chỉ lấy sản phẩm nếu có mã và sản phẩm tồn tại
+
     product = None
     if ms and ms in PRODUCTS:
         product = PRODUCTS[ms]
     else:
-        # Nếu không có sản phẩm, không gọi GPT
-        return "Em chưa có thông tin về sản phẩm này. Anh/chị vui lòng cung cấp mã sản phẩm (ví dụ: [MS123456]) để em kiểm tra chi tiết ạ."
+        # Không có sản phẩm → không gọi GPT theo dữ liệu chi tiết, tránh bịa
+        return (
+            "Em chưa thấy mã sản phẩm trong hệ thống ạ.\n"
+            "Anh/chị gửi giúp em mã sản phẩm dạng [MSxxxxx] hoặc gửi lại hình sản phẩm để em kiểm tra chi tiết nhé."
+        )
 
     system_prompt = build_product_system_prompt(product, ms)
-    
-    # Nếu không có prompt (không có GPT hoặc không có sản phẩm)
+
     if not system_prompt:
-        return "Hiện tại em chưa có thông tin chi tiết về sản phẩm này. Anh/chị vui lòng cung cấp mã sản phẩm để em kiểm tra ạ."
+        return (
+            "Hiện tại em chưa truy cập được dữ liệu sản phẩm trong hệ thống, "
+            "anh/chị vui lòng nhắn lại sau ít phút hoặc inbox trực tiếp fanpage giúp em với ạ."
+        )
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -728,20 +746,28 @@ def build_chatgpt_reply(uid: str, text: str, ms: str | None):
         resp = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=messages,
-            temperature=0.3,  # Giảm temperature để tránh bịa thông tin
-            max_tokens=300,   # Giới hạn token để tránh dài dòng
-            timeout=10.0  # Thêm timeout 10 giây
+            temperature=0.55,   # tăng nhẹ để nói chuyện tự nhiên hơn nhưng vẫn hạn chế bịa
+            max_tokens=350,
+            timeout=10.0,
         )
-        reply = resp.choices[0].message.content.strip()
-        
-        # Kiểm tra reply có hợp lệ không
+        reply = (resp.choices[0].message.content or "").strip()
+
+        # Nếu GPT trả về quá ngắn hoặc rỗng -> trả lời fallback
         if not reply or len(reply) < 10:
-            return "Em hiện chưa có đủ thông tin để trả lời câu hỏi này. Anh/chị vui lòng liên hệ trực tiếp với shop để được hỗ trợ chi tiết ạ."
-        
+            return (
+                "Em chưa có đủ thông tin để trả lời chính xác câu này ạ.\n"
+                "Anh/chị cho em xin thêm chi tiết (hoặc mã sản phẩm) để em hỗ trợ kỹ hơn nhé."
+            )
+
         return reply
+
     except Exception as e:
         print("OpenAI error:", e)
-        return "Hiện tại em đang gặp chút trục trặc kỹ thuật, anh/chị vui lòng nhắn lại sau ít phút giúp em ạ."
+        return (
+            "Hiện tại em đang gặp chút trục trặc kỹ thuật với trợ lý AI, "
+            "anh/chị vui lòng nhắn lại sau ít phút hoặc để lại số điện thoại, "
+            "shop sẽ chủ động gọi hỗ trợ mình ạ."
+        )
 
 
 def generate_product_advantage(product_name: str, description: str) -> str:
