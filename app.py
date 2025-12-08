@@ -1228,16 +1228,7 @@ def handle_text(uid: str, text: str):
         # Tìm mã sản phẩm phù hợp nhất cho câu hỏi
         ms = get_relevant_product_for_question(uid, text)
         
-        # Nếu có mã sản phẩm trong text, gửi thông tin chi tiết
-        detected_ms = detect_ms_from_text(text)
-        if detected_ms and detected_ms in PRODUCTS:
-            ms = detected_ms
-            update_product_context(uid, ms)
-            send_product_info_debounced(uid, ms)
-            ctx["processing_lock"] = False
-            return
-
-        # KIỂM TRA CÂU HỎI VỀ CHÍNH SÁCH
+        # KIỂM TRA CÂU HỎI VỀ CHÍNH SÁCH - QUAN TRỌNG: ĐƯA LÊN TRƯỚC
         policy_keywords = [
             'chính sách', 'ship', 'vận chuyển', 'giao hàng', 
             'đổi trả', 'hoàn tiền', 'bảo hành', 'thanh toán',
@@ -1303,6 +1294,15 @@ def handle_text(uid: str, text: str):
             ctx["processing_lock"] = False
             return
         
+        # Nếu có mã sản phẩm trong text, gửi thông tin chi tiết
+        detected_ms = detect_ms_from_text(text)
+        if detected_ms and detected_ms in PRODUCTS:
+            ms = detected_ms
+            update_product_context(uid, ms)
+            send_product_info_debounced(uid, ms)
+            ctx["processing_lock"] = False
+            return
+
         # CHỈ dùng GPT khi có mã sản phẩm và câu hỏi phù hợp
         if ms and ms in PRODUCTS and should_use_gpt(text, ms):
             update_product_context(uid, ms)
