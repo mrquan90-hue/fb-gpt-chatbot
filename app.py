@@ -430,6 +430,101 @@ def load_products(force=False):
 
 
 # ============================================
+# HELPER: POLICY INFO EXTRACTION
+# ============================================
+
+def extract_policy_info_from_description(description: str) -> dict:
+    """
+    Trích xuất thông tin chính sách từ cột Mô tả trong sheet
+    """
+    if not description:
+        return {}
+    
+    lower_desc = description.lower()
+    policies = {}
+    
+    # Kiểm tra các loại chính sách trong mô tả
+    if any(keyword in lower_desc for keyword in ['ship', 'vận chuyển', 'giao hàng', 'phí ship']):
+        # Trích xuất thông tin vận chuyển
+        lines = description.split('\n')
+        for line in lines:
+            if any(keyword in line.lower() for keyword in ['ship', 'vận chuyển', 'giao hàng']):
+                policies['shipping'] = line.strip()
+                break
+    
+    if any(keyword in lower_desc for keyword in ['đổi trả', 'hoàn tiền', 'bảo hành']):
+        # Trích xuất thông tin đổi trả/bảo hành
+        lines = description.split('\n')
+        for line in lines:
+            if any(keyword in line.lower() for keyword in ['đổi trả', 'hoàn tiền', 'bảo hành']):
+                policies['return_warranty'] = line.strip()
+                break
+    
+    if any(keyword in lower_desc for keyword in ['thanh toán', 'payment', 'cod', 'chuyển khoản']):
+        # Trích xuất thông tin thanh toán
+        lines = description.split('\n')
+        for line in lines:
+            if any(keyword in line.lower() for keyword in ['thanh toán', 'payment', 'cod']):
+                policies['payment'] = line.strip()
+                break
+    
+    return policies
+
+
+def generate_policy_response(product_description: str, question: str) -> str:
+    """
+    Tạo câu trả lời về chính sách dựa trên mô tả sản phẩm
+    """
+    policies = extract_policy_info_from_description(product_description)
+    lower_question = question.lower()
+    
+    if 'ship' in lower_question or 'vận chuyển' in lower_question or 'giao hàng' in lower_question:
+        if 'shipping' in policies:
+            return policies['shipping']
+        else:
+            return "Hiện tại em không tìm thấy thông tin vận chuyển cụ thể cho sản phẩm này trong hệ thống. Anh/chị vui lòng liên hệ shop để biết chi tiết ạ."
+    
+    elif 'đổi trả' in lower_question or 'hoàn tiền' in lower_question:
+        if 'return_warranty' in policies:
+            return policies['return_warranty']
+        else:
+            return "Hiện tại em không tìm thấy thông tin đổi trả cụ thể cho sản phẩm này trong hệ thống. Chính sách chung của shop là đổi trả trong 3 ngày nếu sản phẩm lỗi."
+    
+    elif 'bảo hành' in lower_question:
+        if 'return_warranty' in policies:
+            return policies['return_warranty']
+        else:
+            return "Hiện tại em không tìm thấy thông tin bảo hành cụ thể cho sản phẩm này trong hệ thống. Anh/chị vui lòng liên hệ shop để biết chi tiết ạ."
+    
+    elif 'thanh toán' in lower_question or 'payment' in lower_question or 'cod' in lower_question:
+        if 'payment' in policies:
+            return policies['payment']
+        else:
+            return "Shop hỗ trợ thanh toán khi nhận hàng (COD) và chuyển khoản ngân hàng."
+    
+    else:
+        # Trả lời chung nếu không tìm thấy thông tin cụ thể
+        response_parts = []
+        if policies:
+            response_parts.append("Thông tin chính sách cho sản phẩm:")
+            for key, value in policies.items():
+                if key == 'shipping':
+                    response_parts.append(f"• Vận chuyển: {value}")
+                elif key == 'return_warranty':
+                    response_parts.append(f"• Đổi trả/Bảo hành: {value}")
+                elif key == 'payment':
+                    response_parts.append(f"• Thanh toán: {value}")
+        else:
+            response_parts.append("Hiện tại em không tìm thấy thông tin chính sách cụ thể cho sản phẩm này.")
+            response_parts.append("Chính sách chung của shop:")
+            response_parts.append("• Giao hàng toàn quốc, phí ship từ 20-50k")
+            response_parts.append("• Đổi trả trong 3 ngày nếu sản phẩm lỗi")
+            response_parts.append("• Thanh toán khi nhận hàng (COD)")
+        
+        return "\n".join(response_parts)
+
+
+# ============================================
 # GPT PROMPT - ĐÃ SỬA ĐỂ CHỈ DỰA VÀO THÔNG TIN SẢN PHẨM
 # ============================================
 
@@ -458,31 +553,48 @@ def build_product_system_prompt(product: dict | None, ms: str | None):
     tonkho = product.get("Tồn kho", "")
     mota = product.get("MoTa", "")
 
-    # Lấy các biến thể
-    variants = product.get("variants", [])
+    # Trích xuất thông tin chính sách từ mô tả
+    policies = extract_policy_info_from_description(mota)
     
     # Tạo prompt chi tiết với thông tin thực tế
-    prompt = f"""Bạn là trợ lý bán hàng cho shop Facebook. Bạn chỉ được phép tư vấn dựa TRÊN THÔNG TIN SẢN PHẨM SAU ĐÂY:
-
-THÔNG TIN SẢN PHẨM:
-- Mã sản phẩm: {ms}
-- Tên sản phẩm: {ten}
-- Giá bán: {gia}
-- Màu sắc có sẵn: {mau if mau else "Không có thông tin"}
-- Size có sẵn: {size if size else "Không có thông tin"}
-- Tình trạng tồn kho: {tonkho if tonkho else "Không có thông tin"}
-- Mô tả: {mota if mota else "Không có mô tả chi tiết"}
-
-QUY TẮC TƯ VẤN:
-1. CHỈ sử dụng thông tin trên để tư vấn
-2. KHÔNG được bịa thêm bất kỳ thông tin nào không có trong dữ liệu
-3. Nếu khách hỏi thông tin không có trong dữ liệu (ví dụ: chất liệu cụ thể, trọng lượng, xuất xứ), hãy nói "Hiện tại em không có thông tin này trong hệ thống"
-4. Nếu khách hỏi về vận chuyển, đổi trả, hãy trả lời chung: "Shop hỗ trợ giao hàng toàn quốc, đổi trả trong 3 ngày nếu sản phẩm lỗi"
-5. Luôn kết thúc bằng việc đề nghị đặt hàng nếu khách quan tâm
-
-Hãy trả lời bằng tiếng Việt, thân thiện, xưng 'em' và gọi khách là 'anh/chị'."""
+    prompt_parts = [
+        f"Bạn là trợ lý bán hàng cho shop Facebook. Bạn chỉ được phép tư vấn dựa TRÊN THÔNG TIN SẢN PHẨM SAU ĐÂY:",
+        "",
+        "THÔNG TIN SẢN PHẨM:",
+        f"- Mã sản phẩm: {ms}",
+        f"- Tên sản phẩm: {ten}",
+        f"- Giá bán: {gia}",
+        f"- Màu sắc có sẵn: {mau if mau else 'Không có thông tin'}",
+        f"- Size có sẵn: {size if size else 'Không có thông tin'}",
+        f"- Tình trạng tồn kho: {tonkho if tonkho else 'Không có thông tin'}",
+        f"- Mô tả: {mota if mota else 'Không có mô tả chi tiết'}",
+    ]
     
-    return prompt
+    # Thêm thông tin chính sách nếu có
+    if policies:
+        prompt_parts.append("")
+        prompt_parts.append("THÔNG TIN CHÍNH SÁCH TỪ MÔ TẢ:")
+        for key, value in policies.items():
+            if key == 'shipping':
+                prompt_parts.append(f"- Chính sách vận chuyển: {value}")
+            elif key == 'return_warranty':
+                prompt_parts.append(f"- Chính sách đổi trả/bảo hành: {value}")
+            elif key == 'payment':
+                prompt_parts.append(f"- Chính sách thanh toán: {value}")
+    
+    prompt_parts.extend([
+        "",
+        "QUY TẮC TƯ VẤN:",
+        "1. CHỈ sử dụng thông tin trên để tư vấn",
+        "2. KHÔNG được bịa thêm bất kỳ thông tin nào không có trong dữ liệu",
+        "3. Nếu khách hỏi thông tin không có trong dữ liệu (ví dụ: chất liệu cụ thể, trọng lượng, xuất xứ), hãy nói 'Hiện tại em không có thông tin này trong hệ thống'",
+        "4. Nếu khách hỏi về chính sách mà không có trong thông tin trên, hãy trả lời chung: 'Shop hỗ trợ giao hàng toàn quốc, đổi trả trong 3 ngày nếu sản phẩm lỗi'",
+        "5. Luôn kết thúc bằng việc đề nghị đặt hàng nếu khách quan tâm",
+        "",
+        "Hãy trả lời bằng tiếng Việt, thân thiện, xưng 'em' và gọi khách là 'anh/chị'."
+    ])
+    
+    return "\n".join(prompt_parts)
 
 
 def build_chatgpt_reply(uid: str, text: str, ms: str | None):
@@ -519,6 +631,7 @@ def build_chatgpt_reply(uid: str, text: str, ms: str | None):
             messages=messages,
             temperature=0.3,  # Giảm temperature để tránh bịa thông tin
             max_tokens=300,   # Giới hạn token để tránh dài dòng
+            timeout=10.0  # Thêm timeout 10 giây
         )
         reply = resp.choices[0].message.content.strip()
         
@@ -763,11 +876,17 @@ def send_product_info_debounced(uid: str, ms: str):
     last_ms = ctx.get("product_info_sent_ms")
     last_time = ctx.get("last_product_info_time", 0)
 
-    # KIỂM TRA DEBOUNCE CHẶT CHẼ: 10 giây cho cùng sản phẩm
-    if last_ms == ms and (now - last_time) < 10:
-        print(f"[DEBOUNCE] Bỏ qua gửi lại thông tin sản phẩm {ms} cho user {uid} (chưa đủ 10s)")
+    # CẢI TIẾN: Thay đổi debounce logic
+    # Chỉ debounce nếu cùng sản phẩm VÀ trong 5 giây gần nhất
+    # Nếu user chủ động yêu cầu lại (bằng postback hoặc nhắn mã), vẫn gửi
+    if last_ms == ms and (now - last_time) < 5:
+        print(f"[DEBOUNCE] Bỏ qua gửi lại thông tin sản phẩm {ms} cho user {uid} (chưa đủ 5s)")
         return
-
+    # Nếu khác sản phẩm, reset thời gian để có thể gửi ngay
+    elif last_ms != ms:
+        # Reset thời gian khi chuyển sang sản phẩm mới
+        ctx["last_product_info_time"] = 0
+    
     # Đánh dấu đang gửi
     ctx["product_info_sent_ms"] = ms
     ctx["last_product_info_time"] = now
@@ -834,31 +953,52 @@ def send_product_info_debounced(uid: str, ms: str):
         
         time.sleep(0.5)
 
-        # Messenger 5: Giá bán
+        # Messenger 5: Giá bán và thông tin biến thể
         variants = product.get("variants", [])
         prices = []
-        
+        variant_details = []
+
         for variant in variants:
             gia_int = variant.get("gia")
             if gia_int and gia_int > 0:
                 prices.append(gia_int)
-        
+                mau = variant.get("mau", "Mặc định")
+                size = variant.get("size", "Mặc định")
+                tonkho = variant.get("tonkho", "Còn hàng")
+                
+                # Thêm thông tin biến thể nếu có cả màu và size
+                if mau or size:
+                    variant_str = f"{mau}" if mau else ""
+                    if size:
+                        variant_str += f" - {size}" if variant_str else f"{size}"
+                    variant_details.append(f"{variant_str}: {gia_int:,.0f}đ")
+
         if not prices:
             gia_raw = product.get("Gia", "")
             gia_int = extract_price_int(gia_raw)
             if gia_int and gia_int > 0:
                 prices.append(gia_int)
-        
+
         if len(prices) == 0:
             price_msg = "💰 Giá đang cập nhật, vui lòng liên hệ shop để biết chi tiết"
         elif len(set(prices)) == 1:
             price = prices[0]
-            price_msg = f"💰 Giá ưu đãi hôm nay chỉ có {price:,.0f}đ"
+            if variant_details:
+                price_msg = f"💰 GIÁ SẢN PHẨM:\n" + "\n".join(variant_details[:3])  # Giới hạn 3 biến thể
+                if len(variant_details) > 3:
+                    price_msg += f"\n... và {len(variant_details)-3} phân loại khác"
+            else:
+                price_msg = f"💰 Giá ưu đãi: {price:,.0f}đ"
         else:
             min_price = min(prices)
             max_price = max(prices)
-            price_msg = f"💰 Giá chỉ từ {min_price:,.0f}đ đến {max_price:,.0f}đ, bấm đặt mua để biết giá chi tiết cho từng phân loại"
-        
+            if variant_details:
+                price_msg = f"💰 GIÁ THEO PHÂN LOẠI:\n" + "\n".join(variant_details[:4])  # Giới hạn 4 biến thể
+                if len(variant_details) > 4:
+                    price_msg += f"\n... và {len(variant_details)-4} phân loại khác"
+            else:
+                price_msg = f"💰 Giá chỉ từ {min_price:,.0f}đ đến {max_price:,.0f}đ"
+
         send_message(uid, price_msg)
         
         time.sleep(0.5)
@@ -1034,7 +1174,8 @@ def handle_text(uid: str, text: str):
                 
                 if carousel_elements:
                     send_carousel_template(uid, carousel_elements)
-                    send_message(uid, "📱 Anh/chị vuốt sang trái/phải để xem thêm sản phẩm nhé!\n💬 Gõ mã sản phẩm (ví dụ: [MS123456]) để xem chi tiết.")
+                    send_message(uid, "📱 Anh/chị vuốt sang trái/phải để xem thêm sản phẩm nhé!")
+                    send_message(uid, "💬 Gõ mã sản phẩm (ví dụ: [MS123456]) hoặc bấm 'Xem chi tiết' để xem thông tin và chính sách cụ thể.")
                 else:
                     send_message(uid, "Hiện tại shop chưa có sản phẩm nào để hiển thị ạ.")
                 
@@ -1057,7 +1198,64 @@ def handle_text(uid: str, text: str):
             ctx["processing_lock"] = False
             return
 
-        # CHỈ dùng GPT khi có mã sản phẩm VÀ câu hỏi cần tư vấn
+        # KIỂM TRA CÂU HỎI VỀ CHÍNH SÁCH
+        policy_keywords = [
+            'chính sách', 'ship', 'vận chuyển', 'giao hàng', 
+            'đổi trả', 'hoàn tiền', 'bảo hành', 'thanh toán',
+            'cod', 'payment', 'phí ship'
+        ]
+        
+        is_policy_question = any(keyword in lower for keyword in policy_keywords)
+        
+        # Nếu là câu hỏi về chính sách
+        if is_policy_question:
+            # Nếu là câu hỏi chung về chính sách shop (không liên quan sản phẩm cụ thể)
+            general_policy_questions = [
+                'shop có chính sách gì',
+                'chính sách của shop',
+                'chính sách mua hàng',
+                'shop ship thế nào',
+                'shop đổi trả ra sao'
+            ]
+            
+            if any(q in lower for q in general_policy_questions):
+                # Trả lời chính sách chung của shop
+                general_response = (
+                    "Chính sách chung của shop:\n"
+                    "• Giao hàng toàn quốc, phí ship từ 20-50k tùy khu vực\n"
+                    "• Đổi trả trong 3-7 ngày tùy sản phẩm\n"
+                    "• Thanh toán khi nhận hàng (COD) hoặc chuyển khoản\n"
+                    "• Bảo hành theo chính sách của từng sản phẩm\n\n"
+                    "Để biết chính sách cụ thể cho sản phẩm, anh/chị vui lòng cho em biết mã sản phẩm ạ."
+                )
+                send_message(uid, general_response)
+                ctx["processing_lock"] = False
+                return
+            
+            # Nếu đã có mã sản phẩm trong ngữ cảnh
+            if ms and ms in PRODUCTS:
+                update_product_context(uid, ms)
+                product = PRODUCTS[ms]
+                description = product.get("MoTa", "")
+                
+                # Tạo câu trả lời từ thông tin trong mô tả
+                response = generate_policy_response(description, text)
+                send_message(uid, response)
+                
+                # Hỏi thêm nếu cần
+                send_message(uid, "Anh/chị có cần em tư vấn thêm về sản phẩm này không ạ?")
+            else:
+                # Chưa biết sản phẩm nào - hỏi lại khách
+                send_message(uid, "Anh/chị hỏi về sản phẩm nào nhỉ? Vui lòng cho em biết mã sản phẩm để em kiểm tra chính sách cụ thể ạ.")
+                
+                # Gợi ý xem sản phẩm
+                if PRODUCTS:
+                    send_message(uid, "Hoặc anh/chị có thể gõ 'xem sản phẩm' để xem danh sách sản phẩm và chọn sản phẩm cần tư vấn ạ.")
+                
+            ctx["processing_lock"] = False
+            return
+        
+        # CHỈ dùng GPT khi có mã sản phẩm VÀ câu hỏi liên quan đến tư vấn sản phẩm
         if ms and ms in PRODUCTS and should_use_gpt(text, ms):
             # Cập nhật ngữ cảnh
             update_product_context(uid, ms)
@@ -1073,10 +1271,17 @@ def handle_text(uid: str, text: str):
         else:
             # Không có mã sản phẩm -> trả lời chung
             if any(keyword in lower for keyword in ADVICE_KEYWORDS):
-                send_message(uid, "Dạ, em chưa biết anh/chị đang hỏi về sản phẩm nào. Anh/chị vui lòng cung cấp mã sản phẩm (ví dụ: [MS123456]) để em tư vấn chi tiết ạ.")
+                # Nếu là câu hỏi tư vấn nhưng chưa có sản phẩm
+                if 'giá' in lower or 'bao nhiêu' in lower:
+                    send_message(uid, "Dạ, để em biết giá cụ thể, anh/chị vui lòng cho em biết mã sản phẩm hoặc gõ 'xem sản phẩm' để xem danh sách ạ.")
+                else:
+                    send_message(uid, "Dạ, em chưa biết anh/chị đang hỏi về sản phẩm nào. Anh/chị vui lòng cung cấp mã sản phẩm (ví dụ: [MS123456]) để em tư vấn chi tiết ạ.")
             else:
                 # Câu chào hỏi thông thường
-                send_message(uid, f"Em chào anh/chị! Em là trợ lý bán hàng của {FANPAGE_NAME}. Anh/chị có thể gửi mã sản phẩm hoặc gõ 'xem sản phẩm' để xem danh sách sản phẩm ạ.")
+                send_message(uid, f"Em chào anh/chị! Em là trợ lý bán hàng của {FANPAGE_NAME}. Anh/chị có thể:")
+                send_message(uid, "1. Gửi mã sản phẩm (ví dụ: [MS123456])")
+                send_message(uid, "2. Gõ 'xem sản phẩm' để xem danh sách sản phẩm")
+                send_message(uid, "3. Hỏi về chính sách mua hàng")
 
         # Kiểm tra từ khóa đặt hàng
         if ms and ms in PRODUCTS and any(kw in lower for kw in ORDER_KEYWORDS):
