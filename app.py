@@ -430,90 +430,189 @@ def load_products(force=False):
 
 
 # ============================================
-# HELPER: POLICY INFO EXTRACTION
+# HELPER: POLICY INFO EXTRACTION (ĐÃ SỬA)
 # ============================================
+
+def clean_policy_text(text: str) -> str:
+    """
+    Làm sạch văn bản chính sách, loại bỏ thông tin không cần thiết
+    """
+    if not text:
+        return ""
+    
+    # Loại bỏ hashtag, tag, URL
+    text = re.sub(r'#\S+', '', text)
+    text = re.sub(r'@\S+', '', text)
+    text = re.sub(r'http\S+', '', text)
+    
+    # Loại bỏ số điện thoại và địa chỉ chi tiết (giữ lại thông tin chính sách)
+    text = re.sub(r'\b\d{10,}\b', '', text)  # Số điện thoại
+    text = re.sub(r'\b\d{1,3}[/-]\d{1,3}[/-]\d{1,4}\b', '', text)  # Địa chỉ dạng số
+    
+    # Loại bỏ khoảng trắng thừa
+    text = ' '.join(text.split())
+    
+    # Cắt ngắn nếu quá dài
+    if len(text) > 250:
+        sentences = re.split(r'[.!?]', text)
+        if sentences and len(sentences[0]) > 50:
+            text = sentences[0].strip()
+            if not text.endswith('.'):
+                text += '.'
+        else:
+            text = text[:250].rstrip() + '...'
+    
+    return text
+
 
 def extract_policy_info_from_description(description: str) -> dict:
     """
-    Trích xuất thông tin chính sách từ cột Mô tả trong sheet
+    Trích xuất thông tin chính sách từ cột Mô tả trong sheet - ĐÃ CẢI THIỆN
     """
     if not description:
         return {}
     
-    lower_desc = description.lower()
     policies = {}
+    lower_desc = description.lower()
     
-    # Kiểm tra các loại chính sách trong mô tả
-    if any(keyword in lower_desc for keyword in ['ship', 'vận chuyển', 'giao hàng', 'phí ship']):
-        # Trích xuất thông tin vận chuyển
-        lines = description.split('\n')
-        for line in lines:
-            if any(keyword in line.lower() for keyword in ['ship', 'vận chuyển', 'giao hàng']):
-                policies['shipping'] = line.strip()
-                break
+    # Tách câu dựa trên các dấu câu và xuống dòng
+    sentences = re.split(r'[.!?;\n]+', description)
+    sentences = [s.strip() for s in sentences if s.strip()]
     
-    if any(keyword in lower_desc for keyword in ['đổi trả', 'hoàn tiền', 'bảo hành']):
-        # Trích xuất thông tin đổi trả/bảo hành
-        lines = description.split('\n')
-        for line in lines:
-            if any(keyword in line.lower() for keyword in ['đổi trả', 'hoàn tiền', 'bảo hành']):
-                policies['return_warranty'] = line.strip()
-                break
+    # Hàm trợ giúp tìm câu chứa từ khóa
+    def find_sentence_with_keywords(keywords_list):
+        for sentence in sentences:
+            lower_sentence = sentence.lower()
+            if any(keyword in lower_sentence for keyword in keywords_list):
+                # Giới hạn độ dài câu trả lời
+                if len(sentence) > 200:
+                    # Cắt ngắn nhưng giữ ý chính
+                    words = sentence.split()
+                    if len(words) > 30:
+                        return ' '.join(words[:30]) + '...'
+                return sentence
+        return None
     
-    if any(keyword in lower_desc for keyword in ['thanh toán', 'payment', 'cod', 'chuyển khoản']):
-        # Trích xuất thông tin thanh toán
-        lines = description.split('\n')
-        for line in lines:
-            if any(keyword in line.lower() for keyword in ['thanh toán', 'payment', 'cod']):
-                policies['payment'] = line.strip()
-                break
+    # Trích xuất thông tin vận chuyển
+    shipping_keywords = ['ship', 'vận chuyển', 'giao hàng', 'phí ship', 'miễn phí ship', 'miễn ship', 'free ship']
+    shipping_info = find_sentence_with_keywords(shipping_keywords)
+    if shipping_info:
+        policies['shipping'] = clean_policy_text(shipping_info)
+    
+    # Trích xuất thông tin đổi trả/bảo hành
+    return_keywords = ['đổi trả', 'hoàn tiền', 'bảo hành', 'đổi hàng', 'trả hàng', 'bảo đảm']
+    return_info = find_sentence_with_keywords(return_keywords)
+    if return_info:
+        policies['return_warranty'] = clean_policy_text(return_info)
+    
+    # Trích xuất thông tin thanh toán
+    payment_keywords = ['thanh toán', 'payment', 'cod', 'chuyển khoản', 'tiền mặt', 'chuyển tiền']
+    payment_info = find_sentence_with_keywords(payment_keywords)
+    if payment_info:
+        policies['payment'] = clean_policy_text(payment_info)
+    
+    # Nếu không tìm thấy thông tin cụ thể, thử tìm trong toàn bộ mô tả
+    if not policies and len(description) > 0:
+        # Tìm đoạn chứa từ khóa trong toàn bộ mô tả
+        for keyword_set, policy_key in [
+            (shipping_keywords, 'shipping'),
+            (return_keywords, 'return_warranty'),
+            (payment_keywords, 'payment')
+        ]:
+            for keyword in keyword_set:
+                if keyword in lower_desc:
+                    # Tìm vị trí và lấy đoạn xung quanh
+                    idx = lower_desc.find(keyword)
+                    if idx != -1:
+                        start = max(0, idx - 50)
+                        end = min(len(description), idx + 150)
+                        excerpt = description[start:end].strip()
+                        if excerpt:
+                            policies[policy_key] = clean_policy_text(excerpt)
+                            break
     
     return policies
 
 
 def generate_policy_response(product_description: str, question: str) -> str:
     """
-    Tạo câu trả lời về chính sách dựa trên mô tả sản phẩm
+    Tạo câu trả lời về chính sách dựa trên mô tả sản phẩm - ĐÃ CẢI THIỆN
     """
     policies = extract_policy_info_from_description(product_description)
     lower_question = question.lower()
     
-    if 'ship' in lower_question or 'vận chuyển' in lower_question or 'giao hàng' in lower_question:
+    # Hàm làm sạch và cắt ngắn câu trả lời
+    def clean_response(text, max_length=200):
+        if not text:
+            return text
+        # Loại bỏ hashtag và tag
+        text = re.sub(r'#\S+', '', text)
+        text = re.sub(r'@\S+', '', text)
+        # Loại bỏ khoảng trắng thừa
+        text = ' '.join(text.split())
+        # Cắt ngắn nếu cần
+        if len(text) > max_length:
+            # Cố gắng cắt ở cuối câu
+            last_period = text[:max_length].rfind('.')
+            if last_period > max_length * 0.5:  # Nếu có dấu chấm trong nửa đầu
+                return text[:last_period + 1]
+            else:
+                return text[:max_length].rstrip() + '...'
+        return text
+    
+    # Xử lý câu hỏi về vận chuyển
+    if any(keyword in lower_question for keyword in ['ship', 'vận chuyển', 'giao hàng', 'phí ship', 'miễn ship', 'free ship']):
         if 'shipping' in policies:
-            return policies['shipping']
+            response = clean_response(policies['shipping'])
+            # Thêm thông tin bổ sung nếu cần
+            if 'miễn phí' not in response.lower() and 'miễn ship' not in response.lower():
+                if 'miễn' in lower_question or 'free' in lower_question:
+                    return f"Dạ, {response}\n\nNếu anh/chị cần biết thêm chi tiết về điều kiện miễn phí ship, em có thể kiểm tra lại với shop ạ."
+            return f"Dạ, {response}"
         else:
-            return "Hiện tại em không tìm thấy thông tin vận chuyển cụ thể cho sản phẩm này trong hệ thống. Anh/chị vui lòng liên hệ shop để biết chi tiết ạ."
+            return "Hiện tại em không tìm thấy thông tin vận chuyển cụ thể cho sản phẩm này. Chính sách chung của shop là giao hàng toàn quốc, phí ship từ 20-50k tùy khu vực ạ."
     
-    elif 'đổi trả' in lower_question or 'hoàn tiền' in lower_question:
+    # Xử lý câu hỏi về đổi trả
+    elif any(keyword in lower_question for keyword in ['đổi trả', 'hoàn tiền', 'đổi hàng', 'trả hàng']):
         if 'return_warranty' in policies:
-            return policies['return_warranty']
+            response = clean_response(policies['return_warranty'])
+            return f"Dạ, {response}"
         else:
-            return "Hiện tại em không tìm thấy thông tin đổi trả cụ thể cho sản phẩm này trong hệ thống. Chính sách chung của shop là đổi trả trong 3 ngày nếu sản phẩm lỗi."
+            return "Hiện tại em không tìm thấy thông tin đổi trả cụ thể. Chính sách chung của shop là đổi trả trong 3-7 ngày nếu sản phẩm lỗi, anh/chị giữ nguyên tem mác ạ."
     
+    # Xử lý câu hỏi về bảo hành
     elif 'bảo hành' in lower_question:
         if 'return_warranty' in policies:
-            return policies['return_warranty']
+            response = clean_response(policies['return_warranty'])
+            return f"Dạ, {response}"
         else:
-            return "Hiện tại em không tìm thấy thông tin bảo hành cụ thể cho sản phẩm này trong hệ thống. Anh/chị vui lòng liên hệ shop để biết chi tiết ạ."
+            return "Hiện tại em không tìm thấy thông tin bảo hành cụ thể. Anh/chị vui lòng liên hệ shop để biết chi tiết về chính sách bảo hành ạ."
     
-    elif 'thanh toán' in lower_question or 'payment' in lower_question or 'cod' in lower_question:
+    # Xử lý câu hỏi về thanh toán
+    elif any(keyword in lower_question for keyword in ['thanh toán', 'payment', 'cod', 'chuyển khoản']):
         if 'payment' in policies:
-            return policies['payment']
+            response = clean_response(policies['payment'])
+            return f"Dạ, {response}"
         else:
-            return "Shop hỗ trợ thanh toán khi nhận hàng (COD) và chuyển khoản ngân hàng."
+            return "Shop hỗ trợ thanh toán khi nhận hàng (COD) và chuyển khoản ngân hàng ạ."
     
+    # Câu hỏi chung về chính sách
     else:
-        # Trả lời chung nếu không tìm thấy thông tin cụ thể
         response_parts = []
         if policies:
-            response_parts.append("Thông tin chính sách cho sản phẩm:")
-            for key, value in policies.items():
-                if key == 'shipping':
-                    response_parts.append(f"• Vận chuyển: {value}")
-                elif key == 'return_warranty':
-                    response_parts.append(f"• Đổi trả/Bảo hành: {value}")
-                elif key == 'payment':
-                    response_parts.append(f"• Thanh toán: {value}")
+            response_parts.append("Dạ, thông tin chính sách cho sản phẩm:")
+            
+            if 'shipping' in policies:
+                shipping_info = clean_response(policies['shipping'], 150)
+                response_parts.append(f"• Vận chuyển: {shipping_info}")
+            
+            if 'return_warranty' in policies:
+                return_info = clean_response(policies['return_warranty'], 150)
+                response_parts.append(f"• Đổi trả/Bảo hành: {return_info}")
+            
+            if 'payment' in policies:
+                payment_info = clean_response(policies['payment'], 150)
+                response_parts.append(f"• Thanh toán: {payment_info}")
         else:
             response_parts.append("Hiện tại em không tìm thấy thông tin chính sách cụ thể cho sản phẩm này.")
             response_parts.append("Chính sách chung của shop:")
@@ -1098,7 +1197,7 @@ def handle_image(uid: str, image_url: str):
 
 
 # ============================================
-# HANDLE TEXT - ĐÃ SỬA ĐỂ CẢI THIỆN NGỮ CẢNH
+# HANDLE TEXT - ĐÃ SỬA ĐỂ CẢI THIỆN NGỮ CẢNH VÀ CHÍNH SÁCH
 # ============================================
 
 def detect_ms_from_text(text: str):
@@ -1202,13 +1301,29 @@ def handle_text(uid: str, text: str):
         policy_keywords = [
             'chính sách', 'ship', 'vận chuyển', 'giao hàng', 
             'đổi trả', 'hoàn tiền', 'bảo hành', 'thanh toán',
-            'cod', 'payment', 'phí ship'
+            'cod', 'payment', 'phí ship', 'miễn ship', 'free ship'
         ]
         
         is_policy_question = any(keyword in lower for keyword in policy_keywords)
         
         # Nếu là câu hỏi về chính sách
         if is_policy_question:
+            # Xử lý đặc biệt cho câu hỏi ngắn về ship
+            if any(keyword in lower for keyword in ['có miễn ship', 'miễn ship', 'free ship']):
+                if ms and ms in PRODUCTS:
+                    update_product_context(uid, ms)
+                    product = PRODUCTS[ms]
+                    description = product.get("MoTa", "")
+                    
+                    # Tìm thông tin ship cụ thể
+                    response = generate_policy_response(description, "miễn ship")
+                    send_message(uid, response)
+                else:
+                    send_message(uid, "Dạ, shop có miễn phí ship cho đơn hàng từ 1 sản phẩm trở lên ạ. Anh/chị có thể cho em biết mã sản phẩm để em kiểm tra chính sách cụ thể không ạ?")
+                
+                ctx["processing_lock"] = False
+                return
+            
             # Nếu là câu hỏi chung về chính sách shop (không liên quan sản phẩm cụ thể)
             general_policy_questions = [
                 'shop có chính sách gì',
