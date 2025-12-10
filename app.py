@@ -56,6 +56,11 @@ USER_CONTEXT = defaultdict(lambda: {
     "conversation_history": [],
     "referral_source": None,
     "referral_payload": None,
+    # Tracking cho tin nhắn và ảnh đã gửi
+    "last_message_hash": None,
+    "last_message_time": 0,
+    "last_images_sent_for_ms": {},
+    "last_images_sent_time": 0,
 })
 PRODUCTS = {}
 LAST_LOAD = 0
@@ -138,6 +143,28 @@ CAROUSEL_KEYWORDS = [
     "xem hàng",
     "show hàng",
 ]
+
+# ============================================
+# HELPER FUNCTIONS
+# ============================================
+
+def format_price_k(price_int):
+    """Định dạng giá thành dạng 'xxxk' hoặc 'xxxk đến yyyk'"""
+    if not price_int:
+        return "đang cập nhật"
+    
+    if price_int >= 1000:
+        # Chuyển thành "xxxk"
+        return f"{price_int // 1000}k"
+    else:
+        return f"{price_int}đ"
+
+
+def get_message_hash(text: str, ms: str = None) -> str:
+    """Tạo hash để theo dõi tin nhắn đã gửi"""
+    content = f"{text}_{ms}" if ms else text
+    return hashlib.md5(content.encode('utf-8')).hexdigest()
+
 
 # ============================================
 # HELPER: SEND MESSAGE
@@ -404,7 +431,7 @@ def load_products(force=False):
 # ============================================
 
 def build_comprehensive_product_context(ms: str) -> str:
-    """Xây dựng context đầy đủ về sản phẩm cho GPT"""
+    """Xây dựng context đầy đủ về sản phẩm cho GPT với giá đã format"""
     if not ms or ms not in PRODUCTS:
         return "KHÔNG CÓ THÔNG TIN SẢN PHẨM"
     
@@ -429,38 +456,66 @@ def build_comprehensive_product_context(ms: str) -> str:
         elif any(keyword in line_lower for keyword in ['thanh toán', 'payment', 'cod', 'chuyển khoản']):
             payment_info += line + " "
     
-    # Thu thập biến thể
-    variants_text = ""
+    # Thu thập biến thể và tính min/max giá
     variants = product.get("variants", [])
+    min_price = None
+    max_price = None
+    
+    if variants:
+        for v in variants:
+            gia = v.get("gia")
+            if gia:
+                if min_price is None or gia < min_price:
+                    min_price = gia
+                if max_price is None or gia > max_price:
+                    max_price = gia
+    else:
+        # Fallback: dùng giá từ product
+        gia_raw = product.get("Gia", "")
+        gia_int = extract_price_int(gia_raw)
+        if gia_int:
+            min_price = gia_int
+            max_price = gia_int
+    
+    # Format giá cho display
+    price_display = ""
+    if min_price and max_price:
+        if min_price == max_price:
+            price_display = format_price_k(min_price)
+        else:
+            price_display = f"chỉ từ {format_price_k(min_price)} đến {format_price_k(max_price)}"
+    else:
+        price_display = "đang cập nhật"
+    
+    # Thu thập thông tin biến thể cho context
+    variants_text = ""
     if variants:
         variants_text = "Các biến thể có sẵn:\n"
-        for i, v in enumerate(variants[:5], 1):
+        for i, v in enumerate(variants[:3], 1):
             mau = v.get("mau", "Mặc định")
             size = v.get("size", "Mặc định")
-            gia = v.get("gia")
             tonkho = v.get("tonkho", "Còn hàng")
-            if gia:
-                variants_text += f"{i}. {mau} - {size}: {gia:,.0f}đ (Tồn: {tonkho})\n"
+            variants_text += f"{i}. {mau} - {size} (Tồn: {tonkho})\n"
+        if len(variants) > 3:
+            variants_text += f"... và {len(variants)-3} biến thể khác\n"
     
     context = f"""
 === THÔNG TIN SẢN PHẨM [{ms}] ===
 
 1. TÊN SẢN PHẨM: {product.get('Ten', '')}
 
-2. GIÁ BÁN: {product.get('Gia', '')}
+2. GIÁ BÁN (ĐÃ FORMAT): {price_display}
 
-3. TỒN KHO: {product.get('Tồn kho', 'Chưa có thông tin')}
-
-4. THUỘC TÍNH:
+3. THUỘC TÍNH:
    - Màu sắc: {product.get('màu (Thuộc tính)', 'Chưa có thông tin')}
    - Size: {product.get('size (Thuộc tính)', 'Chưa có thông tin')}
 
 {variants_text}
 
-5. MÔ TẢ CHI TIẾT:
+4. MÔ TẢ CHI TIẾT:
 {product.get('MoTa', 'Chưa có mô tả chi tiết')}
 
-6. THÔNG TIN CHÍNH SÁCH:
+5. THÔNG TIN CHÍNH SÁCH:
    - Vận chuyển: {shipping_info if shipping_info else 'Chưa có thông tin cụ thể. Chính sách chung: Giao hàng toàn quốc, phí ship 20-50k. Miễn phí ship cho đơn từ 500k.'}
    - Bảo hành: {warranty_info if warranty_info else 'Chưa có thông tin cụ thể. Chính sách chung: Bảo hành theo chính sách của nhà sản xuất.'}
    - Đổi trả: {return_info if return_info else 'Chưa có thông tin cụ thể. Chính sách chung: Đổi/trả trong 3-7 ngày nếu sản phẩm lỗi, còn nguyên tem mác.'}
@@ -482,12 +537,35 @@ def detect_ms_from_text(text: str):
 
 
 def generate_gpt_response(uid: str, user_message: str, ms: str = None):
-    """Gọi GPT để trả lời câu hỏi của khách"""
+    """Gọi GPT để trả lời câu hỏi của khách - PHIÊN BẢN PHÂN ĐOẠN"""
     if not client or not OPENAI_API_KEY:
-        return "Hiện tại hệ thống trợ lý AI đang bảo trì, vui lòng thử lại sau ạ."
+        return {"type": "single", "text": "Hiện tại hệ thống trợ lý AI đang bảo trì, vui lòng thử lại sau ạ."}
     
     try:
-        # Xây dựng system prompt
+        # Kiểm tra cache trước
+        ctx = USER_CONTEXT[uid]
+        current_time = time.time()
+        
+        # Nếu cùng câu hỏi trong 10s, trả về cache
+        if len(ctx.get("conversation_history", [])) >= 2:
+            last_user_msg = ctx["conversation_history"][-2].get("content", "") if ctx["conversation_history"][-2].get("role") == "user" else ""
+            last_assistant_msg = ctx["conversation_history"][-1].get("content", "") if ctx["conversation_history"][-1].get("role") == "assistant" else ""
+            
+            if (user_message.strip() == last_user_msg.strip() and 
+                current_time - ctx.get("last_message_time", 0) < 10 and
+                last_assistant_msg):
+                
+                print(f"[CACHE] Trả về response cache cho câu hỏi lặp: {user_message[:50]}...")
+                
+                # Thử parse JSON từ cache
+                try:
+                    parsed = json.loads(last_assistant_msg)
+                    if "segments" in parsed:
+                        return {"type": "segmented", "segments": parsed["segments"], "ms": ms}
+                except:
+                    return {"type": "single", "text": last_assistant_msg, "ms": ms}
+        
+        # Xây dựng system prompt với yêu cầu trả lời theo cấu trúc phân đoạn
         if ms and ms in PRODUCTS:
             product_context = build_comprehensive_product_context(ms)
             system_prompt = f"""Bạn là CHUYÊN GIA TƯ VẤN BÁN HÀNG của {FANPAGE_NAME}.
@@ -496,16 +574,41 @@ Bạn đang tư vấn cho sản phẩm có mã: {ms}
 THÔNG TIN SẢN PHẨM (BẮT BUỘC CHỈ SỬ DỤNG THÔNG TIN NÀY):
 {product_context}
 
-QUY TẮC TRẢ LỜI (TUYỆT ĐỐI TUÂN THỦ):
-1. CHỈ sử dụng thông tin có trong "THÔNG TIN SẢN PHẨM" ở trên
-2. KHÔNG ĐƯỢC bịa thêm bất kỳ thông tin nào không có trong dữ liệu
-3. Nếu không có thông tin, hãy trả lời: "Dạ, phần này trong hệ thống chưa có thông tin ạ, em sợ nói sai nên không dám khẳng định."
-4. Nếu khách hỏi về sản phẩm khác, hãy đề nghị khách cung cấp mã sản phẩm mới
-5. Giọng điệu: Thân thiện, chuyên nghiệp, xưng "em", gọi khách là "anh/chị"
-6. Luôn hướng đến chốt đơn: Cuối mỗi câu trả lời, nhẹ nhàng đề nghị đặt hàng
-7. LINK ĐẶT HÀNG: {DOMAIN}/order-form?ms={ms}&uid={uid}
+QUY TẮC TRẢ LỜI (TUYỆT ĐỐI TUÂN THỦ - TRẢ LỜI THEO CẤU TRÚC JSON):
+1. Trả lời bằng JSON với cấu trúc: {{"segments": [{{"type": "text|images|cta", "content": "..."}}]}}
+2. CÁC LOẠI PHÂN ĐOẠN:
+   - "text": Chỉ chứa văn bản mô tả, không chứa ảnh hay CTA
+   - "images": CHỈ ghi "[IMAGES]" - đây là vị trí sẽ chèn ảnh
+   - "cta": Chứa lời kêu gọi hành động và link đặt hàng
+3. CẤU TRÚC GỢI Ý (6 messengers):
+   - Segment 1 (text): Giới thiệu ngắn gọn sản phẩm
+   - Segment 2 (text): Thông tin màu sắc và size
+   - Segment 3 (images): "[IMAGES]" - vị trí chèn 5 ảnh
+   - Segment 4 (text): Thông tin chất liệu và thiết kế
+   - Segment 5 (text): Thông tin GIÁ (chỉ nói về giá, KHÔNG nhắc đến tồn kho). Format: "Giá chỉ từ xxxk đến yyyk" hoặc "Giá xxxk"
+   - Segment 6 (cta): Lời kêu gọi đặt hàng
+4. QUAN TRỌNG VỀ GIÁ:
+   - CHỈ sử dụng format: "Giá chỉ từ xxxk đến yyyk" hoặc "Giá xxxk" nếu chỉ có 1 mức
+   - KHÔNG được ghi đầy đủ số (ví dụ: 701.000đ) mà phải ghi dạng "xxxk"
+   - KHÔNG được nhắc đến thông tin tồn kho trong segment này
+5. KHÔNG ĐƯỢC bịa thêm thông tin ngoài dữ liệu có sẵn
+6. Nếu không có thông tin, hãy trả lời: "Dạ, phần này trong hệ thống chưa có thông tin ạ"
+7. Giọng điệu: Thân thiện, chuyên nghiệp, xưng "em", gọi khách là "anh/chị"
+8. LINK ĐẶT HÀNG: {DOMAIN}/order-form?ms={ms}&uid={uid}
 
-Hãy trả lời bằng tiếng Việt, tự nhiên như đang chat Messenger."""
+Hãy trả lời bằng tiếng Việt, tự nhiên như đang chat Messenger.
+
+VÍ DỤ TRẢ LỜI ĐÚNG:
+{{
+  "segments": [
+    {{"type": "text", "content": "Dạ, sản phẩm [MS000025] là đầm lụa nhung dài tôn dáng chuẩn phong cách cổ điển với những đặc điểm nổi bật như sau:"}},
+    {{"type": "text", "content": "1. *Màu sắc*: Xanh lam đậm, sang trọng và dễ phối đồ.\\n2. *Size*: Có nhiều size từ S đến 5XL, phù hợp với nhiều vóc dáng."}},
+    {{"type": "images", "content": "[IMAGES]"}},
+    {{"type": "text", "content": "3. *Chất liệu*: Được làm từ nhung cao cấp, mềm mại và co giãn, mang lại cảm giác thoải mái khi mặc.\\n4. *Thiết kế*: Cổ đứng, tay lửng và xẻ tà cao quyến rũ, giúp tôn lên vẻ đẹp quý phái và thanh lịch."}},
+    {{"type": "text", "content": "Sản phẩm có giá chỉ từ 701k đến 850k. Đặc biệt, shop miễn phí ship toàn quốc khi mua từ 1 sản phẩm."}},
+    {{"type": "cta", "content": "Nếu anh/chị có nhu cầu đặt hàng, em có thể gửi link cho anh/chị ngay bây giờ nhé!"}}
+  ]
+}}"""
         else:
             system_prompt = f"""Bạn là CHUYÊN GIA TƯ VẤN BÁN HÀNG của {FANPAGE_NAME}.
 
@@ -521,10 +624,9 @@ QUY TẮC:
 2. Luôn hướng khách đến việc cung cấp mã sản phẩm
 3. Giọng điệu: Thân thiện, chuyên nghiệp, xưng "em", gọi khách là "anh/chị"
 
-Hãy bắt đầu bằng câu chào và hỏi khách về sản phẩm họ quan tâm."""
+TRẢ LỜI BẰNG VĂN BẢN THÔNG THƯỜNG, KHÔNG CẦN JSON."""
         
         # Lấy conversation history
-        ctx = USER_CONTEXT[uid]
         conversation = ctx.get("conversation_history", [])
         
         # Giới hạn history
@@ -546,7 +648,7 @@ Hãy bắt đầu bằng câu chào và hỏi khách về sản phẩm họ quan
             model="gpt-4o-mini",
             messages=messages,
             temperature=0.7,
-            max_tokens=500,
+            max_tokens=1000,
             timeout=15.0,
         )
         
@@ -557,11 +659,23 @@ Hãy bắt đầu bằng câu chào và hỏi khách về sản phẩm họ quan
         conversation.append({"role": "assistant", "content": reply})
         ctx["conversation_history"] = conversation
         
-        return reply
+        # Nếu có mã sản phẩm, phân tích JSON response
+        if ms and ms in PRODUCTS:
+            try:
+                # Cố gắng parse JSON
+                parsed = json.loads(reply)
+                if "segments" in parsed and isinstance(parsed["segments"], list):
+                    return {"type": "segmented", "segments": parsed["segments"], "ms": ms}
+            except json.JSONDecodeError:
+                # Nếu không phải JSON, trả về bình thường
+                pass
+        
+        # Trả về dạng single message
+        return {"type": "single", "text": reply, "ms": ms if ms else None}
         
     except Exception as e:
         print(f"GPT Error: {e}")
-        return "Dạ em đang gặp chút trục trặc kỹ thuật. Anh/chị vui lòng thử lại sau ít phút ạ."
+        return {"type": "single", "text": "Dạ em đang gặp chút trục trặc kỹ thuật. Anh/chị vui lòng thử lại sau ít phút ạ.", "ms": ms if ms else None}
 
 
 # ============================================
@@ -930,9 +1044,143 @@ def handle_text(uid: str, text: str):
         # TẤT CẢ CÂU HỎI CÒN LẠI do GPT xử lý
         print(f"[GPT CALL] User: {uid}, MS: {current_ms}, Text: {text}")
         gpt_response = generate_gpt_response(uid, text, current_ms)
-        send_message(uid, gpt_response)
         
-        # Kiểm tra từ khóa đặt hàng để gửi link
+        # KIỂM TRA TRÙNG LẶP TRƯỚC KHI GỬI
+        current_time = time.time()
+        
+        # Tạo hash cho response GPT để tránh gửi lặp
+        if gpt_response.get("type") == "segmented":
+            response_content = json.dumps(gpt_response.get("segments", []), sort_keys=True)
+        else:
+            response_content = gpt_response.get("text", "")
+        
+        response_hash = get_message_hash(response_content, current_ms)
+        
+        # Kiểm tra nếu cùng 1 response đã gửi trong 5s gần đây
+        if (ctx.get("last_message_hash") == response_hash and 
+            current_time - ctx.get("last_message_time", 0) < 5):
+            print(f"[DUPLICATE SKIP] Bỏ qua response trùng lặp cho user {uid}")
+            ctx["processing_lock"] = False
+            return
+        
+        # Cập nhật tracking
+        ctx["last_message_hash"] = response_hash
+        ctx["last_message_time"] = current_time
+        
+        # XỬ LÝ RESPONSE PHÂN ĐOẠN
+        if gpt_response.get("type") == "segmented":
+            segments = gpt_response.get("segments", [])
+            ms = gpt_response.get("ms")
+            
+            # Đếm segment để gửi đúng thứ tự
+            segment_count = 0
+            
+            for segment in segments:
+                segment_count += 1
+                segment_type = segment.get("type")
+                content = segment.get("content", "")
+                
+                if segment_type == "text" and content:
+                    # Gửi tin nhắn text
+                    send_message(uid, content)
+                    
+                    # Thêm delay để tránh bị Facebook block
+                    if segment_count < len(segments):
+                        time.sleep(0.3)
+                
+                elif segment_type == "images" and ms and ms in PRODUCTS:
+                    # KIỂM TRA TRÙNG LẶP ẢNH
+                    now = time.time()
+                    last_images_sent = ctx.get("last_images_sent_for_ms", {}).get(ms, {})
+                    last_sent_time = last_images_sent.get("time", 0)
+                    
+                    # Chỉ gửi ảnh nếu chưa gửi trong 15s hoặc đang ở segment khác
+                    if now - last_sent_time > 15 or last_images_sent.get("segment_hash") != response_hash:
+                        # Gửi 5 ảnh sản phẩm không trùng
+                        product = PRODUCTS[ms]
+                        images_field = product.get("Images", "")
+                        urls = parse_image_urls(images_field)
+                        
+                        # Lấy 5 ảnh không trùng nhau
+                        unique_images = []
+                        seen = set()
+                        for u in urls:
+                            if u and u not in seen:
+                                seen.add(u)
+                                unique_images.append(u)
+                        
+                        # Gửi từng ảnh với delay
+                        sent_count = 0
+                        for image_url in unique_images[:5]:
+                            if image_url:
+                                send_image(uid, image_url)
+                                sent_count += 1
+                                # Delay giữa các ảnh
+                                if sent_count < 5:
+                                    time.sleep(0.5)
+                        
+                        if sent_count == 0:
+                            send_message(uid, "📷 Sản phẩm hiện chưa có hình ảnh ạ.")
+                        
+                        # Cập nhật thời gian gửi ảnh
+                        ctx["last_images_sent_for_ms"][ms] = {
+                            "time": now,
+                            "segment_hash": response_hash,
+                            "count": sent_count
+                        }
+                    else:
+                        print(f"[IMAGE DEBOUNCE] Bỏ qua gửi ảnh cho {ms}, đã gửi trong {now - last_sent_time:.1f}s")
+                    
+                    # Thêm delay sau khi gửi ảnh
+                    if segment_count < len(segments):
+                        time.sleep(0.5)
+                
+                elif segment_type == "cta" and content:
+                    # Thêm link đặt hàng vào CTA
+                    domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
+                    order_link = f"{domain}/order-form?ms={ms}&uid={uid}"
+                    full_message = f"{content}\n\n📋 Đặt hàng ngay tại đây:\n{order_link}"
+                    send_message(uid, full_message)
+        
+        else:
+            # Trường hợp thông thường (single message)
+            response_text = gpt_response.get("text", "")
+            send_message(uid, response_text)
+            
+            # Nếu có mã sản phẩm và không phải là request "ảnh sản phẩm đâu?"
+            # thì gửi ảnh tự động (tránh spam khi khách hỏi "ảnh đâu?")
+            if (current_ms and current_ms in PRODUCTS and 
+                "ảnh" not in lower and "hình" not in lower and "photo" not in lower):
+                
+                now = time.time()
+                last_sent_time = ctx.get("last_images_sent_time", 0)
+                
+                # Chỉ gửi ảnh nếu chưa gửi trong 30s
+                if now - last_sent_time > 30:
+                    product = PRODUCTS[current_ms]
+                    images_field = product.get("Images", "")
+                    urls = parse_image_urls(images_field)
+                    
+                    # Lấy 5 ảnh không trùng nhau
+                    unique_images = []
+                    seen = set()
+                    for u in urls:
+                        if u and u not in seen:
+                            seen.add(u)
+                            unique_images.append(u)
+                    
+                    # Gửi từng ảnh
+                    sent_count = 0
+                    for image_url in unique_images[:5]:
+                        if image_url:
+                            send_image(uid, image_url)
+                            sent_count += 1
+                            time.sleep(0.5)
+                    
+                    if sent_count > 0:
+                        ctx["last_images_sent_time"] = now
+        
+        # Kiểm tra từ khóa đặt hàng để gửi link (backup)
         if current_ms and current_ms in PRODUCTS and any(kw in lower for kw in ORDER_KEYWORDS):
             domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
             order_link = f"{domain}/order-form?ms={current_ms}&uid={uid}"
