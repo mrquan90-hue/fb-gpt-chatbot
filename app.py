@@ -526,13 +526,55 @@ def build_comprehensive_product_context(ms: str) -> str:
 
 
 def detect_ms_from_text(text: str):
-    """Tìm mã sản phẩm trong tin nhắn"""
-    ms_list = re.findall(r"\[MS(\d{6})\]", text.upper())
+    """Tìm mã sản phẩm trong tin nhắn với nhiều dạng format"""
+    if not text:
+        return None
+    
+    text = text.strip()
+    
+    # Pattern 1: Dạng [MS123456] hoặc [ms123456]
+    ms_list = re.findall(r'\[MS(\d{1,6})\]', text.upper())
     if ms_list:
-        return "MS" + ms_list[0]
-    ms_list = re.findall(r"MS(\d{6})", text.upper())
+        number = ms_list[0].zfill(6)  # Đảm bảo đủ 6 chữ số
+        return f"MS{number}"
+    
+    # Pattern 2: Dạng MS123456 hoặc ms123456 (có hoặc không có space)
+    ms_list = re.findall(r'MS\s*(\d{1,6})', text.upper())
     if ms_list:
-        return "MS" + ms_list[0]
+        number = ms_list[0].zfill(6)  # Đảm bảo đủ 6 chữ số
+        return f"MS{number}"
+    
+    # Pattern 3: Dạng "mã 123" hoặc "ma 123" (có dấu hoặc không dấu)
+    # Xử lý không phân biệt hoa thường và không dấu
+    text_lower = text.lower()
+    
+    # Chuẩn hóa: thay thế "ma" (không dấu) thành "mã"
+    text_lower = text_lower.replace('ma ', 'mã ')
+    
+    # Pattern cho "mã" + số
+    ma_patterns = [
+        r'mã\s*(\d{1,6})',  # có dấu
+        r'mã\s*0*(\d{1,6})',  # có dấu với số 0 đằng trước
+    ]
+    
+    for pattern in ma_patterns:
+        matches = re.findall(pattern, text_lower)
+        if matches:
+            number = matches[0].lstrip('0')  # Bỏ các số 0 ở đầu
+            if not number:  # Trường hợp chỉ toàn số 0
+                number = '0'
+            number = number.zfill(6)  # Đảm bảo đủ 6 chữ số
+            return f"MS{number}"
+    
+    # Pattern 4: Chỉ có số, có thể người dùng chỉ gõ số
+    # Chỉ xử lý nếu tin nhắn ngắn và chỉ chứa số + có thể có "mã" phía trước
+    clean_text = re.sub(r'[^\d]', '', text)
+    if 1 <= len(clean_text) <= 6:
+        # Kiểm tra xem có từ "mã" trong text không
+        if 'mã' in text_lower or 'ma' in text_lower or 'ms' in text_lower:
+            number = clean_text.zfill(6)
+            return f"MS{number}"
+    
     return None
 
 
@@ -1032,8 +1074,16 @@ def handle_text(uid: str, text: str):
             ctx["last_ms"] = detected_ms
             update_product_context(uid, detected_ms)
             
-            # Nếu chỉ có mã sản phẩm, gửi thông tin chi tiết
-            if re.sub(r'\[MS\d{6}\]', '', text, flags=re.IGNORECASE).strip() == "":
+            # Nếu chỉ có mã sản phẩm (các dạng: mã 8, ms8, [MS8], v.v.), gửi thông tin chi tiết
+            # Tạo pattern để kiểm tra xem text có chỉ chứa mã sản phẩm không
+            text_lower = text.lower()
+            
+            # Loại bỏ các từ khóa mã sản phẩm và số
+            pattern = r'\[?(ms|mã|ma)\s*\d{1,6}\]?'
+            clean_text = re.sub(pattern, '', text_lower).strip()
+            
+            # Nếu sau khi loại bỏ mã sản phẩm, text trở thành rỗng
+            if clean_text == "":
                 send_product_info_debounced(uid, detected_ms)
                 ctx["processing_lock"] = False
                 return
