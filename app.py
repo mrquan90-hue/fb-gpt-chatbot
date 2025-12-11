@@ -38,6 +38,45 @@ if not GOOGLE_SHEET_CSV_URL:
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 # ============================================
+# MAP TIẾNG VIỆT CÓ DẤU SANG KHÔNG DẤU
+# ============================================
+VIETNAMESE_MAP = {
+    'à': 'a', 'á': 'a', 'ả': 'a', 'ã': 'a', 'ạ': 'a',
+    'ă': 'a', 'ằ': 'a', 'ắ': 'a', 'ẳ': 'a', 'ẵ': 'a', 'ặ': 'a',
+    'â': 'a', 'ầ': 'a', 'ấ': 'a', 'ẩ': 'a', 'ẫ': 'a', 'ậ': 'a',
+    'đ': 'd',
+    'è': 'e', 'é': 'e', 'ẻ': 'e', 'ẽ': 'e', 'ẹ': 'e',
+    'ê': 'e', 'ề': 'e', 'ế': 'e', 'ể': 'e', 'ễ': 'e', 'ệ': 'e',
+    'ì': 'i', 'í': 'i', 'ỉ': 'i', 'ĩ': 'i', 'ị': 'i',
+    'ò': 'o', 'ó': 'o', 'ỏ': 'o', 'õ': 'o', 'ọ': 'o',
+    'ô': 'o', 'ồ': 'o', 'ố': 'o', 'ổ': 'o', 'ỗ': 'o', 'ộ': 'o',
+    'ơ': 'o', 'ờ': 'o', 'ớ': 'o', 'ở': 'o', 'ỡ': 'o', 'ợ': 'o',
+    'ù': 'u', 'ú': 'u', 'ủ': 'u', 'ũ': 'u', 'ụ': 'u',
+    'ư': 'u', 'ừ': 'u', 'ứ': 'u', 'ử': 'u', 'ữ': 'u', 'ự': 'u',
+    'ỳ': 'y', 'ý': 'y', 'ỷ': 'y', 'ỹ': 'y', 'ỵ': 'y',
+    'À': 'A', 'Á': 'A', 'Ả': 'A', 'Ã': 'A', 'Ạ': 'A',
+    'Ă': 'A', 'Ằ': 'A', 'Ắ': 'A', 'Ẳ': 'A', 'Ẵ': 'A', 'Ặ': 'A',
+    'Â': 'A', 'Ầ': 'A', 'Ấ': 'A', 'Ẩ': 'A', 'Ẫ': 'A', 'Ậ': 'A',
+    'Đ': 'D',
+    'È': 'E', 'É': 'E', 'Ẻ': 'E', 'Ẽ': 'E', 'Ẹ': 'E',
+    'Ê': 'E', 'Ề': 'E', 'Ế': 'E', 'Ể': 'E', 'Ễ': 'E', 'Ệ': 'E',
+    'Ì': 'I', 'Í': 'I', 'Ỉ': 'I', 'Ĩ': 'I', 'Ị': 'I',
+    'Ò': 'O', 'Ó': 'O', 'Ỏ': 'O', 'Õ': 'O', 'Ọ': 'O',
+    'Ô': 'O', 'Ồ': 'O', 'Ố': 'O', 'Ổ': 'O', 'Ỗ': 'O', 'Ộ': 'O',
+    'Ơ': 'O', 'Ờ': 'O', 'Ớ': 'O', 'Ở': 'O', 'Ỡ': 'O', 'Ợ': 'O',
+    'Ù': 'U', 'Ú': 'U', 'Ủ': 'U', 'Ũ': 'U', 'Ụ': 'U',
+    'Ư': 'U', 'Ừ': 'U', 'Ứ': 'U', 'Ử': 'U', 'Ữ': 'U', 'Ự': 'U',
+    'Ỳ': 'Y', 'Ý': 'Y', 'Ỷ': 'Y', 'Ỹ': 'Y', 'Ỵ': 'Y'
+}
+
+def normalize_vietnamese(text):
+    """Chuẩn hóa tiếng Việt về không dấu"""
+    result = text
+    for char, replacement in VIETNAMESE_MAP.items():
+        result = result.replace(char, replacement)
+    return result
+
+# ============================================
 # GLOBAL STATE
 # ============================================
 USER_CONTEXT = defaultdict(lambda: {
@@ -497,36 +536,68 @@ def detect_ms_from_text(text: str):
         if ms in PRODUCTS:
             return ms
     
-    # Tìm các pattern mở rộng: bắt đầu bằng "ms" hoặc "mã" (có dấu hoặc không, không phân biệt hoa thường)
-    # và theo sau là 1 đến 6 chữ số, có thể có khoảng trắng
-    pattern = r'(?:ms|mã|ma)\s*(\d{1,6})'
-    matches = re.findall(pattern, text.lower())
+    # Chuẩn hóa text: chuyển về chữ thường, bỏ dấu tiếng Việt
+    text_normalized = normalize_vietnamese(text.lower())
     
-    for match in matches:
-        # Thử tìm với mã đầy đủ (không thêm số 0)
-        # Ví dụ: "mã 28" -> "MS28"
-        # Nếu không tìm thấy, thử thêm số 0
-        ms_candidate = "MS" + match
+    # Tìm số trong chuỗi (hỗ trợ nhiều định dạng số)
+    numbers = re.findall(r'\d{1,6}', text_normalized)
+    
+    if numbers:
+        # Lấy số đầu tiên tìm được
+        num = numbers[0]
         
-        # Thử các độ dài khác nhau (từ ngắn đến dài)
-        candidates = [
-            "MS" + match,  # MS28
-            "MS" + match.zfill(2),  # MS28 (nếu match đã là 28)
-            "MS" + match.zfill(3),  # MS028
-            "MS" + match.zfill(4),  # MS0028
-            "MS" + match.zfill(5),  # MS00028
-            "MS" + match.zfill(6),  # MS000028
-        ]
+        # Loại bỏ số 0 ở đầu
+        num_stripped = num.lstrip('0')
+        if not num_stripped:  # Nếu tất cả đều là 0
+            num_stripped = "0"
         
+        # Tìm trong PRODUCTS_BY_NUMBER
+        if num_stripped in PRODUCTS_BY_NUMBER:
+            return PRODUCTS_BY_NUMBER[num_stripped]
+        
+        # Nếu không tìm thấy, thử các định dạng khác
+        # Tạo các candidate có thể
+        candidates = []
+        
+        # MS + số (không có số 0 đầu)
+        candidates.append("MS" + num_stripped)
+        
+        # MS + số với độ dài 2-6 ký tự (thêm số 0 đầu)
+        for length in range(2, 7):
+            padded = num_stripped.zfill(length)
+            candidates.append("MS" + padded)
+        
+        # Thử từng candidate
         for candidate in candidates:
             if candidate in PRODUCTS:
                 return candidate
-        
-        # Nếu không tìm thấy trực tiếp, thử qua mapping PRODUCTS_BY_NUMBER
-        # Bỏ số 0 ở đầu của match
-        num_without_zeros = match.lstrip('0')
-        if num_without_zeros and num_without_zeros in PRODUCTS_BY_NUMBER:
-            return PRODUCTS_BY_NUMBER[num_without_zeros]
+    
+    # Nếu không tìm thấy số trực tiếp, tìm pattern kết hợp từ khóa và số
+    patterns = [
+        r'(?:ms|ma|maso|ma so|san pham|tu van|xem)\s*(\d{1,6})',
+        r'(\d{1,6})\s*(?:ms|ma|maso|ma so|san pham)?'
+    ]
+    
+    for pattern in patterns:
+        matches = re.findall(pattern, text_normalized)
+        if matches:
+            num = matches[0]
+            num_stripped = num.lstrip('0')
+            if not num_stripped:
+                num_stripped = "0"
+            
+            if num_stripped in PRODUCTS_BY_NUMBER:
+                return PRODUCTS_BY_NUMBER[num_stripped]
+            
+            # Thử các định dạng khác
+            candidates = ["MS" + num_stripped]
+            for length in range(2, 7):
+                padded = num_stripped.zfill(length)
+                candidates.append("MS" + padded)
+            
+            for candidate in candidates:
+                if candidate in PRODUCTS:
+                    return candidate
     
     return None
 
@@ -962,18 +1033,36 @@ def handle_text(uid: str, text: str):
         is_only_product_code = False
         if detected_ms and detected_ms in PRODUCTS:
             # Kiểm tra xem tin nhắn có chỉ chứa mã sản phẩm không
-            # Tạo bản sao của text, chuyển sang chữ hoa để so sánh
-            temp_text = text.upper()
-            # Loại bỏ định dạng [MSxxxxxx]
-            pattern1 = r'\[' + re.escape(detected_ms) + r'\]'
-            # Loại bỏ định dạng MSxxxxxx
-            pattern2 = re.escape(detected_ms)
-            temp_text = re.sub(pattern1, '', temp_text)
-            temp_text = re.sub(pattern2, '', temp_text)
+            temp_text = normalize_vietnamese(text.lower())
             
-            # Nếu sau khi loại bỏ chỉ còn khoảng trắng hoặc rỗng
-            if not temp_text.strip():
-                is_only_product_code = True
+            # Loại bỏ các từ thông dụng chỉ mã sản phẩm
+            keywords = ['ms', 'ma', 'maso', 'ma so', 'san pham', 'tu van', 'xem', 'so']
+            
+            # Loại bỏ mã sản phẩm đầy đủ
+            temp_text = re.sub(re.escape(detected_ms.lower()), '', temp_text)
+            
+            # Loại bỏ các keyword
+            for kw in keywords:
+                temp_text = re.sub(r'\b' + re.escape(kw) + r'\b', '', temp_text)
+            
+            # Loại bỏ số trong mã
+            ms_number = re.search(r'MS(\d+)', detected_ms)
+            if ms_number:
+                num = ms_number.group(1)
+                # Loại bỏ số 0 ở đầu
+                num_stripped = num.lstrip('0')
+                if num_stripped:
+                    temp_text = re.sub(r'\b' + re.escape(num_stripped) + r'\b', '', temp_text)
+                    # Cũng thử loại bỏ số có số 0 đầu
+                    for i in range(1, 7):
+                        padded = num_stripped.zfill(i)
+                        temp_text = re.sub(r'\b' + re.escape(padded) + r'\b', '', temp_text)
+            
+            # Loại bỏ khoảng trắng và ký tự đặc biệt
+            temp_text = re.sub(r'[^\w]', '', temp_text)
+            
+            # Nếu sau khi loại bỏ tất cả, không còn ký tự nào thì là only product code
+            is_only_product_code = len(temp_text.strip()) == 0
         
         if detected_ms and detected_ms in PRODUCTS:
             # Có mã sản phẩm trong tin nhắn
