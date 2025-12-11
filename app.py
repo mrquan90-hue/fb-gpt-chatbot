@@ -58,6 +58,7 @@ USER_CONTEXT = defaultdict(lambda: {
     "referral_payload": None,
 })
 PRODUCTS = {}
+PRODUCTS_BY_NUMBER = {}  # Mapping từ số (không có số 0 đầu) đến mã đầy đủ
 LAST_LOAD = 0
 LOAD_TTL = 300
 
@@ -296,7 +297,7 @@ def load_products(force=False):
     Đọc dữ liệu từ Google Sheet CSV, cache trong 300s.
     PHƯƠNG ÁN A: Mỗi dòng = 1 biến thể, gom theo Mã sản phẩm và lưu danh sách variants.
     """
-    global PRODUCTS, LAST_LOAD
+    global PRODUCTS, LAST_LOAD, PRODUCTS_BY_NUMBER
     now = time.time()
     if not force and PRODUCTS and (now - LAST_LOAD) < LOAD_TTL:
         return
@@ -314,6 +315,7 @@ def load_products(force=False):
 
         reader = csv.DictReader(content.splitlines())
         products = {}
+        products_by_number = {}
 
         for raw_row in reader:
             row = dict(raw_row)
@@ -391,10 +393,20 @@ def load_products(force=False):
             p["màu (Thuộc tính)"] = ", ".join(colors) if colors else p.get("màu (Thuộc tính)", "")
             p["size (Thuộc tính)"] = ", ".join(sizes) if sizes else p.get("size (Thuộc tính)", "")
             p["ShortDesc"] = short_description(p.get("MoTa", ""))
+            
+            # Xây dựng mapping từ số (không có số 0 đầu) đến mã đầy đủ
+            if ms.startswith("MS"):
+                num_part = ms[2:]  # Bỏ "MS"
+                # Loại bỏ số 0 ở đầu
+                num_without_leading_zeros = num_part.lstrip('0')
+                if num_without_leading_zeros:
+                    products_by_number[num_without_leading_zeros] = ms
 
         PRODUCTS = products
+        PRODUCTS_BY_NUMBER = products_by_number
         LAST_LOAD = now
         print(f"📦 Loaded {len(PRODUCTS)} products (PHƯƠNG ÁN A).")
+        print(f"🔢 Created mapping for {len(PRODUCTS_BY_NUMBER)} product numbers")
     except Exception as e:
         print("❌ load_products ERROR:", e)
 
@@ -475,11 +487,15 @@ def detect_ms_from_text(text: str):
     # Ưu tiên tìm theo pattern cũ: [MS\d{6}] hoặc MS\d{6}
     ms_list = re.findall(r"\[MS(\d{6})\]", text.upper())
     if ms_list:
-        return "MS" + ms_list[0]
+        ms = "MS" + ms_list[0]
+        if ms in PRODUCTS:
+            return ms
     
     ms_list = re.findall(r"MS(\d{6})", text.upper())
     if ms_list:
-        return "MS" + ms_list[0]
+        ms = "MS" + ms_list[0]
+        if ms in PRODUCTS:
+            return ms
     
     # Tìm các pattern mở rộng: bắt đầu bằng "ms" hoặc "mã" (có dấu hoặc không, không phân biệt hoa thường)
     # và theo sau là 1 đến 6 chữ số, có thể có khoảng trắng
@@ -487,9 +503,30 @@ def detect_ms_from_text(text: str):
     matches = re.findall(pattern, text.lower())
     
     for match in matches:
-        # Chuẩn hóa thành 6 chữ số bằng cách thêm số 0 ở đầu
-        padded = match.zfill(6)
-        return "MS" + padded
+        # Thử tìm với mã đầy đủ (không thêm số 0)
+        # Ví dụ: "mã 28" -> "MS28"
+        # Nếu không tìm thấy, thử thêm số 0
+        ms_candidate = "MS" + match
+        
+        # Thử các độ dài khác nhau (từ ngắn đến dài)
+        candidates = [
+            "MS" + match,  # MS28
+            "MS" + match.zfill(2),  # MS28 (nếu match đã là 28)
+            "MS" + match.zfill(3),  # MS028
+            "MS" + match.zfill(4),  # MS0028
+            "MS" + match.zfill(5),  # MS00028
+            "MS" + match.zfill(6),  # MS000028
+        ]
+        
+        for candidate in candidates:
+            if candidate in PRODUCTS:
+                return candidate
+        
+        # Nếu không tìm thấy trực tiếp, thử qua mapping PRODUCTS_BY_NUMBER
+        # Bỏ số 0 ở đầu của match
+        num_without_zeros = match.lstrip('0')
+        if num_without_zeros and num_without_zeros in PRODUCTS_BY_NUMBER:
+            return PRODUCTS_BY_NUMBER[num_without_zeros]
     
     return None
 
