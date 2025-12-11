@@ -912,17 +912,36 @@ def handle_text(uid: str, text: str):
         
         # Xác định mã sản phẩm sẽ dùng cho GPT
         current_ms = None
+        
+        # KIỂM TRA NẾU CHỈ GỬI MÃ SẢN PHẨM (KHÔNG CÓ NỘI DUNG KHÁC)
+        is_only_product_code = False
+        if detected_ms and detected_ms in PRODUCTS:
+            # Kiểm tra xem tin nhắn có chỉ chứa mã sản phẩm không
+            # Tạo bản sao của text, chuyển sang chữ hoa để so sánh
+            temp_text = text.upper()
+            # Loại bỏ định dạng [MSxxxxxx]
+            pattern1 = r'\[' + re.escape(detected_ms) + r'\]'
+            # Loại bỏ định dạng MSxxxxxx
+            pattern2 = re.escape(detected_ms)
+            temp_text = re.sub(pattern1, '', temp_text)
+            temp_text = re.sub(pattern2, '', temp_text)
+            
+            # Nếu sau khi loại bỏ chỉ còn khoảng trắng hoặc rỗng
+            if not temp_text.strip():
+                is_only_product_code = True
+        
         if detected_ms and detected_ms in PRODUCTS:
             # Có mã sản phẩm trong tin nhắn
             current_ms = detected_ms
             ctx["last_ms"] = detected_ms
             update_product_context(uid, detected_ms)
             
-            # Nếu chỉ có mã sản phẩm, gửi thông tin chi tiết
-            if re.sub(r'\[MS\d{6}\]', '', text, flags=re.IGNORECASE).strip() == "":
+            # NẾU CHỈ GỬI MÃ SẢN PHẨM: gửi thông tin chi tiết với hình ảnh
+            if is_only_product_code:
                 send_product_info_debounced(uid, detected_ms)
                 ctx["processing_lock"] = False
                 return
+            # NẾU CÓ KÈM CÂU HỎI KHÁC: tiếp tục xử lý bằng GPT
         else:
             # Dùng mã sản phẩm từ context
             current_ms = get_relevant_product_for_question(uid, text)
