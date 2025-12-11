@@ -886,15 +886,10 @@ def handle_text(uid: str, text: str):
                         "title": product.get('Ten', ''),
                         "image_url": image_url,
                         "subtitle": short_desc[:80] + "..." if short_desc and len(short_desc) > 80 else (short_desc if short_desc else ""),
-                        "default_action": {
-                            "type": "web_url",
-                            "url": f"{DOMAIN if DOMAIN.startswith('http') else 'https://' + DOMAIN}/order-form?ms={ms}&uid={uid}",
-                            "webview_height_ratio": "tall"
-                        },
                         "buttons": [
                             {
                                 "type": "web_url",
-                                "url": f"{DOMAIN if DOMAIN.startswith('http') else 'https://' + DOMAIN}/order-form?ms={ms}&uid={uid}",
+                                "url": f"{DOMAIN}/order-form?ms={ms}&uid={uid}",
                                 "title": "🛒 Đặt ngay"
                             },
                             {
@@ -1078,6 +1073,7 @@ Anh/chị quan tâm sản phẩm nào ạ?"""
                         send_message(sender_id, welcome_msg)
                     
                     elif payload.startswith("ADVICE_"):
+                        load_products()  # Đảm bảo đã load sản phẩm
                         ms = payload.replace("ADVICE_", "")
                         if ms in PRODUCTS:
                             ctx["last_ms"] = ms
@@ -1087,6 +1083,7 @@ Anh/chị quan tâm sản phẩm nào ạ?"""
                             send_message(sender_id, "❌ Em không tìm thấy sản phẩm này. Anh/chị vui lòng kiểm tra lại mã sản phẩm ạ.")
                     
                     elif payload.startswith("ORDER_"):
+                        load_products()  # Đảm bảo đã load sản phẩm
                         ms = payload.replace("ORDER_", "")
                         if ms in PRODUCTS:
                             ctx["last_ms"] = ms
@@ -1095,6 +1092,8 @@ Anh/chị quan tâm sản phẩm nào ạ?"""
                             order_link = f"{domain}/order-form?ms={ms}&uid={sender_id}"
                             product_name = PRODUCTS[ms].get('Ten', '')
                             send_message(sender_id, f"🎯 Anh/chị chọn sản phẩm [{ms}] {product_name}!\n\n📋 Đặt hàng ngay tại đây:\n{order_link}")
+                        else:
+                            send_message(sender_id, "❌ Em không tìm thấy sản phẩm này. Anh/chị vui lòng kiểm tra lại mã sản phẩm ạ.")
                     
                     continue
             
