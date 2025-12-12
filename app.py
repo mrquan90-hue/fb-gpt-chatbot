@@ -392,7 +392,7 @@ QUY TẮC QUAN TRỌNG:
         print(f"❌ Lỗi phân tích ảnh với GPT-4o: {str(e)}")
         return None
 
-def find_products_by_image_analysis(uid: str, analysis: dict, limit: int = 1):
+def find_products_by_image_analysis(uid: str, analysis: dict, limit: int = 5):
     """
     Tìm sản phẩm phù hợp dựa trên phân tích ảnh
     Trả về danh sách mã sản phẩm (MS) phù hợp nhất
@@ -448,58 +448,12 @@ def find_products_by_image_analysis(uid: str, analysis: dict, limit: int = 1):
     # Sắp xếp theo điểm số giảm dần
     scored_products.sort(key=lambda x: x["score"], reverse=True)
     
-    # Lấy top sản phẩm (CHỈ 1 sản phẩm)
+    # Lấy top sản phẩm (5 sản phẩm)
     top_products = [item["ms"] for item in scored_products[:limit]]
     
     print(f"🔍 Tìm thấy {len(scored_products)} sản phẩm phù hợp, top {len(top_products)}: {top_products}")
     
     return top_products
-
-def send_single_product_suggestion(uid: str, ms: str, analysis: dict = None):
-    """Gửi đề xuất CHỈ 1 sản phẩm duy nhất sau khi phân tích ảnh"""
-    if not ms or ms not in PRODUCTS:
-        return
-    
-    product = PRODUCTS[ms]
-    
-    # Gửi thông báo tìm thấy sản phẩm
-    if analysis:
-        product_type = analysis.get("product_type", "sản phẩm")
-        main_color = analysis.get("main_color", "")
-        
-        if main_color:
-            send_message(uid, f"🎯 Em phân tích được đây là {product_type} màu {main_color}. Em tìm thấy sản phẩm phù hợp nhất:")
-        else:
-            send_message(uid, f"🎯 Em phân tích được đây là {product_type}. Em tìm thấy sản phẩm phù hợp nhất:")
-    else:
-        send_message(uid, "🎯 Em tìm thấy sản phẩm phù hợp nhất:")
-    
-    # Gửi tên sản phẩm
-    product_name = product.get('Ten', 'Sản phẩm')
-    send_message(uid, f"📌 {product_name}")
-    
-    # Gửi ảnh đầu tiên nếu có
-    images_field = product.get("Images", "")
-    urls = parse_image_urls(images_field)
-    if urls:
-        send_image(uid, urls[0])
-        time.sleep(0.5)
-    
-    # Gửi giá
-    gia_raw = product.get("Gia", "")
-    gia_int = extract_price_int(gia_raw)
-    if gia_int:
-        send_message(uid, f"💰 Giá: {gia_int:,.0f}đ")
-    
-    # Gửi link đặt hàng
-    domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
-    order_link = f"{domain}/order-form?ms={ms}&uid={uid}"
-    send_message(uid, f"🛒 Xem chi tiết & đặt hàng: {order_link}")
-    
-    # Gợi ý thêm
-    send_message(uid, "💡 Anh/chị muốn:")
-    send_message(uid, "1. Xem thêm sản phẩm tương tự (gõ 'xem thêm')")
-    send_message(uid, "2. Được tư vấn chi tiết về sản phẩm này")
 
 # ============================================
 # HELPER: SEND MESSAGE
@@ -1188,11 +1142,11 @@ def send_product_info_debounced(uid: str, ms: str):
 
 
 # ============================================
-# HANDLE IMAGE - VERSION ĐÃ SỬA (CHỈ GỬI 1 SẢN PHẨM)
+# HANDLE IMAGE - VERSION MỚI: GỬI CAROUSEL 5 SẢN PHẨM
 # ============================================
 
 def handle_image(uid: str, image_url: str):
-    """Xử lý ảnh sản phẩm - CHỈ gửi 1 sản phẩm phù hợp nhất"""
+    """Xử lý ảnh sản phẩm - gửi carousel với 5 sản phẩm phù hợp nhất"""
     if not client or not OPENAI_API_KEY:
         send_message(uid, "📷 Em đã nhận được ảnh! Hiện AI đang bảo trì, anh/chị vui lòng gửi mã sản phẩm để em tư vấn ạ.")
         return
@@ -1224,17 +1178,68 @@ def handle_image(uid: str, image_url: str):
         ctx["last_image_url"] = image_url
         ctx["referral_source"] = "image_upload_analyzed"
         
-        # 3. Tìm sản phẩm phù hợp (CHỈ lấy 1 sản phẩm đầu tiên)
-        matched_products = find_products_by_image_analysis(uid, analysis, limit=1)
+        # 3. Tìm sản phẩm phù hợp (lấy 5 sản phẩm)
+        matched_products = find_products_by_image_analysis(uid, analysis, limit=5)
         
         if matched_products:
-            # 4. CHỈ gửi 1 sản phẩm duy nhất
-            best_ms = matched_products[0]
-            send_single_product_suggestion(uid, best_ms, analysis)
+            # 4. Gửi thông báo kết quả phân tích
+            product_type = analysis.get("product_type", "sản phẩm")
+            main_color = analysis.get("main_color", "")
             
-            # 5. Cập nhật context
-            ctx["last_ms"] = best_ms
-            update_product_context(uid, best_ms)
+            if main_color:
+                send_message(uid, f"🎯 Em phân tích được đây là {product_type} màu {main_color}.")
+            else:
+                send_message(uid, f"🎯 Em phân tích được đây là {product_type}.")
+            
+            send_message(uid, f"🔍 Em tìm thấy {len(matched_products)} sản phẩm phù hợp với ảnh của anh/chị:")
+            
+            # 5. Tạo và gửi carousel với 5 sản phẩm
+            carousel_elements = []
+            
+            for i, ms in enumerate(matched_products[:5], 1):
+                if ms in PRODUCTS:
+                    product = PRODUCTS[ms]
+                    
+                    images_field = product.get("Images", "")
+                    urls = parse_image_urls(images_field)
+                    image_url_carousel = urls[0] if urls else ""
+                    
+                    short_desc = product.get("ShortDesc", "") or short_description(product.get("MoTa", ""))
+                    
+                    gia_raw = product.get("Gia", "")
+                    gia_int = extract_price_int(gia_raw)
+                    price_display = f"{gia_int:,.0f}đ" if gia_int else "Liên hệ"
+                    
+                    element = {
+                        "title": f"[{ms}] {product.get('Ten', '')}",
+                        "image_url": image_url_carousel,
+                        "subtitle": f"{price_display} | {short_desc[:80]}{'...' if short_desc and len(short_desc) > 80 else ''}",
+                        "buttons": [
+                            {
+                                "type": "web_url",
+                                "url": f"{DOMAIN}/order-form?ms={ms}&uid={uid}",
+                                "title": "🛒 Đặt ngay"
+                            },
+                            {
+                                "type": "postback",
+                                "title": "🔍 Xem chi tiết",
+                                "payload": f"ADVICE_{ms}"
+                            }
+                        ]
+                    }
+                    carousel_elements.append(element)
+            
+            if carousel_elements:
+                send_carousel_template(uid, carousel_elements)
+                send_message(uid, "📱 Anh/chị vuốt sang trái/phải để xem thêm sản phẩm nhé!")
+                send_message(uid, "💬 Bấm 'Xem chi tiết' để xem thông tin và chính sách cụ thể của từng sản phẩm.")
+                
+                # Cập nhật context với sản phẩm đầu tiên
+                ctx["last_ms"] = matched_products[0]
+                update_product_context(uid, matched_products[0])
+            else:
+                send_message(uid, "❌ Em không tìm thấy sản phẩm nào phù hợp với ảnh này.")
+                send_message(uid, "Anh/chị có thể thử gửi ảnh khác hoặc gõ 'xem sản phẩm' để xem toàn bộ danh mục.")
             
         else:
             # Không tìm thấy sản phẩm phù hợp
@@ -1996,7 +2001,7 @@ def health_check():
         "facebook_configured": bool(PAGE_ACCESS_TOKEN),
         "image_processing": "base64+fallback",
         "image_debounce_enabled": True,
-        "single_product_suggestion": True
+        "image_carousel": "5_products"
     }, 200
 
 
@@ -2010,6 +2015,6 @@ if __name__ == "__main__":
     print(f"🟢 Fanpage: {FANPAGE_NAME}")
     print(f"🟢 Domain: {DOMAIN}")
     print(f"🟢 Image Processing: Base64 + Fallback URL")
-    print(f"🟢 Single Product Suggestion: ĐÃ BẬT (chỉ gửi 1 sản phẩm)")
+    print(f"🟢 Image Carousel: 5 sản phẩm phù hợp nhất")
     print(f"🟢 Image Debounce: 3 giây")
     app.run(host="0.0.0.0", port=5000, debug=True)
