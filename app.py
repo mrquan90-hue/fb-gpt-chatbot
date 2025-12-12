@@ -107,6 +107,9 @@ USER_CONTEXT = defaultdict(lambda: {
     "last_image_base64": None,
     "last_image_time": 0,  # Thêm: thời gian xử lý ảnh gần nhất
     "processed_image_mids": set(),  # Thêm: set các image mid đã xử lý
+    # Thêm trường cho echo message từ Fchat
+    "last_echo_processed_time": 0,
+    "processed_echo_mids": set(),
 })
 PRODUCTS = {}
 PRODUCTS_BY_NUMBER = {}  # Mapping từ số (không có số 0 đầu) đến mã đầy đủ
@@ -1663,7 +1666,7 @@ def handle_text(uid: str, text: str):
 
 
 # ============================================
-# WEBHOOK HANDLER
+# WEBHOOK HANDLER - ĐÃ SỬA ĐỂ XỬ LÝ ECHO MESSAGE TỪ FCHAT
 # ============================================
 
 @app.route("/", methods=["GET"])
@@ -1698,26 +1701,136 @@ def webhook():
             if not sender_id:
                 continue
 
+            # ============================================
+            # XỬ LÝ ECHO MESSAGE TỪ FCHAT (PHẢN HỒI BÌNH LUẬN)
+            # ============================================
             if m.get("message", {}).get("is_echo"):
-                print(f"[ECHO] Bỏ qua tin nhắn từ bot: {sender_id}")
+                # Lấy recipient_id (người nhận tin nhắn echo) - chính là khách hàng
+                recipient_id = m.get("recipient", {}).get("id")
+                if not recipient_id:
+                    continue
+                
+                # Kiểm tra duplicate echo message
+                msg_mid = m["message"].get("mid")
+                if msg_mid:
+                    ctx = USER_CONTEXT[recipient_id]
+                    if "processed_echo_mids" not in ctx:
+                        ctx["processed_echo_mids"] = set()
+                    
+                    if msg_mid in ctx["processed_echo_mids"]:
+                        print(f"[ECHO DUPLICATE] Bỏ qua echo message đã xử lý: {msg_mid}")
+                        continue
+                    
+                    ctx["processed_echo_mids"].add(msg_mid)
+                    # Giới hạn bộ nhớ
+                    if len(ctx["processed_echo_mids"]) > 20:
+                        ctx["processed_echo_mids"] = set(list(ctx["processed_echo_mids"])[-20:])
+                
+                # Lấy nội dung tin nhắn echo
+                echo_text = m["message"].get("text", "")
+                if echo_text:
+                    print(f"[ECHO FCHAT] Tin nhắn echo từ Fchat cho user {recipient_id}: {echo_text[:100]}...")
+                    
+                    # Tìm mã sản phẩm trong tin nhắn echo
+                    detected_ms = detect_ms_from_text(echo_text)
+                    
+                    if detected_ms and detected_ms in PRODUCTS:
+                        print(f"[ECHO FCHAT] Phát hiện mã sản phẩm: {detected_ms} cho user: {recipient_id}")
+                        
+                        # Kiểm tra thời gian để tránh gửi lặp
+                        ctx = USER_CONTEXT[recipient_id]
+                        now = time.time()
+                        last_echo_time = ctx.get("last_echo_processed_time", 0)
+                        
+                        if now - last_echo_time < 3:  # 3 giây debounce
+                            print(f"[ECHO DEBOUNCE] Bỏ qua echo message mới, chưa đủ thời gian")
+                            continue
+                        
+                        ctx["last_echo_processed_time"] = now
+                        
+                        # Cập nhật context cho người dùng
+                        ctx["last_ms"] = detected_ms
+                        ctx["referral_source"] = "fchat_echo"
+                        update_product_context(recipient_id, detected_ms)
+                        
+                        # Gửi thông báo chào mừng và thông tin sản phẩm
+                        welcome_msg = f"""Chào anh/chị! 👋 
+Em là trợ lý AI của {FANPAGE_NAME}.
+
+Em thấy anh/chị quan tâm đến sản phẩm mã [{detected_ms}] từ bình luận.
+Em sẽ gửi thông tin chi tiết sản phẩm ngay ạ!"""
+                        send_message(recipient_id, welcome_msg)
+                        
+                        # Gửi thông tin sản phẩm (có debounce)
+                        send_product_info_debounced(recipient_id, detected_ms)
+                    else:
+                        print(f"[ECHO FCHAT] Không tìm thấy mã sản phẩm trong echo: {echo_text[:100]}...")
+                        # Vẫn gửi lời chào nếu không tìm thấy mã sản phẩm
+                        welcome_msg = f"""Chào anh/chị! 👋 
+Em là trợ lý AI của {FANPAGE_NAME}.
+
+Để em tư vấn chính xác, anh/chị vui lòng:
+1. Gửi mã sản phẩm (ví dụ: [MS123456])
+2. Hoặc gõ "xem sản phẩm" để xem danh sách
+3. Hoặc mô tả sản phẩm bạn đang tìm
+
+Anh/chị quan tâm sản phẩm nào ạ?"""
+                        send_message(recipient_id, welcome_msg)
+                
                 continue
             
             if m.get("delivery") or m.get("read"):
                 continue
             
-            # Xử lý referral (từ CTA, ads, bình luận)
+            # ============================================
+            # XỬ LÝ REFERRAL (TỪ QUẢNG CÁO, FACEBOOK SHOP)
+            # ============================================
             if m.get("referral"):
                 ref = m["referral"]
                 ctx = USER_CONTEXT[sender_id]
                 ctx["referral_source"] = ref.get("source", "unknown")
-                ctx["referral_payload"] = ref.get("ref", "")
-                print(f"[REFERRAL] User {sender_id} từ {ctx['referral_source']} với payload: {ctx['referral_payload']}")
+                referral_payload = ref.get("ref", "")
+                ctx["referral_payload"] = referral_payload
                 
-                # Có thể xử lý thêm dựa trên referral payload
-                if ctx["referral_payload"] and ctx["referral_payload"].startswith("MS"):
-                    ctx["last_ms"] = ctx["referral_payload"]
-                    update_product_context(sender_id, ctx["referral_payload"])
+                print(f"[REFERRAL] User {sender_id} từ {ctx['referral_source']} với payload: {referral_payload}")
+                
+                # Tự động xử lý nếu referral payload chứa mã sản phẩm
+                if referral_payload:
+                    detected_ms = detect_ms_from_text(referral_payload)
+                    
+                    if detected_ms and detected_ms in PRODUCTS:
+                        print(f"[REFERRAL AUTO] Nhận diện mã sản phẩm từ referral: {detected_ms}")
+                        
+                        # Cập nhật context
+                        ctx["last_ms"] = detected_ms
+                        update_product_context(sender_id, detected_ms)
+                        
+                        # Gửi thông báo và sản phẩm
+                        welcome_msg = f"""Chào anh/chị! 👋 
+Em là trợ lý AI của {FANPAGE_NAME}.
+
+Em thấy anh/chị quan tâm đến sản phẩm mã [{detected_ms}].
+Em sẽ gửi thông tin chi tiết sản phẩm ngay ạ!"""
+                        send_message(sender_id, welcome_msg)
+                        send_product_info_debounced(sender_id, detected_ms)
+                        continue
+                    else:
+                        # Nếu không tìm thấy mã sản phẩm, gửi message chào mừng thông thường
+                        welcome_msg = f"""Chào anh/chị! 👋 
+Em là trợ lý AI của {FANPAGE_NAME}.
+
+Để em tư vấn chính xác, anh/chị vui lòng:
+1. Gửi mã sản phẩm (ví dụ: [MS123456])
+2. Hoặc gõ "xem sản phẩm" để xem danh sách
+3. Hoặc mô tả sản phẩm bạn đang tìm
+
+Anh/chị quan tâm sản phẩm nào ạ?"""
+                        send_message(sender_id, welcome_msg)
+                        continue
             
+            # ============================================
+            # XỬ LÝ POSTBACK (GET_STARTED, ADVICE_, ORDER_)
+            # ============================================
             if "postback" in m:
                 payload = m["postback"].get("payload")
                 if payload:
@@ -1783,6 +1896,9 @@ Anh/chị quan tâm sản phẩm nào ạ?"""
                     
                     continue
             
+            # ============================================
+            # XỬ LÝ TIN NHẮN THƯỜNG (TEXT & ẢNH)
+            # ============================================
             if "message" in m:
                 msg = m["message"]
                 text = msg.get("text")
@@ -2190,7 +2306,9 @@ def health_check():
         "image_debounce_enabled": True,
         "image_carousel": "5_products",
         "search_algorithm": "TF-IDF_cosine_similarity",
-        "accuracy_improved": True
+        "accuracy_improved": True,
+        "fchat_echo_processing": True,
+        "referral_auto_processing": True
     }, 200
 
 
@@ -2208,4 +2326,6 @@ if __name__ == "__main__":
     print(f"🟢 Image Carousel: 5 sản phẩm phù hợp nhất")
     print(f"🟢 Image Debounce: 3 giây")
     print(f"🟢 Accuracy: CẢI THIỆN ĐỘ CHÍNH XÁC")
+    print(f"🟢 Fchat Echo Processing: BẬT (tự động nhận diện sản phẩm từ bình luận)")
+    print(f"🟢 Referral Auto Processing: BẬT (tự động nhận diện từ quảng cáo/Facebook Shop)")
     app.run(host="0.0.0.0", port=5000, debug=True)
