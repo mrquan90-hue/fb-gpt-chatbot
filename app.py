@@ -95,6 +95,9 @@ USER_CONTEXT = defaultdict(lambda: {
     "conversation_history": [],
     "referral_source": None,
     "referral_payload": None,
+    # Thêm trường cho nhận diện ảnh
+    "last_image_analysis": None,
+    "last_image_url": None,
 })
 PRODUCTS = {}
 PRODUCTS_BY_NUMBER = {}  # Mapping từ số (không có số 0 đầu) đến mã đầy đủ
@@ -178,6 +181,187 @@ CAROUSEL_KEYWORDS = [
     "xem hàng",
     "show hàng",
 ]
+
+# ============================================
+# GPT-4o VISION: PHÂN TÍCH ẢNH SẢN PHẨM
+# ============================================
+
+def analyze_image_with_gpt4o(image_url: str):
+    """
+    Phân tích ảnh sản phẩm thời trang/gia dụng bằng GPT-4o Vision API
+    Trả về dictionary chứa thông tin phân tích
+    """
+    if not client or not OPENAI_API_KEY:
+        print("⚠️ OpenAI client chưa được cấu hình, bỏ qua phân tích ảnh")
+        return None
+    
+    try:
+        print(f"🖼️ Đang phân tích ảnh: {image_url[:100]}...")
+        
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {
+                    "role": "system",
+                    "content": f"""Bạn là chuyên gia tư vấn thời trang và gia dụng cho {FANPAGE_NAME}.
+                    
+Hãy phân tích ảnh sản phẩm và trả về JSON với cấu trúc:
+{{
+    "product_type": "loại sản phẩm (ví dụ: áo thun, quần jeans, váy, đồ gia dụng nhà bếp, v.v.)",
+    "main_color": "màu sắc chính (tiếng Việt)",
+    "secondary_colors": ["màu phụ 1", "màu phụ 2"],
+    "style": "phong cách/kiểu dáng (ví dụ: casual, formal, vintage, hiện đại)",
+    "material_guess": "dự đoán chất liệu (nếu nhận diện được)",
+    "description": "mô tả chi tiết sản phẩm bằng tiếng Việt (2-3 câu)",
+    "keywords": ["từ khóa 1", "từ khóa 2", "từ khóa 3", "từ khóa 4", "từ khóa 5"],
+    "confidence_score": 0.95
+}}
+
+LƯU Ý QUAN TRỌNG:
+1. CHỈ phân tích những gì thấy trong ảnh, không suy đoán thêm
+2. product_type phải cụ thể (ví dụ: "áo sơ mi tay ngắn" thay vì chỉ "áo")
+3. keywords phải là từ thông dụng để tìm kiếm sản phẩm
+4. Trả về CHỈ JSON, không có text nào khác"""
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Phân tích sản phẩm trong ảnh này:"},
+                        {"type": "image_url", "image_url": {"url": image_url}}
+                    ]
+                }
+            ],
+            max_tokens=500,
+            temperature=0.2,
+            response_format={"type": "json_object"}
+        )
+        
+        result_text = response.choices[0].message.content.strip()
+        print(f"📊 Kết quả phân tích ảnh: {result_text[:200]}...")
+        
+        # Parse JSON result
+        analysis = json.loads(result_text)
+        
+        # Thêm timestamp và image_url vào kết quả
+        analysis["timestamp"] = time.time()
+        analysis["image_url"] = image_url
+        
+        return analysis
+        
+    except Exception as e:
+        print(f"❌ Lỗi phân tích ảnh với GPT-4o: {str(e)}")
+        return None
+
+def find_products_by_image_analysis(uid: str, analysis: dict, limit: int = 3):
+    """
+    Tìm sản phẩm phù hợp dựa trên phân tích ảnh
+    Trả về danh sách mã sản phẩm (MS) phù hợp nhất
+    """
+    if not analysis or not PRODUCTS:
+        return []
+    
+    # Lấy thông tin từ phân tích
+    product_type = analysis.get("product_type", "").lower()
+    main_color = analysis.get("main_color", "").lower()
+    keywords = [kw.lower() for kw in analysis.get("keywords", [])]
+    
+    # Chuẩn bị danh sách sản phẩm với điểm số
+    scored_products = []
+    
+    for ms, product in PRODUCTS.items():
+        score = 0
+        
+        # Chuỗi tìm kiếm: tên + mô tả sản phẩm
+        search_text = f"{product.get('Ten', '')} {product.get('MoTa', '')}".lower()
+        
+        # Kiểm tra loại sản phẩm
+        if product_type and product_type in search_text:
+            score += 5  # Trọng số cao cho loại sản phẩm
+        
+        # Kiểm tra màu sắc
+        if main_color and main_color in search_text:
+            score += 3
+        
+        # Kiểm tra từ khóa
+        for keyword in keywords:
+            if keyword in search_text:
+                score += 2
+        
+        # Kiểm tra trong thuộc tính màu/size
+        color_attr = product.get("màu (Thuộc tính)", "").lower()
+        if main_color and main_color in color_attr:
+            score += 4
+        
+        # Ưu tiên sản phẩm có trong lịch sử của user
+        ctx = USER_CONTEXT[uid]
+        if ms in ctx.get("product_history", []):
+            score += 1
+        
+        # Chỉ thêm sản phẩm có điểm > 0
+        if score > 0:
+            scored_products.append({
+                "ms": ms,
+                "score": score,
+                "product": product
+            })
+    
+    # Sắp xếp theo điểm số giảm dần
+    scored_products.sort(key=lambda x: x["score"], reverse=True)
+    
+    # Lấy top sản phẩm
+    top_products = [item["ms"] for item in scored_products[:limit]]
+    
+    print(f"🔍 Tìm thấy {len(scored_products)} sản phẩm phù hợp, top {len(top_products)}: {top_products}")
+    
+    return top_products
+
+def send_product_suggestions(uid: str, product_ms_list: list, analysis: dict = None):
+    """Gửi đề xuất sản phẩm dựa trên phân tích ảnh"""
+    if not product_ms_list:
+        return
+    
+    # Gửi thông báo tìm thấy sản phẩm
+    if analysis:
+        product_type = analysis.get("product_type", "sản phẩm")
+        main_color = analysis.get("main_color", "")
+        
+        if main_color:
+            send_message(uid, f"🎯 Em phân tích được đây là {product_type} màu {main_color}")
+        else:
+            send_message(uid, f"🎯 Em phân tích được đây là {product_type}")
+    
+    send_message(uid, "🔍 Em tìm thấy một số sản phẩm phù hợp:")
+    
+    # Gửi thông tin từng sản phẩm
+    for i, ms in enumerate(product_ms_list[:3], 1):
+        if ms in PRODUCTS:
+            product = PRODUCTS[ms]
+            product_name = product.get('Ten', 'Sản phẩm')
+            send_message(uid, f"{i}. 📌 {product_name}")
+            
+            # Gửi ảnh đầu tiên nếu có
+            images_field = product.get("Images", "")
+            urls = parse_image_urls(images_field)
+            if urls:
+                send_image(uid, urls[0])
+                time.sleep(0.5)
+            
+            # Gửi giá
+            gia_raw = product.get("Gia", "")
+            gia_int = extract_price_int(gia_raw)
+            if gia_int:
+                send_message(uid, f"💰 Giá: {gia_int:,.0f}đ")
+            
+            # Gửi nút hành động
+            domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
+            order_link = f"{domain}/order-form?ms={ms}&uid={uid}"
+            send_message(uid, f"🛒 Xem chi tiết & đặt hàng: {order_link}")
+            
+            time.sleep(0.5)
+    
+    # Gửi thêm hướng dẫn
+    if len(product_ms_list) > 3:
+        send_message(uid, f"📱 Còn {len(product_ms_list)-3} sản phẩm phù hợp khác. Anh/chị muốn xem tiếp không ạ?")
 
 # ============================================
 # HELPER: SEND MESSAGE
@@ -866,6 +1050,83 @@ def send_product_info_debounced(uid: str, ms: str):
 
 
 # ============================================
+# HANDLE IMAGE - VERSION MỚI VỚI GPT-4o VISION
+# ============================================
+
+def handle_image(uid: str, image_url: str):
+    """Xử lý ảnh sản phẩm thông minh với GPT-4o Vision"""
+    if not client or not OPENAI_API_KEY:
+        # Fallback về xử lý cũ nếu không có API key
+        ctx = USER_CONTEXT[uid]
+        ctx["referral_source"] = "image_upload"
+        
+        response = """📷 Em đã nhận được ảnh từ anh/chị!
+
+Hiện tại hệ thống trợ lý AI đang bảo trì.
+
+Để em tư vấn chính xác, anh/chị vui lòng:
+1. Gửi mã sản phẩm (ví dụ: [MS123456])
+2. Hoặc gõ số sản phẩm (ví dụ: 123456)
+3. Hoặc mô tả sản phẩm trong ảnh
+
+Anh/chị có mã sản phẩm không ạ?"""
+        
+        send_message(uid, response)
+        return
+    
+    ctx = USER_CONTEXT[uid]
+    
+    # Gửi thông báo đang xử lý
+    send_message(uid, "🖼️ Em đang phân tích ảnh sản phẩm của anh/chị...")
+    
+    try:
+        # 1. Phân tích ảnh bằng GPT-4o Vision
+        analysis = analyze_image_with_gpt4o(image_url)
+        
+        if not analysis:
+            send_message(uid, "❌ Em chưa phân tích được ảnh này. Anh/chị có thể mô tả sản phẩm hoặc gửi mã sản phẩm được không ạ?")
+            return
+        
+        # 2. Lưu kết quả phân tích vào context
+        ctx["last_image_analysis"] = analysis
+        ctx["last_image_url"] = image_url
+        ctx["referral_source"] = "image_upload_analyzed"
+        
+        # 3. Tìm sản phẩm phù hợp
+        matched_products = find_products_by_image_analysis(uid, analysis, limit=5)
+        
+        if matched_products:
+            # 4. Gửi đề xuất sản phẩm
+            send_product_suggestions(uid, matched_products, analysis)
+            
+            # 5. Gợi ý thêm
+            send_message(uid, "💡 Anh/chị muốn:")
+            send_message(uid, "1. Xem thêm sản phẩm tương tự")
+            send_message(uid, "2. Được tư vấn chi tiết về sản phẩm nào đó")
+            send_message(uid, "3. Hoặc gửi ảnh khác để em phân tích")
+            
+        else:
+            # 6. Không tìm thấy sản phẩm phù hợp
+            product_type = analysis.get("product_type", "sản phẩm")
+            main_color = analysis.get("main_color", "")
+            
+            if main_color:
+                send_message(uid, f"🔍 Em phân tích được đây là {product_type} màu {main_color}")
+            else:
+                send_message(uid, f"🔍 Em phân tích được đây là {product_type}")
+            
+            send_message(uid, "Hiện em chưa tìm thấy sản phẩm khớp 100% trong kho.")
+            send_message(uid, "Anh/chị có thể:")
+            send_message(uid, "1. Gửi thêm ảnh góc khác")
+            send_message(uid, "2. Gõ 'xem sản phẩm' để xem toàn bộ danh mục")
+            send_message(uid, "3. Mô tả chi tiết hơn về sản phẩm này")
+    
+    except Exception as e:
+        print(f"❌ Lỗi xử lý ảnh: {str(e)}")
+        send_message(uid, "❌ Em gặp lỗi khi phân tích ảnh. Anh/chị vui lòng thử lại hoặc gửi mã sản phẩm để em tư vấn ạ!")
+
+
+# ============================================
 # HANDLE ORDER FORM STATE
 # ============================================
 
@@ -923,30 +1184,6 @@ def handle_order_form_step(uid: str, text: str):
         return True
 
     return False
-
-
-# ============================================
-# HANDLE IMAGE
-# ============================================
-
-def handle_image(uid: str, image_url: str):
-    """Xử lý khi khách gửi ảnh"""
-    ctx = USER_CONTEXT[uid]
-    ctx["referral_source"] = "image_upload"
-    
-    # Yêu cầu mã sản phẩm
-    response = """📷 Em đã nhận được ảnh từ anh/chị!
-
-Hiện tại hệ thống chưa hỗ trợ nhận diện ảnh tự động.
-
-Để em tư vấn chính xác, anh/chị vui lòng:
-1. Gửi mã sản phẩm (ví dụ: [MS123456])
-2. Hoặc mô tả sản phẩm trong ảnh
-3. Hoặc gõ "xem sản phẩm" để xem danh sách
-
-Anh/chị có mã sản phẩm không ạ?"""
-    
-    send_message(uid, response)
 
 
 # ============================================
@@ -1607,6 +1844,7 @@ def health_check():
         "products_loaded": len(PRODUCTS),
         "last_load_time": LAST_LOAD,
         "openai_configured": bool(client),
+        "openai_vision_available": bool(client and OPENAI_API_KEY),
         "facebook_configured": bool(PAGE_ACCESS_TOKEN)
     }, 200
 
@@ -1617,4 +1855,7 @@ def health_check():
 
 if __name__ == "__main__":
     print("Starting app on http://0.0.0.0:5000")
+    print(f"🟢 GPT-4o Vision API: {'SẴN SÀNG' if client and OPENAI_API_KEY else 'CHƯA CẤU HÌNH'}")
+    print(f"🟢 Fanpage: {FANPAGE_NAME}")
+    print(f"🟢 Domain: {DOMAIN}")
     app.run(host="0.0.0.0", port=5000, debug=True)
