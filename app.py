@@ -4,9 +4,12 @@ import re
 import time
 import csv
 import hashlib
+import base64
 from collections import defaultdict
 from urllib.parse import quote
 from datetime import datetime
+from typing import Optional, Dict, Any
+from io import BytesIO
 
 import requests
 from flask import Flask, request, send_from_directory
@@ -98,6 +101,7 @@ USER_CONTEXT = defaultdict(lambda: {
     # Thêm trường cho nhận diện ảnh
     "last_image_analysis": None,
     "last_image_url": None,
+    "last_image_base64": None,
 })
 PRODUCTS = {}
 PRODUCTS_BY_NUMBER = {}  # Mapping từ số (không có số 0 đầu) đến mã đầy đủ
@@ -183,13 +187,120 @@ CAROUSEL_KEYWORDS = [
 ]
 
 # ============================================
+# HELPER: TẢI VÀ XỬ LÝ ẢNH
+# ============================================
+
+def download_image_from_facebook(image_url: str, timeout: int = 10) -> Optional[bytes]:
+    """
+    Tải ảnh từ Facebook URL với headers phù hợp
+    Trả về bytes của ảnh hoặc None nếu thất bại
+    """
+    try:
+        # Facebook cần user-agent để tránh bị chặn
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
+            'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Referer': 'https://www.facebook.com/',
+        }
+        
+        print(f"📥 Đang tải ảnh từ Facebook: {image_url[:100]}...")
+        
+        response = requests.get(
+            image_url, 
+            headers=headers, 
+            timeout=timeout,
+            stream=True
+        )
+        
+        if response.status_code == 200:
+            # Kiểm tra content-type
+            content_type = response.headers.get('content-type', '')
+            if not content_type.startswith('image/'):
+                print(f"⚠️ URL không phải ảnh: {content_type}")
+                return None
+            
+            # Đọc ảnh với giới hạn kích thước (max 10MB)
+            max_size = 10 * 1024 * 1024  # 10MB
+            content = b""
+            for chunk in response.iter_content(chunk_size=8192):
+                content += chunk
+                if len(content) > max_size:
+                    print("⚠️ Ảnh quá lớn (>10MB), bỏ qua")
+                    return None
+            
+            print(f"✅ Đã tải ảnh thành công: {len(content)} bytes")
+            return content
+            
+        else:
+            print(f"❌ Lỗi tải ảnh: HTTP {response.status_code}")
+            return None
+            
+    except requests.exceptions.Timeout:
+        print(f"⏰ Timeout khi tải ảnh")
+        return None
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Lỗi kết nối khi tải ảnh: {str(e)}")
+        return None
+    except Exception as e:
+        print(f"❌ Lỗi không xác định khi tải ảnh: {str(e)}")
+        return None
+
+def convert_image_to_base64(image_bytes: bytes) -> Optional[str]:
+    """
+    Chuyển đổi ảnh bytes sang base64 string
+    """
+    try:
+        # Mã hóa base64
+        base64_str = base64.b64encode(image_bytes).decode('utf-8')
+        
+        # Xác định MIME type từ bytes (đơn giản)
+        # Thực tế nên dùng thư viện như python-magic, nhưng tạm thời dùng cách đơn giản
+        if image_bytes[:4] == b'\x89PNG':
+            mime_type = 'image/png'
+        elif image_bytes[:3] == b'\xff\xd8\xff':
+            mime_type = 'image/jpeg'
+        elif image_bytes[:6] in (b'GIF87a', b'GIF89a'):
+            mime_type = 'image/gif'
+        elif image_bytes[:4] == b'RIFF' and image_bytes[8:12] == b'WEBP':
+            mime_type = 'image/webp'
+        else:
+            mime_type = 'image/jpeg'  # Mặc định
+        
+        # Tạo data URL
+        data_url = f"data:{mime_type};base64,{base64_str}"
+        return data_url
+        
+    except Exception as e:
+        print(f"❌ Lỗi chuyển đổi base64: {str(e)}")
+        return None
+
+def get_image_for_analysis(image_url: str) -> Optional[str]:
+    """
+    Lấy ảnh dưới dạng base64 data URL cho OpenAI
+    Thử cả 2 cách: tải về và dùng trực tiếp URL
+    """
+    # Ưu tiên: Tải ảnh về và chuyển base64
+    image_bytes = download_image_from_facebook(image_url)
+    
+    if image_bytes:
+        base64_data = convert_image_to_base64(image_bytes)
+        if base64_data:
+            print("✅ Sử dụng ảnh base64")
+            return base64_data
+    
+    # Fallback: Dùng URL trực tiếp (nếu OpenAI có thể truy cập)
+    print("⚠️ Fallback: Sử dụng URL trực tiếp")
+    return image_url
+
+# ============================================
 # GPT-4o VISION: PHÂN TÍCH ẢNH SẢN PHẨM
 # ============================================
 
 def analyze_image_with_gpt4o(image_url: str):
     """
     Phân tích ảnh sản phẩm thời trang/gia dụng bằng GPT-4o Vision API
-    Trả về dictionary chứa thông tin phân tích
+    Sử dụng base64 để tránh lỗi tải ảnh từ Facebook
     """
     if not client or not OPENAI_API_KEY:
         print("⚠️ OpenAI client chưa được cấu hình, bỏ qua phân tích ảnh")
@@ -198,6 +309,32 @@ def analyze_image_with_gpt4o(image_url: str):
     try:
         print(f"🖼️ Đang phân tích ảnh: {image_url[:100]}...")
         
+        # Lấy ảnh dưới dạng base64 hoặc URL
+        image_content = get_image_for_analysis(image_url)
+        
+        if not image_content:
+            print("❌ Không thể lấy được ảnh để phân tích")
+            return None
+        
+        # Chuẩn bị content cho OpenAI
+        if image_content.startswith('data:'):
+            # Base64 data URL
+            image_message = {
+                "type": "image_url",
+                "image_url": {
+                    "url": image_content
+                }
+            }
+        else:
+            # Regular URL (fallback)
+            image_message = {
+                "type": "image_url",
+                "image_url": {
+                    "url": image_content
+                }
+            }
+        
+        # Gọi OpenAI API với ảnh
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[
@@ -217,17 +354,18 @@ Hãy phân tích ảnh sản phẩm và trả về JSON với cấu trúc:
     "confidence_score": 0.95
 }}
 
-LƯU Ý QUAN TRỌNG:
+QUY TẮC QUAN TRỌNG:
 1. CHỈ phân tích những gì thấy trong ảnh, không suy đoán thêm
 2. product_type phải cụ thể (ví dụ: "áo sơ mi tay ngắn" thay vì chỉ "áo")
 3. keywords phải là từ thông dụng để tìm kiếm sản phẩm
-4. Trả về CHỈ JSON, không có text nào khác"""
+4. Trả về CHỈ JSON, không có text nào khác
+5. Dùng tiếng Việt cho tất cả các trường"""
                 },
                 {
                     "role": "user",
                     "content": [
                         {"type": "text", "text": "Phân tích sản phẩm trong ảnh này:"},
-                        {"type": "image_url", "image_url": {"url": image_url}}
+                        image_message
                     ]
                 }
             ],
@@ -1050,11 +1188,11 @@ def send_product_info_debounced(uid: str, ms: str):
 
 
 # ============================================
-# HANDLE IMAGE - VERSION MỚI VỚI GPT-4o VISION
+# HANDLE IMAGE - VERSION ĐÃ SỬA
 # ============================================
 
 def handle_image(uid: str, image_url: str):
-    """Xử lý ảnh sản phẩm thông minh với GPT-4o Vision"""
+    """Xử lý ảnh sản phẩm thông minh với GPT-4o Vision (đã fix lỗi Facebook URL)"""
     if not client or not OPENAI_API_KEY:
         # Fallback về xử lý cũ nếu không có API key
         ctx = USER_CONTEXT[uid]
@@ -1080,7 +1218,7 @@ Anh/chị có mã sản phẩm không ạ?"""
     send_message(uid, "🖼️ Em đang phân tích ảnh sản phẩm của anh/chị...")
     
     try:
-        # 1. Phân tích ảnh bằng GPT-4o Vision
+        # 1. Phân tích ảnh bằng GPT-4o Vision (đã sửa lỗi Facebook URL)
         analysis = analyze_image_with_gpt4o(image_url)
         
         if not analysis:
@@ -1845,7 +1983,8 @@ def health_check():
         "last_load_time": LAST_LOAD,
         "openai_configured": bool(client),
         "openai_vision_available": bool(client and OPENAI_API_KEY),
-        "facebook_configured": bool(PAGE_ACCESS_TOKEN)
+        "facebook_configured": bool(PAGE_ACCESS_TOKEN),
+        "image_processing": "base64+fallback"
     }, 200
 
 
@@ -1858,4 +1997,5 @@ if __name__ == "__main__":
     print(f"🟢 GPT-4o Vision API: {'SẴN SÀNG' if client and OPENAI_API_KEY else 'CHƯA CẤU HÌNH'}")
     print(f"🟢 Fanpage: {FANPAGE_NAME}")
     print(f"🟢 Domain: {DOMAIN}")
+    print(f"🟢 Image Processing: Base64 + Fallback URL")
     app.run(host="0.0.0.0", port=5000, debug=True)
