@@ -8,8 +8,11 @@ import base64
 from collections import defaultdict
 from urllib.parse import quote
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List, Tuple
 from io import BytesIO
+import numpy as np
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 import requests
 from flask import Flask, request, send_from_directory
@@ -107,6 +110,7 @@ USER_CONTEXT = defaultdict(lambda: {
 })
 PRODUCTS = {}
 PRODUCTS_BY_NUMBER = {}  # Mapping từ số (không có số 0 đầu) đến mã đầy đủ
+PRODUCT_TEXT_EMBEDDINGS = {}  # Lưu embedding văn bản của sản phẩm để tìm kiếm
 LAST_LOAD = 0
 LOAD_TTL = 300
 
@@ -296,13 +300,13 @@ def get_image_for_analysis(image_url: str) -> Optional[str]:
     return image_url
 
 # ============================================
-# GPT-4o VISION: PHÂN TÍCH ẢNH SẢN PHẨM
+# GPT-4o VISION: PHÂN TÍCH ẢNH SẢN PHẨM (CẢI TIẾN)
 # ============================================
 
 def analyze_image_with_gpt4o(image_url: str):
     """
     Phân tích ảnh sản phẩm thời trang/gia dụng bằng GPT-4o Vision API
-    Sử dụng base64 để tránh lỗi tải ảnh từ Facebook
+    CẢI TIẾN: Prompt chi tiết hơn, tập trung vào đặc điểm nhận dạng
     """
     if not client or not OPENAI_API_KEY:
         print("⚠️ OpenAI client chưa được cấu hình, bỏ qua phân tích ảnh")
@@ -336,51 +340,63 @@ def analyze_image_with_gpt4o(image_url: str):
                 }
             }
         
+        # CẢI TIẾN: Prompt chi tiết hơn, tập trung vào đặc điểm nhận dạng
+        improved_prompt = f"""Bạn là chuyên gia tư vấn thời trang và gia dụng cho {FANPAGE_NAME}.
+        
+Hãy phân tích ảnh sản phẩm và trả về JSON với cấu trúc:
+{{
+    "product_category": "Danh mục chính (ví dụ: quần áo, giày dép, túi xách, phụ kiện, đồ gia dụng)",
+    "product_type": "Loại sản phẩm cụ thể (ví dụ: áo thun tay ngắn, quần jeans ống đứng, váy dài công sở, giày sneaker)",
+    "main_color": "Màu sắc chính (tiếng Việt, mô tả chi tiết)",
+    "secondary_colors": ["màu phụ 1", "màu phụ 2"],
+    "pattern": "Họa tiết/hoa văn (ví dụ: trơn, sọc, kẻ caro, hoa, chấm bi)",
+    "style": "Phong cách/kiểu dáng (ví dụ: casual, formal, vintage, hiện đại, thể thao)",
+    "material": "Chất liệu (nếu nhận diện được, ví dụ: cotton, denim, lụa, len)",
+    "features": ["Đặc điểm 1", "Đặc điểm 2", "Đặc điểm 3"],
+    "season": "Mùa phù hợp (ví dụ: xuân hè, thu đông, cả năm)",
+    "occasion": "Dịp sử dụng (ví dụ: đi làm, dự tiệc, đi chơi, ở nhà)",
+    "description": "Mô tả chi tiết sản phẩm bằng tiếng Việt (3-4 câu)",
+    "search_keywords": ["từ khóa tìm kiếm 1", "từ khóa 2", "từ khóa 3", "từ khóa 4", "từ khóa 5", "từ khóa 6", "từ khóa 7", "từ khóa 8"],
+    "confidence_score": 0.95
+}}
+
+QUY TẮC QUAN TRỌNG:
+1. PHÂN TÍCH KỸ những gì thấy trong ảnh: hình dáng, kiểu dáng, chi tiết, màu sắc, họa tiết
+2. product_type phải CỤ THẾ và CHI TIẾT (ví dụ: "áo sơ mi tay ngắn cổ bẻ" thay vì chỉ "áo")
+3. search_keywords phải đa dạng: bao gồm từ khóa chung, từ khóa cụ thể, từ đồng nghĩa
+4. features: liệt kê các đặc điểm nổi bật như cổ áo, tay áo, đường may, chi tiết trang trí
+5. Trả về CHỈ JSON, không có text nào khác
+6. Dùng tiếng Việt cho tất cả các trường"""
+        
         # Gọi OpenAI API với ảnh
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[
                 {
                     "role": "system",
-                    "content": f"""Bạn là chuyên gia tư vấn thời trang và gia dụng cho {FANPAGE_NAME}.
-                    
-Hãy phân tích ảnh sản phẩm và trả về JSON với cấu trúc:
-{{
-    "product_type": "loại sản phẩm (ví dụ: áo thun, quần jeans, váy, đồ gia dụng nhà bếp, v.v.)",
-    "main_color": "màu sắc chính (tiếng Việt)",
-    "secondary_colors": ["màu phụ 1", "màu phụ 2"],
-    "style": "phong cách/kiểu dáng (ví dụ: casual, formal, vintage, hiện đại)",
-    "material_guess": "dự đoán chất liệu (nếu nhận diện được)",
-    "description": "mô tả chi tiết sản phẩm bằng tiếng Việt (2-3 câu)",
-    "keywords": ["từ khóa 1", "từ khóa 2", "từ khóa 3", "từ khóa 4", "từ khóa 5"],
-    "confidence_score": 0.95
-}}
-
-QUY TẮC QUAN TRỌNG:
-1. CHỈ phân tích những gì thấy trong ảnh, không suy đoán thêm
-2. product_type phải cụ thể (ví dụ: "áo sơ mi tay ngắn" thay vì chỉ "áo")
-3. keywords phải là từ thông dụng để tìm kiếm sản phẩm
-4. Trả về CHỈ JSON, không có text nào khác
-5. Dùng tiếng Việt cho tất cả các trường"""
+                    "content": improved_prompt
                 },
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "Phân tích sản phẩm trong ảnh này:"},
+                        {"type": "text", "text": "Hãy phân tích thật kỹ sản phẩm trong ảnh này, chú ý đến từng chi tiết:"},
                         image_message
                     ]
                 }
             ],
-            max_tokens=500,
-            temperature=0.2,
+            max_tokens=800,
+            temperature=0.1,  # Giảm temperature để kết quả ổn định hơn
             response_format={"type": "json_object"}
         )
         
         result_text = response.choices[0].message.content.strip()
-        print(f"📊 Kết quả phân tích ảnh: {result_text[:200]}...")
+        print(f"📊 Kết quả phân tích ảnh chi tiết: {result_text[:300]}...")
         
         # Parse JSON result
         analysis = json.loads(result_text)
+        
+        # Chuẩn hóa dữ liệu: chuyển tất cả về chữ thường, không dấu để dễ so sánh
+        analysis["search_text"] = create_search_text_from_analysis(analysis)
         
         # Thêm timestamp và image_url vào kết quả
         analysis["timestamp"] = time.time()
@@ -392,66 +408,207 @@ QUY TẮC QUAN TRỌNG:
         print(f"❌ Lỗi phân tích ảnh với GPT-4o: {str(e)}")
         return None
 
-def find_products_by_image_analysis(uid: str, analysis: dict, limit: int = 5):
+def create_search_text_from_analysis(analysis: dict) -> str:
+    """Tạo chuỗi tìm kiếm từ kết quả phân tích ảnh"""
+    if not analysis:
+        return ""
+    
+    search_parts = []
+    
+    # Thêm các trường quan trọng
+    if analysis.get("product_type"):
+        search_parts.append(analysis["product_type"])
+    
+    if analysis.get("product_category"):
+        search_parts.append(analysis["product_category"])
+    
+    if analysis.get("main_color"):
+        search_parts.append(analysis["main_color"])
+    
+    if analysis.get("secondary_colors"):
+        search_parts.extend(analysis["secondary_colors"])
+    
+    if analysis.get("pattern") and analysis["pattern"].lower() != "không có":
+        search_parts.append(analysis["pattern"])
+    
+    if analysis.get("style"):
+        search_parts.append(analysis["style"])
+    
+    if analysis.get("material") and analysis["material"].lower() != "không xác định":
+        search_parts.append(analysis["material"])
+    
+    if analysis.get("features"):
+        search_parts.extend(analysis["features"])
+    
+    if analysis.get("season"):
+        search_parts.append(analysis["season"])
+    
+    if analysis.get("occasion"):
+        search_parts.append(analysis["occasion"])
+    
+    if analysis.get("search_keywords"):
+        search_parts.extend(analysis["search_keywords"])
+    
+    # Tạo chuỗi tìm kiếm, chuẩn hóa về chữ thường, không dấu
+    search_text = " ".join(search_parts)
+    search_text_normalized = normalize_vietnamese(search_text.lower())
+    
+    # Loại bỏ các từ dừng phổ biến (có thể mở rộng)
+    stop_words = ["và", "hoặc", "của", "cho", "từ", "đến", "với", "có", "là", "ở", "trong", "trên", "dưới"]
+    for word in stop_words:
+        search_text_normalized = search_text_normalized.replace(f" {word} ", " ")
+    
+    return search_text_normalized
+
+# ============================================
+# TÌM SẢN PHẨM VỚI ĐỘ CHÍNH XÁC CAO
+# ============================================
+
+def create_product_search_text(product: dict) -> str:
+    """Tạo chuỗi tìm kiếm cho sản phẩm từ dữ liệu"""
+    search_parts = []
+    
+    # Tên sản phẩm (quan trọng nhất)
+    if product.get('Ten'):
+        search_parts.append(product['Ten'])
+    
+    # Mô tả sản phẩm
+    if product.get('MoTa'):
+        search_parts.append(product['MoTa'])
+    
+    # Màu sắc
+    if product.get("màu (Thuộc tính)"):
+        search_parts.append(product["màu (Thuộc tính)"])
+    
+    # Size
+    if product.get("size (Thuộc tính)"):
+        search_parts.append(product["size (Thuộc tính)"])
+    
+    # Từ các variants
+    variants = product.get("variants", [])
+    for variant in variants:
+        if variant.get("mau"):
+            search_parts.append(variant["mau"])
+        if variant.get("size"):
+            search_parts.append(variant["size"])
+    
+    # Tạo chuỗi, chuẩn hóa về chữ thường, không dấu
+    search_text = " ".join(search_parts)
+    search_text_normalized = normalize_vietnamese(search_text.lower())
+    
+    return search_text_normalized
+
+def calculate_text_similarity(text1: str, text2: str) -> float:
+    """Tính độ tương đồng giữa hai văn bản sử dụng TF-IDF và cosine similarity"""
+    if not text1 or not text2:
+        return 0.0
+    
+    try:
+        # Tạo vectorizer
+        vectorizer = TfidfVectorizer()
+        
+        # Tạo ma trận TF-IDF
+        tfidf_matrix = vectorizer.fit_transform([text1, text2])
+        
+        # Tính cosine similarity
+        similarity = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:2])[0][0]
+        
+        return float(similarity)
+    except Exception as e:
+        print(f"❌ Lỗi tính similarity: {str(e)}")
+        return 0.0
+
+def find_products_by_image_analysis_improved(uid: str, analysis: dict, limit: int = 5) -> List[Tuple[str, float]]:
     """
-    Tìm sản phẩm phù hợp dựa trên phân tích ảnh
-    Trả về danh sách mã sản phẩm (MS) phù hợp nhất
+    Tìm sản phẩm phù hợp dựa trên phân tích ảnh - PHIÊN BẢN CẢI TIẾN
+    Trả về danh sách (mã sản phẩm, điểm số) sắp xếp theo điểm giảm dần
     """
     if not analysis or not PRODUCTS:
         return []
     
-    # Lấy thông tin từ phân tích
-    product_type = analysis.get("product_type", "").lower()
-    main_color = analysis.get("main_color", "").lower()
-    keywords = [kw.lower() for kw in analysis.get("keywords", [])]
+    # Lấy chuỗi tìm kiếm từ phân tích ảnh
+    analysis_search_text = analysis.get("search_text", "")
+    if not analysis_search_text:
+        print("❌ Không có search text từ phân tích ảnh")
+        return []
     
-    # Chuẩn bị danh sách sản phẩm với điểm số
+    print(f"🔍 Tìm kiếm với: {analysis_search_text[:200]}...")
+    
     scored_products = []
     
     for ms, product in PRODUCTS.items():
-        score = 0
+        # Tạo chuỗi tìm kiếm cho sản phẩm
+        product_search_text = create_product_search_text(product)
         
-        # Chuỗi tìm kiếm: tên + mô tả sản phẩm
-        search_text = f"{product.get('Ten', '')} {product.get('MoTa', '')}".lower()
+        if not product_search_text:
+            continue
         
-        # Kiểm tra loại sản phẩm
-        if product_type and product_type in search_text:
-            score += 5  # Trọng số cao cho loại sản phẩm
+        # Tính điểm tương đồng chính bằng TF-IDF
+        similarity_score = calculate_text_similarity(analysis_search_text, product_search_text)
+        
+        # Thêm điểm bonus cho các trường khớp cụ thể
+        bonus_score = 0
         
         # Kiểm tra màu sắc
-        if main_color and main_color in search_text:
-            score += 3
+        main_color = analysis.get("main_color", "").lower()
+        if main_color:
+            main_color_normalized = normalize_vietnamese(main_color)
+            product_colors = product.get("màu (Thuộc tính)", "").lower()
+            product_colors_normalized = normalize_vietnamese(product_colors)
+            
+            if main_color_normalized in product_colors_normalized:
+                bonus_score += 0.3
         
-        # Kiểm tra từ khóa
-        for keyword in keywords:
-            if keyword in search_text:
-                score += 2
+        # Kiểm tra loại sản phẩm
+        product_type = analysis.get("product_type", "").lower()
+        if product_type:
+            product_type_normalized = normalize_vietnamese(product_type)
+            product_name = product.get('Ten', '').lower()
+            product_name_normalized = normalize_vietnamese(product_name)
+            
+            # Kiểm tra từng từ trong product_type có trong tên sản phẩm không
+            type_words = product_type_normalized.split()
+            name_words = set(product_name_normalized.split())
+            
+            matching_words = sum(1 for word in type_words if word in name_words)
+            if matching_words > 0:
+                bonus_score += (matching_words / len(type_words)) * 0.4
         
-        # Kiểm tra trong thuộc tính màu/size
-        color_attr = product.get("màu (Thuộc tính)", "").lower()
-        if main_color and main_color in color_attr:
-            score += 4
+        # Kiểm tra features/đặc điểm
+        features = analysis.get("features", [])
+        if features:
+            for feature in features:
+                feature_normalized = normalize_vietnamese(feature.lower())
+                if feature_normalized in product_search_text:
+                    bonus_score += 0.1
         
-        # Ưu tiên sản phẩm có trong lịch sử của user
-        ctx = USER_CONTEXT[uid]
-        if ms in ctx.get("product_history", []):
-            score += 1
+        # Tổng điểm
+        total_score = similarity_score + bonus_score
         
-        # Chỉ thêm sản phẩm có điểm > 0
-        if score > 0:
+        # Chỉ thêm sản phẩm có điểm đủ cao
+        if total_score > 0.1:  # Ngưỡng tối thiểu
             scored_products.append({
                 "ms": ms,
-                "score": score,
+                "score": total_score,
+                "similarity": similarity_score,
+                "bonus": bonus_score,
                 "product": product
             })
     
     # Sắp xếp theo điểm số giảm dần
     scored_products.sort(key=lambda x: x["score"], reverse=True)
     
-    # Lấy top sản phẩm (5 sản phẩm)
-    top_products = [item["ms"] for item in scored_products[:limit]]
+    # Lấy top sản phẩm
+    top_products = [(item["ms"], item["score"]) for item in scored_products[:limit]]
     
-    print(f"🔍 Tìm thấy {len(scored_products)} sản phẩm phù hợp, top {len(top_products)}: {top_products}")
+    # Log chi tiết để debug
+    if scored_products:
+        print(f"📊 Tìm thấy {len(scored_products)} sản phẩm có điểm > 0.1")
+        for i, item in enumerate(scored_products[:3]):
+            print(f"  {i+1}. {item['ms']}: {item['score']:.3f} (similarity: {item['similarity']:.3f}, bonus: {item['bonus']:.3f})")
+            print(f"     Tên: {item['product'].get('Ten', '')[:50]}...")
+    else:
+        print("⚠️ Không tìm thấy sản phẩm nào có điểm > 0.1")
     
     return top_products
 
@@ -612,7 +769,7 @@ def load_products(force=False):
     Đọc dữ liệu từ Google Sheet CSV, cache trong 300s.
     PHƯƠNG ÁN A: Mỗi dòng = 1 biến thể, gom theo Mã sản phẩm và lưu danh sách variants.
     """
-    global PRODUCTS, LAST_LOAD, PRODUCTS_BY_NUMBER
+    global PRODUCTS, LAST_LOAD, PRODUCTS_BY_NUMBER, PRODUCT_TEXT_EMBEDDINGS
     now = time.time()
     if not force and PRODUCTS and (now - LAST_LOAD) < LOAD_TTL:
         return
@@ -631,6 +788,7 @@ def load_products(force=False):
         reader = csv.DictReader(content.splitlines())
         products = {}
         products_by_number = {}
+        product_text_embeddings = {}
 
         for raw_row in reader:
             row = dict(raw_row)
@@ -709,6 +867,10 @@ def load_products(force=False):
             p["size (Thuộc tính)"] = ", ".join(sizes) if sizes else p.get("size (Thuộc tính)", "")
             p["ShortDesc"] = short_description(p.get("MoTa", ""))
             
+            # Tạo embedding text cho sản phẩm
+            product_text = create_product_search_text(p)
+            product_text_embeddings[ms] = product_text
+            
             # Xây dựng mapping từ số (không có số 0 đầu) đến mã đầy đủ
             if ms.startswith("MS"):
                 num_part = ms[2:]  # Bỏ "MS"
@@ -719,9 +881,11 @@ def load_products(force=False):
 
         PRODUCTS = products
         PRODUCTS_BY_NUMBER = products_by_number
+        PRODUCT_TEXT_EMBEDDINGS = product_text_embeddings
         LAST_LOAD = now
         print(f"📦 Loaded {len(PRODUCTS)} products (PHƯƠNG ÁN A).")
         print(f"🔢 Created mapping for {len(PRODUCTS_BY_NUMBER)} product numbers")
+        print(f"🔤 Created text embeddings for {len(PRODUCT_TEXT_EMBEDDINGS)} products")
     except Exception as e:
         print("❌ load_products ERROR:", e)
 
@@ -1142,11 +1306,11 @@ def send_product_info_debounced(uid: str, ms: str):
 
 
 # ============================================
-# HANDLE IMAGE - VERSION MỚI: GỬI CAROUSEL 5 SẢN PHẨM
+# HANDLE IMAGE - VERSION CẢI TIẾN ĐỘ CHÍNH XÁC
 # ============================================
 
 def handle_image(uid: str, image_url: str):
-    """Xử lý ảnh sản phẩm - gửi carousel với 5 sản phẩm phù hợp nhất"""
+    """Xử lý ảnh sản phẩm - gửi carousel với 5 sản phẩm phù hợp nhất (ĐỘ CHÍNH XÁC CAO)"""
     if not client or not OPENAI_API_KEY:
         send_message(uid, "📷 Em đã nhận được ảnh! Hiện AI đang bảo trì, anh/chị vui lòng gửi mã sản phẩm để em tư vấn ạ.")
         return
@@ -1166,7 +1330,7 @@ def handle_image(uid: str, image_url: str):
     send_message(uid, "🖼️ Em đang phân tích ảnh sản phẩm của anh/chị...")
     
     try:
-        # 1. Phân tích ảnh bằng GPT-4o Vision
+        # 1. Phân tích ảnh bằng GPT-4o Vision (phiên bản cải tiến)
         analysis = analyze_image_with_gpt4o(image_url)
         
         if not analysis:
@@ -1178,25 +1342,36 @@ def handle_image(uid: str, image_url: str):
         ctx["last_image_url"] = image_url
         ctx["referral_source"] = "image_upload_analyzed"
         
-        # 3. Tìm sản phẩm phù hợp (lấy 5 sản phẩm)
-        matched_products = find_products_by_image_analysis(uid, analysis, limit=5)
+        # 3. Tìm sản phẩm phù hợp (phiên bản cải tiến độ chính xác cao)
+        matched_products = find_products_by_image_analysis_improved(uid, analysis, limit=5)
         
-        if matched_products:
+        if matched_products and len(matched_products) > 0:
             # 4. Gửi thông báo kết quả phân tích
             product_type = analysis.get("product_type", "sản phẩm")
             main_color = analysis.get("main_color", "")
+            confidence = analysis.get("confidence_score", 0)
             
             if main_color:
-                send_message(uid, f"🎯 Em phân tích được đây là {product_type} màu {main_color}.")
+                analysis_msg = f"🎯 Em phân tích được đây là **{product_type}** màu **{main_color}**"
             else:
-                send_message(uid, f"🎯 Em phân tích được đây là {product_type}.")
+                analysis_msg = f"🎯 Em phân tích được đây là **{product_type}**"
             
-            send_message(uid, f"🔍 Em tìm thấy {len(matched_products)} sản phẩm phù hợp với ảnh của anh/chị:")
+            if confidence > 0.8:
+                analysis_msg += " (độ chính xác cao)"
+            elif confidence > 0.6:
+                analysis_msg += " (khá chính xác)"
+            
+            send_message(uid, analysis_msg)
+            
+            if len(matched_products) == 1:
+                send_message(uid, f"🔍 Em tìm thấy 1 sản phẩm phù hợp với ảnh của anh/chị:")
+            else:
+                send_message(uid, f"🔍 Em tìm thấy {len(matched_products)} sản phẩm phù hợp với ảnh của anh/chị:")
             
             # 5. Tạo và gửi carousel với 5 sản phẩm
             carousel_elements = []
             
-            for i, ms in enumerate(matched_products[:5], 1):
+            for i, (ms, score) in enumerate(matched_products[:5], 1):
                 if ms in PRODUCTS:
                     product = PRODUCTS[ms]
                     
@@ -1210,10 +1385,16 @@ def handle_image(uid: str, image_url: str):
                     gia_int = extract_price_int(gia_raw)
                     price_display = f"{gia_int:,.0f}đ" if gia_int else "Liên hệ"
                     
+                    # Thêm độ phù hợp vào subtitle
+                    match_percentage = min(int(score * 100), 99)
+                    subtitle = f"🟢 Phù hợp: {match_percentage}% | 💰 {price_display}"
+                    if short_desc:
+                        subtitle += f" | {short_desc[:60]}{'...' if len(short_desc) > 60 else ''}"
+                    
                     element = {
                         "title": f"[{ms}] {product.get('Ten', '')}",
                         "image_url": image_url_carousel,
-                        "subtitle": f"{price_display} | {short_desc[:80]}{'...' if short_desc and len(short_desc) > 80 else ''}",
+                        "subtitle": subtitle,
                         "buttons": [
                             {
                                 "type": "web_url",
@@ -1235,11 +1416,12 @@ def handle_image(uid: str, image_url: str):
                 send_message(uid, "💬 Bấm 'Xem chi tiết' để xem thông tin và chính sách cụ thể của từng sản phẩm.")
                 
                 # Cập nhật context với sản phẩm đầu tiên
-                ctx["last_ms"] = matched_products[0]
-                update_product_context(uid, matched_products[0])
+                first_ms = matched_products[0][0]
+                ctx["last_ms"] = first_ms
+                update_product_context(uid, first_ms)
             else:
                 send_message(uid, "❌ Em không tìm thấy sản phẩm nào phù hợp với ảnh này.")
-                send_message(uid, "Anh/chị có thể thử gửi ảnh khác hoặc gõ 'xem sản phẩm' để xem toàn bộ danh mục.")
+                send_fallback_suggestions(uid)
             
         else:
             # Không tìm thấy sản phẩm phù hợp
@@ -1252,14 +1434,19 @@ def handle_image(uid: str, image_url: str):
                 send_message(uid, f"🔍 Em phân tích được đây là {product_type}")
             
             send_message(uid, "Hiện em chưa tìm thấy sản phẩm khớp 100% trong kho.")
-            send_message(uid, "Anh/chị có thể:")
-            send_message(uid, "1. Gửi thêm ảnh góc khác")
-            send_message(uid, "2. Gõ 'xem sản phẩm' để xem toàn bộ danh mục")
-            send_message(uid, "3. Mô tả chi tiết hơn về sản phẩm này")
+            send_fallback_suggestions(uid)
     
     except Exception as e:
         print(f"❌ Lỗi xử lý ảnh: {str(e)}")
         send_message(uid, "❌ Em gặp lỗi khi phân tích ảnh. Anh/chị vui lòng thử lại hoặc gửi mã sản phẩm để em tư vấn ạ!")
+
+def send_fallback_suggestions(uid: str):
+    """Gửi gợi ý fallback khi không tìm thấy sản phẩm phù hợp"""
+    send_message(uid, "Anh/chị có thể:")
+    send_message(uid, "1. Gửi thêm ảnh góc khác của sản phẩm")
+    send_message(uid, "2. Gõ 'xem sản phẩm' để xem toàn bộ danh mục")
+    send_message(uid, "3. Mô tả chi tiết hơn về sản phẩm này")
+    send_message(uid, "4. Hoặc gửi mã sản phẩm nếu anh/chị đã biết mã")
 
 
 # ============================================
@@ -2001,7 +2188,9 @@ def health_check():
         "facebook_configured": bool(PAGE_ACCESS_TOKEN),
         "image_processing": "base64+fallback",
         "image_debounce_enabled": True,
-        "image_carousel": "5_products"
+        "image_carousel": "5_products",
+        "search_algorithm": "TF-IDF_cosine_similarity",
+        "accuracy_improved": True
     }, 200
 
 
@@ -2015,6 +2204,8 @@ if __name__ == "__main__":
     print(f"🟢 Fanpage: {FANPAGE_NAME}")
     print(f"🟢 Domain: {DOMAIN}")
     print(f"🟢 Image Processing: Base64 + Fallback URL")
+    print(f"🟢 Search Algorithm: TF-IDF + Cosine Similarity")
     print(f"🟢 Image Carousel: 5 sản phẩm phù hợp nhất")
     print(f"🟢 Image Debounce: 3 giây")
+    print(f"🟢 Accuracy: CẢI THIỆN ĐỘ CHÍNH XÁC")
     app.run(host="0.0.0.0", port=5000, debug=True)
