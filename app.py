@@ -4,9 +4,12 @@ import re
 import time
 import csv
 import hashlib
+import base64
 from collections import defaultdict
 from urllib.parse import quote
 from datetime import datetime
+from typing import Optional, Dict, Any
+from io import BytesIO
 
 import requests
 from flask import Flask, request, send_from_directory
@@ -98,6 +101,9 @@ USER_CONTEXT = defaultdict(lambda: {
     # Thêm trường cho nhận diện ảnh
     "last_image_analysis": None,
     "last_image_url": None,
+    "last_image_base64": None,
+    "last_image_time": 0,  # Thêm: thời gian xử lý ảnh gần nhất
+    "processed_image_mids": set(),  # Thêm: set các image mid đã xử lý
 })
 PRODUCTS = {}
 PRODUCTS_BY_NUMBER = {}  # Mapping từ số (không có số 0 đầu) đến mã đầy đủ
@@ -183,13 +189,120 @@ CAROUSEL_KEYWORDS = [
 ]
 
 # ============================================
+# HELPER: TẢI VÀ XỬ LÝ ẢNH
+# ============================================
+
+def download_image_from_facebook(image_url: str, timeout: int = 10) -> Optional[bytes]:
+    """
+    Tải ảnh từ Facebook URL với headers phù hợp
+    Trả về bytes của ảnh hoặc None nếu thất bại
+    """
+    try:
+        # Facebook cần user-agent để tránh bị chặn
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
+            'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Referer': 'https://www.facebook.com/',
+        }
+        
+        print(f"📥 Đang tải ảnh từ Facebook: {image_url[:100]}...")
+        
+        response = requests.get(
+            image_url, 
+            headers=headers, 
+            timeout=timeout,
+            stream=True
+        )
+        
+        if response.status_code == 200:
+            # Kiểm tra content-type
+            content_type = response.headers.get('content-type', '')
+            if not content_type.startswith('image/'):
+                print(f"⚠️ URL không phải ảnh: {content_type}")
+                return None
+            
+            # Đọc ảnh với giới hạn kích thước (max 10MB)
+            max_size = 10 * 1024 * 1024  # 10MB
+            content = b""
+            for chunk in response.iter_content(chunk_size=8192):
+                content += chunk
+                if len(content) > max_size:
+                    print("⚠️ Ảnh quá lớn (>10MB), bỏ qua")
+                    return None
+            
+            print(f"✅ Đã tải ảnh thành công: {len(content)} bytes")
+            return content
+            
+        else:
+            print(f"❌ Lỗi tải ảnh: HTTP {response.status_code}")
+            return None
+            
+    except requests.exceptions.Timeout:
+        print(f"⏰ Timeout khi tải ảnh")
+        return None
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Lỗi kết nối khi tải ảnh: {str(e)}")
+        return None
+    except Exception as e:
+        print(f"❌ Lỗi không xác định khi tải ảnh: {str(e)}")
+        return None
+
+def convert_image_to_base64(image_bytes: bytes) -> Optional[str]:
+    """
+    Chuyển đổi ảnh bytes sang base64 string
+    """
+    try:
+        # Mã hóa base64
+        base64_str = base64.b64encode(image_bytes).decode('utf-8')
+        
+        # Xác định MIME type từ bytes (đơn giản)
+        # Thực tế nên dùng thư viện như python-magic, nhưng tạm thời dùng cách đơn giản
+        if image_bytes[:4] == b'\x89PNG':
+            mime_type = 'image/png'
+        elif image_bytes[:3] == b'\xff\xd8\xff':
+            mime_type = 'image/jpeg'
+        elif image_bytes[:6] in (b'GIF87a', b'GIF89a'):
+            mime_type = 'image/gif'
+        elif image_bytes[:4] == b'RIFF' and image_bytes[8:12] == b'WEBP':
+            mime_type = 'image/webp'
+        else:
+            mime_type = 'image/jpeg'  # Mặc định
+        
+        # Tạo data URL
+        data_url = f"data:{mime_type};base64,{base64_str}"
+        return data_url
+        
+    except Exception as e:
+        print(f"❌ Lỗi chuyển đổi base64: {str(e)}")
+        return None
+
+def get_image_for_analysis(image_url: str) -> Optional[str]:
+    """
+    Lấy ảnh dưới dạng base64 data URL cho OpenAI
+    Thử cả 2 cách: tải về và dùng trực tiếp URL
+    """
+    # Ưu tiên: Tải ảnh về và chuyển base64
+    image_bytes = download_image_from_facebook(image_url)
+    
+    if image_bytes:
+        base64_data = convert_image_to_base64(image_bytes)
+        if base64_data:
+            print("✅ Sử dụng ảnh base64")
+            return base64_data
+    
+    # Fallback: Dùng URL trực tiếp (nếu OpenAI có thể truy cập)
+    print("⚠️ Fallback: Sử dụng URL trực tiếp")
+    return image_url
+
+# ============================================
 # GPT-4o VISION: PHÂN TÍCH ẢNH SẢN PHẨM
 # ============================================
 
 def analyze_image_with_gpt4o(image_url: str):
     """
     Phân tích ảnh sản phẩm thời trang/gia dụng bằng GPT-4o Vision API
-    Trả về dictionary chứa thông tin phân tích
+    Sử dụng base64 để tránh lỗi tải ảnh từ Facebook
     """
     if not client or not OPENAI_API_KEY:
         print("⚠️ OpenAI client chưa được cấu hình, bỏ qua phân tích ảnh")
@@ -198,6 +311,32 @@ def analyze_image_with_gpt4o(image_url: str):
     try:
         print(f"🖼️ Đang phân tích ảnh: {image_url[:100]}...")
         
+        # Lấy ảnh dưới dạng base64 hoặc URL
+        image_content = get_image_for_analysis(image_url)
+        
+        if not image_content:
+            print("❌ Không thể lấy được ảnh để phân tích")
+            return None
+        
+        # Chuẩn bị content cho OpenAI
+        if image_content.startswith('data:'):
+            # Base64 data URL
+            image_message = {
+                "type": "image_url",
+                "image_url": {
+                    "url": image_content
+                }
+            }
+        else:
+            # Regular URL (fallback)
+            image_message = {
+                "type": "image_url",
+                "image_url": {
+                    "url": image_content
+                }
+            }
+        
+        # Gọi OpenAI API với ảnh
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[
@@ -217,17 +356,18 @@ Hãy phân tích ảnh sản phẩm và trả về JSON với cấu trúc:
     "confidence_score": 0.95
 }}
 
-LƯU Ý QUAN TRỌNG:
+QUY TẮC QUAN TRỌNG:
 1. CHỈ phân tích những gì thấy trong ảnh, không suy đoán thêm
 2. product_type phải cụ thể (ví dụ: "áo sơ mi tay ngắn" thay vì chỉ "áo")
 3. keywords phải là từ thông dụng để tìm kiếm sản phẩm
-4. Trả về CHỈ JSON, không có text nào khác"""
+4. Trả về CHỈ JSON, không có text nào khác
+5. Dùng tiếng Việt cho tất cả các trường"""
                 },
                 {
                     "role": "user",
                     "content": [
                         {"type": "text", "text": "Phân tích sản phẩm trong ảnh này:"},
-                        {"type": "image_url", "image_url": {"url": image_url}}
+                        image_message
                     ]
                 }
             ],
@@ -252,7 +392,7 @@ LƯU Ý QUAN TRỌNG:
         print(f"❌ Lỗi phân tích ảnh với GPT-4o: {str(e)}")
         return None
 
-def find_products_by_image_analysis(uid: str, analysis: dict, limit: int = 3):
+def find_products_by_image_analysis(uid: str, analysis: dict, limit: int = 1):
     """
     Tìm sản phẩm phù hợp dựa trên phân tích ảnh
     Trả về danh sách mã sản phẩm (MS) phù hợp nhất
@@ -308,17 +448,19 @@ def find_products_by_image_analysis(uid: str, analysis: dict, limit: int = 3):
     # Sắp xếp theo điểm số giảm dần
     scored_products.sort(key=lambda x: x["score"], reverse=True)
     
-    # Lấy top sản phẩm
+    # Lấy top sản phẩm (CHỈ 1 sản phẩm)
     top_products = [item["ms"] for item in scored_products[:limit]]
     
     print(f"🔍 Tìm thấy {len(scored_products)} sản phẩm phù hợp, top {len(top_products)}: {top_products}")
     
     return top_products
 
-def send_product_suggestions(uid: str, product_ms_list: list, analysis: dict = None):
-    """Gửi đề xuất sản phẩm dựa trên phân tích ảnh"""
-    if not product_ms_list:
+def send_single_product_suggestion(uid: str, ms: str, analysis: dict = None):
+    """Gửi đề xuất CHỈ 1 sản phẩm duy nhất sau khi phân tích ảnh"""
+    if not ms or ms not in PRODUCTS:
         return
+    
+    product = PRODUCTS[ms]
     
     # Gửi thông báo tìm thấy sản phẩm
     if analysis:
@@ -326,42 +468,38 @@ def send_product_suggestions(uid: str, product_ms_list: list, analysis: dict = N
         main_color = analysis.get("main_color", "")
         
         if main_color:
-            send_message(uid, f"🎯 Em phân tích được đây là {product_type} màu {main_color}")
+            send_message(uid, f"🎯 Em phân tích được đây là {product_type} màu {main_color}. Em tìm thấy sản phẩm phù hợp nhất:")
         else:
-            send_message(uid, f"🎯 Em phân tích được đây là {product_type}")
+            send_message(uid, f"🎯 Em phân tích được đây là {product_type}. Em tìm thấy sản phẩm phù hợp nhất:")
+    else:
+        send_message(uid, "🎯 Em tìm thấy sản phẩm phù hợp nhất:")
     
-    send_message(uid, "🔍 Em tìm thấy một số sản phẩm phù hợp:")
+    # Gửi tên sản phẩm
+    product_name = product.get('Ten', 'Sản phẩm')
+    send_message(uid, f"📌 {product_name}")
     
-    # Gửi thông tin từng sản phẩm
-    for i, ms in enumerate(product_ms_list[:3], 1):
-        if ms in PRODUCTS:
-            product = PRODUCTS[ms]
-            product_name = product.get('Ten', 'Sản phẩm')
-            send_message(uid, f"{i}. 📌 {product_name}")
-            
-            # Gửi ảnh đầu tiên nếu có
-            images_field = product.get("Images", "")
-            urls = parse_image_urls(images_field)
-            if urls:
-                send_image(uid, urls[0])
-                time.sleep(0.5)
-            
-            # Gửi giá
-            gia_raw = product.get("Gia", "")
-            gia_int = extract_price_int(gia_raw)
-            if gia_int:
-                send_message(uid, f"💰 Giá: {gia_int:,.0f}đ")
-            
-            # Gửi nút hành động
-            domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
-            order_link = f"{domain}/order-form?ms={ms}&uid={uid}"
-            send_message(uid, f"🛒 Xem chi tiết & đặt hàng: {order_link}")
-            
-            time.sleep(0.5)
+    # Gửi ảnh đầu tiên nếu có
+    images_field = product.get("Images", "")
+    urls = parse_image_urls(images_field)
+    if urls:
+        send_image(uid, urls[0])
+        time.sleep(0.5)
     
-    # Gửi thêm hướng dẫn
-    if len(product_ms_list) > 3:
-        send_message(uid, f"📱 Còn {len(product_ms_list)-3} sản phẩm phù hợp khác. Anh/chị muốn xem tiếp không ạ?")
+    # Gửi giá
+    gia_raw = product.get("Gia", "")
+    gia_int = extract_price_int(gia_raw)
+    if gia_int:
+        send_message(uid, f"💰 Giá: {gia_int:,.0f}đ")
+    
+    # Gửi link đặt hàng
+    domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
+    order_link = f"{domain}/order-form?ms={ms}&uid={uid}"
+    send_message(uid, f"🛒 Xem chi tiết & đặt hàng: {order_link}")
+    
+    # Gợi ý thêm
+    send_message(uid, "💡 Anh/chị muốn:")
+    send_message(uid, "1. Xem thêm sản phẩm tương tự (gõ 'xem thêm')")
+    send_message(uid, "2. Được tư vấn chi tiết về sản phẩm này")
 
 # ============================================
 # HELPER: SEND MESSAGE
@@ -1050,31 +1188,25 @@ def send_product_info_debounced(uid: str, ms: str):
 
 
 # ============================================
-# HANDLE IMAGE - VERSION MỚI VỚI GPT-4o VISION
+# HANDLE IMAGE - VERSION ĐÃ SỬA (CHỈ GỬI 1 SẢN PHẨM)
 # ============================================
 
 def handle_image(uid: str, image_url: str):
-    """Xử lý ảnh sản phẩm thông minh với GPT-4o Vision"""
+    """Xử lý ảnh sản phẩm - CHỈ gửi 1 sản phẩm phù hợp nhất"""
     if not client or not OPENAI_API_KEY:
-        # Fallback về xử lý cũ nếu không có API key
-        ctx = USER_CONTEXT[uid]
-        ctx["referral_source"] = "image_upload"
-        
-        response = """📷 Em đã nhận được ảnh từ anh/chị!
-
-Hiện tại hệ thống trợ lý AI đang bảo trì.
-
-Để em tư vấn chính xác, anh/chị vui lòng:
-1. Gửi mã sản phẩm (ví dụ: [MS123456])
-2. Hoặc gõ số sản phẩm (ví dụ: 123456)
-3. Hoặc mô tả sản phẩm trong ảnh
-
-Anh/chị có mã sản phẩm không ạ?"""
-        
-        send_message(uid, response)
+        send_message(uid, "📷 Em đã nhận được ảnh! Hiện AI đang bảo trì, anh/chị vui lòng gửi mã sản phẩm để em tư vấn ạ.")
         return
     
     ctx = USER_CONTEXT[uid]
+    
+    # Kiểm tra debounce: tránh xử lý ảnh quá nhanh
+    now = time.time()
+    last_image_time = ctx.get("last_image_time", 0)
+    if now - last_image_time < 3:  # 3 giây debounce
+        print(f"[IMAGE DEBOUNCE] Bỏ qua ảnh mới, chưa đủ thời gian")
+        return
+    
+    ctx["last_image_time"] = now
     
     # Gửi thông báo đang xử lý
     send_message(uid, "🖼️ Em đang phân tích ảnh sản phẩm của anh/chị...")
@@ -1087,26 +1219,25 @@ Anh/chị có mã sản phẩm không ạ?"""
             send_message(uid, "❌ Em chưa phân tích được ảnh này. Anh/chị có thể mô tả sản phẩm hoặc gửi mã sản phẩm được không ạ?")
             return
         
-        # 2. Lưu kết quả phân tích vào context
+        # 2. Lưu kết quả phân tích
         ctx["last_image_analysis"] = analysis
         ctx["last_image_url"] = image_url
         ctx["referral_source"] = "image_upload_analyzed"
         
-        # 3. Tìm sản phẩm phù hợp
-        matched_products = find_products_by_image_analysis(uid, analysis, limit=5)
+        # 3. Tìm sản phẩm phù hợp (CHỈ lấy 1 sản phẩm đầu tiên)
+        matched_products = find_products_by_image_analysis(uid, analysis, limit=1)
         
         if matched_products:
-            # 4. Gửi đề xuất sản phẩm
-            send_product_suggestions(uid, matched_products, analysis)
+            # 4. CHỈ gửi 1 sản phẩm duy nhất
+            best_ms = matched_products[0]
+            send_single_product_suggestion(uid, best_ms, analysis)
             
-            # 5. Gợi ý thêm
-            send_message(uid, "💡 Anh/chị muốn:")
-            send_message(uid, "1. Xem thêm sản phẩm tương tự")
-            send_message(uid, "2. Được tư vấn chi tiết về sản phẩm nào đó")
-            send_message(uid, "3. Hoặc gửi ảnh khác để em phân tích")
+            # 5. Cập nhật context
+            ctx["last_ms"] = best_ms
+            update_product_context(uid, best_ms)
             
         else:
-            # 6. Không tìm thấy sản phẩm phù hợp
+            # Không tìm thấy sản phẩm phù hợp
             product_type = analysis.get("product_type", "sản phẩm")
             main_color = analysis.get("main_color", "")
             
@@ -1464,6 +1595,23 @@ Anh/chị quan tâm sản phẩm nào ạ?"""
                 msg = m["message"]
                 text = msg.get("text")
                 attachments = msg.get("attachments") or []
+                
+                # Kiểm tra duplicate image bằng message id
+                msg_mid = msg.get("mid")
+                if attachments and msg_mid:
+                    ctx = USER_CONTEXT[sender_id]
+                    if "processed_image_mids" not in ctx:
+                        ctx["processed_image_mids"] = set()
+                    
+                    if msg_mid in ctx["processed_image_mids"]:
+                        print(f"[DUPLICATE IMAGE] Bỏ qua ảnh đã xử lý: {msg_mid}")
+                        continue
+                    
+                    ctx["processed_image_mids"].add(msg_mid)
+                    # Giới hạn bộ nhớ
+                    if len(ctx["processed_image_mids"]) > 20:
+                        ctx["processed_image_mids"] = set(list(ctx["processed_image_mids"])[-20:])
+                
                 if text:
                     handle_text(sender_id, text)
                 elif attachments:
@@ -1845,7 +1993,10 @@ def health_check():
         "last_load_time": LAST_LOAD,
         "openai_configured": bool(client),
         "openai_vision_available": bool(client and OPENAI_API_KEY),
-        "facebook_configured": bool(PAGE_ACCESS_TOKEN)
+        "facebook_configured": bool(PAGE_ACCESS_TOKEN),
+        "image_processing": "base64+fallback",
+        "image_debounce_enabled": True,
+        "single_product_suggestion": True
     }, 200
 
 
@@ -1858,4 +2009,7 @@ if __name__ == "__main__":
     print(f"🟢 GPT-4o Vision API: {'SẴN SÀNG' if client and OPENAI_API_KEY else 'CHƯA CẤU HÌNH'}")
     print(f"🟢 Fanpage: {FANPAGE_NAME}")
     print(f"🟢 Domain: {DOMAIN}")
+    print(f"🟢 Image Processing: Base64 + Fallback URL")
+    print(f"🟢 Single Product Suggestion: ĐÃ BẬT (chỉ gửi 1 sản phẩm)")
+    print(f"🟢 Image Debounce: 3 giây")
     app.run(host="0.0.0.0", port=5000, debug=True)
