@@ -969,28 +969,35 @@ def build_comprehensive_product_context(ms: str) -> str:
 
 def detect_ms_from_text(text: str):
     """Tìm mã sản phẩm trong tin nhắn, hỗ trợ nhiều định dạng"""
-    # Ưu tiên tìm theo pattern cũ: [MS\d{6}] hoặc MS\d{6} hoặc #MS\d{6}
+    # **QUAN TRỌNG**: Bỏ qua mã sản phẩm có dấu # (#MS123456) vì đó là tin nhắn từ Fchat
+    # Chỉ tìm mã sản phẩm KHÔNG có dấu #
+    
+    # Ưu tiên tìm theo pattern cũ: [MS\d{6}] hoặc MS\d{6}
     ms_list = re.findall(r"\[MS(\d{6})\]", text.upper())
     if ms_list:
         ms = "MS" + ms_list[0]
         if ms in PRODUCTS:
             return ms
     
-    ms_list = re.findall(r"MS(\d{6})", text.upper())
+    # Tìm pattern: MS\d{6} nhưng KHÔNG có # trước đó
+    # Sử dụng negative lookbehind để đảm bảo không có # trước MS
+    ms_list = re.findall(r"(?<!#)MS(\d{6})", text.upper())
     if ms_list:
         ms = "MS" + ms_list[0]
         if ms in PRODUCTS:
             return ms
     
-    # THÊM: Tìm pattern với dấu #MS\d{6}
-    ms_list = re.findall(r"#MS(\d{6})", text.upper())
-    if ms_list:
-        ms = "MS" + ms_list[0]
-        if ms in PRODUCTS:
-            return ms
+    # THÊM: Tìm pattern với dấu #MS\d{6} nhưng sẽ BỎ QUA ở trên rồi
+    # ms_list = re.findall(r"#MS(\d{6})", text.upper())
+    # if ms_list:
+    #     ms = "MS" + ms_list[0]
+    #     if ms in PRODUCTS:
+    #         return ms
     
     # Chuẩn hóa text: chuyển về chữ thường, bỏ dấu tiếng Việt
+    # Loại bỏ ký tự # để tránh nhầm lẫn
     text_normalized = normalize_vietnamese(text.lower())
+    text_normalized = text_normalized.replace('#', ' ')  # Thay # bằng khoảng trắng
     
     # Tìm số trong chuỗi (hỗ trợ nhiều định dạng số)
     numbers = re.findall(r'\d{1,6}', text_normalized)
@@ -1549,6 +1556,7 @@ def handle_text(uid: str, text: str):
             last_text = ctx.get("last_processed_text", "")
             if text.strip().lower() == last_text.lower():
                 print(f"[TEXT DEBOUNCE] Bỏ qua tin nhắn trùng lặp: {text[:50]}...")
+                ctx["processing_lock"] = False
                 return
         
         ctx["last_msg_time"] = now
@@ -1690,6 +1698,18 @@ def handle_text(uid: str, text: str):
 
 
 # ============================================
+# HELPER: KIỂM TRA MÃ SẢN PHẨM CÓ DẤU #
+# ============================================
+
+def contains_hashtag_ms(text: str) -> bool:
+    """Kiểm tra xem text có chứa mã sản phẩm dạng #MS123456 không"""
+    if not text:
+        return False
+    # Tìm pattern #MS + 6 số
+    return bool(re.search(r'#MS\d{6}', text.upper()))
+
+
+# ============================================
 # WEBHOOK HANDLER - ĐÃ SỬA LỖI GỬI TIN NHẮN LẶP
 # ============================================
 
@@ -1734,14 +1754,38 @@ def webhook():
                 if not recipient_id:
                     continue
                 
-                # Kiểm tra duplicate echo message
-                msg_mid = m["message"].get("mid")
+                # Lấy thông tin chi tiết về echo message
+                msg = m["message"]
+                msg_mid = msg.get("mid")
+                echo_text = msg.get("text", "")
+                attachments = msg.get("attachments", [])
+                
+                # **QUY TẮC QUAN TRỌNG**: 
+                # 1. Nếu echo message CÓ chứa mã sản phẩm dạng #MS123456 → BỎ QUA (là tin nhắn từ Fchat)
+                # 2. Nếu echo message KHÔNG có #MS123456 → XỬ LÝ (là bình luận người dùng)
+                
+                # KIỂM TRA 1: Echo message có mã sản phẩm dạng #MS123456 không?
+                if contains_hashtag_ms(echo_text):
+                    print(f"[ECHO FCHAT MS] Bỏ qua echo message chứa mã sản phẩm #MS: {echo_text[:100]}...")
+                    continue
+                
+                # KIỂM TRA 2: Echo message có attachment không? (hình ảnh bot đã gửi)
+                if attachments:
+                    print(f"[ECHO ATTACHMENT] Bỏ qua echo message có attachment")
+                    continue
+                
+                # KIỂM TRA 3: Echo message quá ngắn?
+                if not echo_text or len(echo_text.strip()) < 5:
+                    print(f"[ECHO EMPTY] Bỏ qua echo message trống hoặc quá ngắn")
+                    continue
+                
+                # KIỂM TRA 4: Debounce và duplicate
                 if msg_mid:
                     ctx = USER_CONTEXT[recipient_id]
                     if "processed_echo_mids" not in ctx:
                         ctx["processed_echo_mids"] = set()
                     
-                    # KIỂM TRA DEBOUNCE: Chỉ xử lý mỗi message ID một lần
+                    # DEBOUNCE: Chỉ xử lý mỗi message ID một lần
                     if msg_mid in ctx["processed_echo_mids"]:
                         print(f"[ECHO DUPLICATE] Bỏ qua echo message đã xử lý: {msg_mid}")
                         continue
@@ -1750,9 +1794,9 @@ def webhook():
                     now = time.time()
                     last_echo_time = ctx.get("last_echo_processed_time", 0)
                     
-                    # DEBOUNCE: Chỉ xử lý mỗi 2 giây một lần
-                    if now - last_echo_time < 2:
-                        print(f"[ECHO DEBOUNCE] Bỏ qua echo message, chưa đủ 2s: {msg_mid}")
+                    # DEBOUNCE: Chỉ xử lý mỗi 3 giây một lần
+                    if now - last_echo_time < 3:
+                        print(f"[ECHO DEBOUNCE] Bỏ qua echo message, chưa đủ 3s: {msg_mid}")
                         continue
                     
                     ctx["last_echo_processed_time"] = now
@@ -1762,65 +1806,42 @@ def webhook():
                     if len(ctx["processed_echo_mids"]) > 20:
                         ctx["processed_echo_mids"] = set(list(ctx["processed_echo_mids"])[-20:])
                 
-                # Lấy nội dung tin nhắn echo
-                echo_text = m["message"].get("text", "")
-                if not echo_text:
-                    continue
+                # **ĐÂY LÀ ECHO TỪ BÌNH LUẬN NGƯỜI DÙNG THẬT SỰ**
+                print(f"[ECHO USER COMMENT] Xử lý echo từ bình luận người dùng: {echo_text[:100]}...")
                 
-                print(f"[ECHO FCHAT] Tin nhắn echo từ Fchat cho user {recipient_id}: {echo_text[:100]}...")
-                
-                # PHÂN TÍCH QUAN TRỌNG: 
-                # Echo message đầu tiên từ Fchat là nội dung bình luận của KHÁCH (chứa mã sản phẩm)
-                # Echo message thứ 2, 3... là tin nhắn BOT đã gửi (cần bỏ qua để tránh loop)
-                
-                # Kiểm tra xem echo text có phải là tin nhắn chào mừng của bot không
-                # (để tránh bot xử lý tin nhắn của chính nó)
-                bot_welcome_indicators = [
-                    "Chào anh/chị! 👋",
-                    "Em là trợ lý AI",
-                    "Để em tư vấn chính xác",
-                    "Gửi mã sản phẩm",
-                    "xem sản phẩm",
-                    "Dạ, em đang lấy danh sách",
-                    "Anh/chị vuốt sang trái/phải",
-                    "Gõ mã sản phẩm",
-                    "📱 Anh/chị vuốt",
-                    "💬 Gõ mã sản phẩm"
-                ]
-                
-                is_bot_message = any(indicator in echo_text for indicator in bot_welcome_indicators)
-                
-                if is_bot_message:
-                    print(f"[ECHO BOT] Bỏ qua echo message là tin nhắn của bot: {echo_text[:50]}...")
-                    continue
-                
-                # Chỉ xử lý echo message không phải của bot
-                print(f"[ECHO USER] Đang xử lý echo từ bình luận người dùng")
-                
-                # QUAN TRỌNG: Load sản phẩm trước khi tìm mã
+                # QUAN TRỌNG: Load sản phẩm
                 load_products()
                 
-                # Tìm mã sản phẩm trong tin nhắn echo
+                # Tìm mã sản phẩm trong tin nhắn echo (KHÔNG có dấu #)
                 detected_ms = detect_ms_from_text(echo_text)
                 
                 if detected_ms and detected_ms in PRODUCTS:
                     print(f"[ECHO FCHAT] Phát hiện mã sản phẩm: {detected_ms} cho user: {recipient_id}")
                     
-                    # KIỂM TRA LOCK để tránh xử lý song song
+                    # KIỂM TRA LOCK
                     ctx = USER_CONTEXT[recipient_id]
                     if ctx.get("processing_lock"):
-                        print(f"[ECHO LOCKED] User {recipient_id} đang được xử lý, bỏ qua echo")
+                        print(f"[ECHO LOCKED] User {recipient_id} đang được xử lý, bỏ qua")
                         continue
                     
                     ctx["processing_lock"] = True
                     
                     try:
-                        # Cập nhật context cho người dùng
+                        # Kiểm tra xem vừa gửi sản phẩm này chưa
+                        last_ms_sent = ctx.get("product_info_sent_ms")
+                        last_sent_time = ctx.get("last_product_info_time", 0)
+                        now = time.time()
+                        
+                        if last_ms_sent == detected_ms and (now - last_sent_time) < 10:
+                            print(f"[ECHO RECENT] Vừa gửi sản phẩm {detected_ms} cách đây {int(now - last_sent_time)}s, bỏ qua")
+                            continue
+                        
+                        # Cập nhật context
                         ctx["last_ms"] = detected_ms
                         ctx["referral_source"] = "fchat_echo"
                         update_product_context(recipient_id, detected_ms)
                         
-                        # Gửi thông báo chào mừng và thông tin sản phẩm
+                        # Gửi thông báo và sản phẩm
                         welcome_msg = f"""Chào anh/chị! 👋 
 Em là trợ lý AI của {FANPAGE_NAME}.
 
@@ -1828,7 +1849,7 @@ Em thấy anh/chị quan tâm đến sản phẩm mã [{detected_ms}] từ bình
 Em sẽ gửi thông tin chi tiết sản phẩm ngay ạ!"""
                         send_message(recipient_id, welcome_msg)
                         
-                        # Gửi thông tin sản phẩm (có debounce)
+                        # Gửi thông tin sản phẩm
                         send_product_info_debounced(recipient_id, detected_ms)
                     finally:
                         ctx["processing_lock"] = False
@@ -2421,7 +2442,8 @@ def health_check():
         "fchat_echo_processing": True,
         "referral_auto_processing": True,
         "message_debounce_enabled": True,
-        "duplicate_protection": True
+        "duplicate_protection": True,
+        "hashtag_ms_filter": True  # Thêm thông tin về filter #MS
     }, 200
 
 
@@ -2439,9 +2461,10 @@ if __name__ == "__main__":
     print(f"🟢 Image Carousel: 5 sản phẩm phù hợp nhất")
     print(f"🟢 Image Debounce: 3 giây")
     print(f"🟢 Text Message Debounce: 1 giây")
-    print(f"🟢 Echo Message Debounce: 2 giây")
+    print(f"🟢 Echo Message Debounce: 3 giây")
     print(f"🟢 Accuracy: CẢI THIỆN ĐỘ CHÍNH XÁC")
     print(f"🟢 Fchat Echo Processing: BẬT (tự động nhận diện sản phẩm từ bình luận)")
+    print(f"🟢 Hashtag MS Filter: BẬT (bỏ qua echo có #MS123456)")
     print(f"🟢 Referral Auto Processing: BẬT (tự động nhận diện từ quảng cáo/Facebook Shop)")
     print(f"🟢 Bot Message Filter: BẬT (tránh lặp tin nhắn)")
     print(f"🟢 Duplicate Message Protection: BẬT (tránh xử lý cùng message nhiều lần)")
