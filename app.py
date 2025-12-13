@@ -1797,6 +1797,9 @@ def webhook():
                 # Chỉ xử lý echo message không phải của bot
                 print(f"[ECHO USER] Đang xử lý echo từ bình luận người dùng")
                 
+                # QUAN TRỌNG: Load sản phẩm trước khi tìm mã
+                load_products()
+                
                 # Tìm mã sản phẩm trong tin nhắn echo
                 detected_ms = detect_ms_from_text(echo_text)
                 
