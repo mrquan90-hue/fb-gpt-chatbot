@@ -969,7 +969,7 @@ def build_comprehensive_product_context(ms: str) -> str:
 
 def detect_ms_from_text(text: str):
     """Tìm mã sản phẩm trong tin nhắn, hỗ trợ nhiều định dạng"""
-    # Ưu tiên tìm theo pattern cũ: [MS\d{6}] hoặc MS\d{6}
+    # Ưu tiên tìm theo pattern cũ: [MS\d{6}] hoặc MS\d{6} hoặc #MS\d{6}
     ms_list = re.findall(r"\[MS(\d{6})\]", text.upper())
     if ms_list:
         ms = "MS" + ms_list[0]
@@ -977,6 +977,13 @@ def detect_ms_from_text(text: str):
             return ms
     
     ms_list = re.findall(r"MS(\d{6})", text.upper())
+    if ms_list:
+        ms = "MS" + ms_list[0]
+        if ms in PRODUCTS:
+            return ms
+    
+    # THÊM: Tìm pattern với dấu #MS\d{6}
+    ms_list = re.findall(r"#MS(\d{6})", text.upper())
     if ms_list:
         ms = "MS" + ms_list[0]
         if ms in PRODUCTS:
