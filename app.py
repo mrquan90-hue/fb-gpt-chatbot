@@ -866,7 +866,7 @@ def calculate_text_similarity(text1: str, text2: str) -> float:
 def find_products_by_image_analysis_improved(uid: str, analysis: dict, limit: int = 5) -> List[Tuple[str, float]]:
     """
     Tìm sản phẩm phù hợp dựa trên phân tích ảnh
-    Trả về danh sách (mã sản phẩm, điểm số) sắp xếp theo điểm giảm dần
+    Trả về dan sách (mã sản phẩm, điểm số) sắp xếp theo điểm giảm dần
     """
     if not analysis or not PRODUCTS:
         return []
@@ -2543,6 +2543,16 @@ def order_form():
                 text-align: center;
                 padding: 10px;
             }}
+            .product-code {{
+                font-size: 12px;
+                color: #666;
+                background: #f5f5f5;
+                padding: 4px 8px;
+                border-radius: 4px;
+                display: inline-block;
+                margin-bottom: 8px;
+                font-family: monospace;
+            }}
         </style>
     </head>
     <body style="font-family: Arial, sans-serif; margin: 0; padding: 0; background: #f5f5f5;">
@@ -2556,7 +2566,9 @@ def order_form():
                         {"<img id='product-image' src='" + default_image + "' style='width: 100%; height: 100%; object-fit: cover;' onerror=\"this.onerror=null; this.src='https://via.placeholder.com/120x120?text=No+Image'\" />" if default_image else "<div class='placeholder-image'>Chưa có ảnh sản phẩm</div>"}
                     </div>
                     <div style="flex: 1;">
-                        <h3 style="margin-top: 0; font-size: 16px;">[{ms}] {row.get('Ten','')}</h3>
+                        <!-- THAY ĐỔI: Bỏ mã sản phẩm khỏi tiêu đề, hiển thị riêng với kích thước nhỏ -->
+                        <div class="product-code">Mã: {ms}</div>
+                        <h3 style="margin-top: 0; font-size: 16px; margin-bottom: 4px;">{row.get('Ten','')}</h3>
                         <div style="color: #FF3B30; font-weight: bold; font-size: 16px;" id="price-display">
                             {price_int:,.0f} đ
                         </div>
