@@ -15,7 +15,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
 import requests
-from flask import Flask, request, send_from_directory
+from flask import Flask, request, send_from_directory, jsonify
 from openai import OpenAI
 
 # ============================================
@@ -1042,20 +1042,34 @@ def send_quick_replies(recipient_id: str, text: str, quick_replies: list):
 def parse_image_urls(raw: str):
     if not raw:
         return []
+    
+    # Xử lý nhiều định dạng phân cách
     parts = re.split(r'[,\n;|]+', raw)
     urls = []
+    
     for p in parts:
         p = p.strip()
         if not p:
             continue
-        if "alicdn.com" in p or "taobao" in p or "1688.com" in p or p.startswith("http"):
+        
+        # Loại bỏ các ký tự thừa
+        p = re.sub(r'^[\'"\s]+|[\'"\s]+$', '', p)
+        
+        # Chấp nhận URL bắt đầu bằng http/https hoặc có chứa domain ảnh
+        if re.match(r'^https?://', p) or any(domain in p.lower() for domain in [
+            'alicdn.com', 'taobao', '1688.com', '.jpg', '.jpeg', 
+            '.png', '.webp', '.gif', 'image', 'img', 'photo'
+        ]):
             urls.append(p)
+    
+    # Loại bỏ trùng lặp nhưng giữ thứ tự
     seen = set()
     result = []
     for u in urls:
         if u not in seen:
             seen.add(u)
             result.append(u)
+    
     return result
 
 def should_use_as_first_image(url: str):
@@ -1088,7 +1102,7 @@ def extract_price_int(price_str: str):
 def load_products(force=False):
     """
     Đọc dữ liệu từ Google Sheet CSV, cache trong 300s.
-    PHƯƠNG ÁN A: Mỗi dòng = 1 biến thể, gom theo Mã sản phẩm và lưu danh sách variants.
+    Mỗi dòng = 1 biến thể, lưu ảnh tương ứng cho từng variant.
     """
     global PRODUCTS, LAST_LOAD, PRODUCTS_BY_NUMBER, PRODUCT_TEXT_EMBEDDINGS
     now = time.time()
@@ -1136,6 +1150,10 @@ def load_products(force=False):
             except Exception:
                 tonkho_int = None
 
+            # Lấy ảnh đầu tiên của dòng này
+            variant_images = parse_image_urls(images)
+            variant_image = variant_images[0] if variant_images else ""
+
             if ms not in products:
                 base = {
                     "MS": ms,
@@ -1152,20 +1170,10 @@ def load_products(force=False):
                 base["variants"] = []
                 base["all_colors"] = set()
                 base["all_sizes"] = set()
+                base["all_images"] = {}  # Dictionary: "mau_size" -> image_url
                 products[ms] = base
 
             p = products[ms]
-
-            if not p.get("Images") and images:
-                p["Images"] = images
-            if not p.get("Videos") and videos:
-                p["Videos"] = videos
-            if not p.get("MoTa") and mota:
-                p["MoTa"] = mota
-            if not p.get("Gia") and gia_raw:
-                p["Gia"] = gia_raw
-            if not p.get("Tồn kho") and tonkho_raw:
-                p["Tồn kho"] = tonkho_raw
 
             variant = {
                 "mau": mau,
@@ -1173,8 +1181,15 @@ def load_products(force=False):
                 "gia": gia_int,
                 "gia_raw": gia_raw,
                 "tonkho": tonkho_int if tonkho_int is not None else tonkho_raw,
+                "images": images,  # Lưu toàn bộ chuỗi ảnh
+                "variant_image": variant_image,  # Ảnh đầu tiên của variant này
             }
             p["variants"].append(variant)
+
+            # Thêm ảnh vào dictionary với key là "mau_size"
+            key = f"{mau}_{size}" if mau and size else f"{mau}" if mau else f"{size}" if size else "default"
+            if variant_image:  # Chỉ thêm nếu có ảnh
+                p["all_images"][key] = variant_image
 
             if mau:
                 p["all_colors"].add(mau)
@@ -1201,11 +1216,77 @@ def load_products(force=False):
         PRODUCTS_BY_NUMBER = products_by_number
         PRODUCT_TEXT_EMBEDDINGS = product_text_embeddings
         LAST_LOAD = now
-        print(f"📦 Loaded {len(PRODUCTS)} products (PHƯƠNG ÁN A).")
+        
+        total_variants = sum(len(p['variants']) for p in products.values())
+        variants_with_images = sum(1 for p in products.values() for v in p['variants'] if v.get('variant_image'))
+        
+        print(f"📦 Loaded {len(PRODUCTS)} products với {total_variants} variants.")
+        print(f"📊 Variants có ảnh: {variants_with_images}/{total_variants} ({(variants_with_images/total_variants*100):.1f}%)")
         print(f"🔢 Created mapping for {len(PRODUCTS_BY_NUMBER)} product numbers")
         print(f"🔤 Created text embeddings for {len(PRODUCT_TEXT_EMBEDDINGS)} products")
+        
+        # Debug: In thông tin variants của một sản phẩm
+        if PRODUCTS:
+            sample_ms = list(PRODUCTS.keys())[0]
+            sample_product = PRODUCTS[sample_ms]
+            print(f"📊 Sample product {sample_ms}: {len(sample_product['variants'])} variants")
+            for i, v in enumerate(sample_product['variants'][:3], 1):
+                print(f"  Variant {i}: {v.get('mau')}/{v.get('size')} - Ảnh: {v.get('variant_image', '')[:50]}...")
+                
     except Exception as e:
         print("❌ load_products ERROR:", e)
+
+def get_variant_image(ms: str, color: str, size: str) -> str:
+    """
+    Tìm ảnh của variant dựa trên màu và size
+    """
+    if ms not in PRODUCTS:
+        return ""
+    
+    product = PRODUCTS[ms]
+    variants = product.get("variants", [])
+    
+    # Tìm variant khớp chính xác
+    for variant in variants:
+        variant_color = variant.get("mau", "").strip().lower()
+        variant_size = variant.get("size", "").strip().lower()
+        
+        input_color = color.strip().lower()
+        input_size = size.strip().lower()
+        
+        # So sánh màu và size (bỏ qua case và khoảng trắng)
+        color_match = (not input_color) or (variant_color == input_color) or (input_color == "mặc định" and not variant_color)
+        size_match = (not input_size) or (variant_size == input_size) or (input_size == "mặc định" and not variant_size)
+        
+        if color_match and size_match:
+            variant_image = variant.get("variant_image", "")
+            if variant_image:
+                return variant_image
+    
+    # Nếu không tìm thấy variant khớp, thử tìm variant với màu hoặc size khớp một phần
+    for variant in variants:
+        variant_color = variant.get("mau", "").strip().lower()
+        variant_size = variant.get("size", "").strip().lower()
+        
+        input_color = color.strip().lower()
+        input_size = size.strip().lower()
+        
+        # Nếu có màu và khớp màu, bất kể size
+        if input_color and input_color != "mặc định" and variant_color == input_color:
+            variant_image = variant.get("variant_image", "")
+            if variant_image:
+                return variant_image
+        
+        # Nếu có size và khớp size, bất kể màu
+        if input_size and input_size != "mặc định" and variant_size == input_size:
+            variant_image = variant.get("variant_image", "")
+            if variant_image:
+                return variant_image
+    
+    # Fallback: Lấy ảnh đầu tiên từ sản phẩm
+    images_field = product.get("Images", "")
+    urls = parse_image_urls(images_field)
+    return urls[0] if urls else ""
 
 # ============================================
 # GPT INTEGRATION - XỬ LÝ MỌI CÂU HỎI
@@ -2108,7 +2189,7 @@ def webhook():
                 # **GIỮ NGUYÊN LOGIC CŨ**: Xử lý echo từ bình luận người dùng
                 print(f"[ECHO USER] Đang xử lý echo từ bình luận người dùng")
                 
-                # QUAN TRỌNG: Load sản phẩm trước khi tìm mã
+                # QUAN TRỢNG: Load sản phẩm trước khi tìm mã
                 load_products()
                 
                 # **GIỮ NGUYÊN**: Tìm mã sản phẩm trong tin nhắn echo (hỗ trợ tất cả định dạng)
@@ -2359,7 +2440,7 @@ Anh/chị quan tâm sản phẩm nào ạ?"""
     return "OK", 200
 
 # ============================================
-# ORDER FORM PAGE (ĐÃ CẢI TIẾN)
+# ORDER FORM PAGE (ĐÃ CẢI TIẾN - ẢNH THEO THUỘC TÍNH)
 # ============================================
 
 @app.route("/order-form", methods=["GET"])
@@ -2399,15 +2480,11 @@ def order_form():
     current_fanpage_name = get_fanpage_name_from_api()
     
     row = PRODUCTS[ms]
+    
+    # Lấy ảnh mặc định (ảnh đầu tiên từ sản phẩm)
     images_field = row.get("Images", "")
     urls = parse_image_urls(images_field)
-    image = ""
-    for u in urls:
-        if should_use_as_first_image(u):
-            image = u
-            break
-    if not image and urls:
-        image = urls[0]
+    default_image = urls[0] if urls else ""
 
     size_field = row.get("size (Thuộc tính)", "")
     color_field = row.get("màu (Thuộc tính)", "")
@@ -2434,6 +2511,39 @@ def order_form():
         <meta charset="utf-8" />
         <title>Đặt hàng - {row.get('Ten','')}</title>
         <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <style>
+            .image-container {{
+                width: 120px;
+                height: 120px;
+                overflow: hidden;
+                border-radius: 8px;
+                background: #f0f0f0;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+            }}
+            .image-container img {{
+                width: 100%;
+                height: 100%;
+                object-fit: cover;
+                transition: opacity 0.3s ease;
+            }}
+            .loading {{
+                opacity: 0.7;
+            }}
+            .placeholder-image {{
+                width: 100%;
+                height: 100%;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+                font-size: 14px;
+                text-align: center;
+                padding: 10px;
+            }}
+        </style>
     </head>
     <body style="font-family: Arial, sans-serif; margin: 0; padding: 0; background: #f5f5f5;">
         <div style="max-width: 480px; margin: 0 auto; background: #fff; min-height: 100vh;">
@@ -2442,8 +2552,8 @@ def order_form():
             </div>
             <div style="padding: 16px;">
                 <div style="display: flex; gap: 12px;">
-                    <div style="width: 120px; height: 120px; overflow: hidden; border-radius: 8px; background: #f0f0f0;">
-                        {"<img src='" + image + "' style='width: 100%; height: 100%; object-fit: cover;' />" if image else ""}
+                    <div class="image-container" id="image-container">
+                        {"<img id='product-image' src='" + default_image + "' style='width: 100%; height: 100%; object-fit: cover;' onerror=\"this.onerror=null; this.src='https://via.placeholder.com/120x120?text=No+Image'\" />" if default_image else "<div class='placeholder-image'>Chưa có ảnh sản phẩm</div>"}
                     </div>
                     <div style="flex: 1;">
                         <h3 style="margin-top: 0; font-size: 16px;">[{ms}] {row.get('Ten','')}</h3>
@@ -2506,9 +2616,57 @@ def order_form():
 
         <script>
             const basePrice = {price_int};
+            const productMS = "{ms}";
 
             function formatPrice(n) {{
                 return n.toLocaleString('vi-VN') + ' đ';
+            }}
+
+            async function updateImageByVariant() {{
+                const color = document.getElementById('color').value;
+                const size = document.getElementById('size').value;
+                const imageContainer = document.getElementById('image-container');
+                
+                // Hiển thị loading
+                const currentImg = imageContainer.querySelector('img');
+                if (currentImg) {{
+                    currentImg.classList.add('loading');
+                }}
+                
+                try {{
+                    const res = await fetch(`/api/get-variant-image?ms=${{productMS}}&color=${{encodeURIComponent(color)}}&size=${{encodeURIComponent(size)}}`);
+                    if (res.ok) {{
+                        const data = await res.json();
+                        if (data.image && data.image.trim() !== '') {{
+                            // Cập nhật ảnh mới
+                            let imgElement = imageContainer.querySelector('img');
+                            if (!imgElement) {{
+                                // Nếu chưa có thẻ img, tạo mới
+                                imgElement = document.createElement('img');
+                                imgElement.style.width = '100%';
+                                imgElement.style.height = '100%';
+                                imgElement.style.objectFit = 'cover';
+                                imgElement.onerror = function() {{
+                                    this.onerror = null;
+                                    this.src = 'https://via.placeholder.com/120x120?text=No+Image';
+                                }};
+                                imageContainer.innerHTML = '';
+                                imageContainer.appendChild(imgElement);
+                            }}
+                            imgElement.src = data.image;
+                        }} else {{
+                            // Nếu không có ảnh, hiển thị placeholder
+                            imageContainer.innerHTML = '<div class="placeholder-image">Chưa có ảnh cho thuộc tính này</div>';
+                        }}
+                    }}
+                }} catch (e) {{
+                    console.error('Error updating image:', e);
+                }} finally {{
+                    // Bỏ loading
+                    if (currentImg) {{
+                        setTimeout(() => currentImg.classList.remove('loading'), 300);
+                    }}
+                }}
             }}
 
             async function updatePriceByVariant() {{
@@ -2517,7 +2675,7 @@ def order_form():
                 const quantity = parseInt(document.getElementById('quantity').value || '1');
 
                 try {{
-                    const res = await fetch(`/api/get-variant-price?ms={ms}&color=${{encodeURIComponent(color)}}&size=${{encodeURIComponent(size)}}`);
+                    const res = await fetch(`/api/get-variant-price?ms=${{productMS}}&color=${{encodeURIComponent(color)}}&size=${{encodeURIComponent(size)}}`);
                     if (!res.ok) throw new Error('request failed');
                     const data = await res.json();
                     const price = data.price || basePrice;
@@ -2530,9 +2688,22 @@ def order_form():
                 }}
             }}
 
-            document.getElementById('color').addEventListener('change', updatePriceByVariant);
-            document.getElementById('size').addEventListener('change', updatePriceByVariant);
+            // Cập nhật cả ảnh và giá khi thay đổi màu/size
+            async function updateVariantInfo() {{
+                await Promise.all([
+                    updateImageByVariant(),
+                    updatePriceByVariant()
+                ]);
+            }}
+
+            document.getElementById('color').addEventListener('change', updateVariantInfo);
+            document.getElementById('size').addEventListener('change', updateVariantInfo);
             document.getElementById('quantity').addEventListener('input', updatePriceByVariant);
+
+            // Cập nhật lần đầu khi tải trang
+            document.addEventListener('DOMContentLoaded', function() {{
+                updateVariantInfo();
+            }});
 
             async function submitOrder() {{
                 const color = document.getElementById('color').value;
@@ -2542,25 +2713,48 @@ def order_form():
                 const phone = document.getElementById('phone').value;
                 const address = document.getElementById('address').value;
 
-                const res = await fetch('/api/submit-order', {{
-                    method: 'POST',
-                    headers: {{
-                        'Content-Type': 'application/json'
-                    }},
-                    body: JSON.stringify({{
-                        ms: "{ms}",
-                        uid: "{uid}",
-                        color,
-                        size,
-                        quantity,
-                        customerName,
-                        phone,
-                        address
-                    }})
-                }});
+                // Kiểm tra thông tin bắt buộc
+                if (!customerName.trim()) {{
+                    alert('Vui lòng nhập họ và tên');
+                    return;
+                }}
+                if (!phone.trim()) {{
+                    alert('Vui lòng nhập số điện thoại');
+                    return;
+                }}
+                if (!address.trim()) {{
+                    alert('Vui lòng nhập địa chỉ nhận hàng');
+                    return;
+                }}
 
-                const data = await res.json();
-                alert(data.message || 'Đã gửi đơn hàng thành công, shop sẽ liên hệ lại anh/chị sớm nhất!');
+                try {{
+                    const res = await fetch('/api/submit-order', {{
+                        method: 'POST',
+                        headers: {{
+                            'Content-Type': 'application/json'
+                        }},
+                        body: JSON.stringify({{
+                            ms: "{ms}",
+                            uid: "{uid}",
+                            color,
+                            size,
+                            quantity,
+                            customerName,
+                            phone,
+                            address
+                        }})
+                    }});
+
+                    const data = await res.json();
+                    if (res.ok) {{
+                        alert('🎉 Đã gửi đơn hàng thành công!\\n\\nShop sẽ liên hệ xác nhận trong 5-10 phút.\\nCảm ơn anh/chị đã đặt hàng! ❤️');
+                        // Có thể reset form hoặc redirect
+                    }} else {{
+                        alert('❌ Có lỗi xảy ra: ' + (data.message || 'Vui lòng thử lại sau'));
+                    }}
+                }} catch (e) {{
+                    alert('❌ Lỗi kết nối. Vui lòng thử lại sau!');
+                }}
             }}
         </script>
     </body>
@@ -2569,7 +2763,7 @@ def order_form():
     return html
 
 # ============================================
-# API ENDPOINTS (GIỮ NGUYÊN)
+# API ENDPOINTS (THÊM API GET-VARIANT-IMAGE)
 # ============================================
 
 @app.route("/api/get-product")
@@ -2670,6 +2864,26 @@ def api_get_variant_price():
         "price_display": price_display,
     }
 
+@app.route("/api/get-variant-image")
+def api_get_variant_image():
+    """API trả về ảnh tương ứng với màu và size"""
+    ms = (request.args.get("ms") or "").upper()
+    color = request.args.get("color", "").strip()
+    size = request.args.get("size", "").strip()
+    
+    load_products()
+    if ms not in PRODUCTS:
+        return {"error": "not_found"}, 404
+    
+    variant_image = get_variant_image(ms, color, size)
+    
+    return {
+        "ms": ms,
+        "color": color,
+        "size": size,
+        "image": variant_image
+    }
+
 @app.route("/api/submit-order", methods=["POST"])
 def api_submit_order():
     data = request.get_json() or {}
@@ -2724,10 +2938,24 @@ def health_check():
     """Kiểm tra tình trạng server và bot"""
     current_fanpage_name = get_fanpage_name_from_api()
     
+    # Tính tổng số variants và variants có ảnh
+    total_variants = 0
+    variants_with_images = 0
+    
+    for ms, product in PRODUCTS.items():
+        variants = product.get("variants", [])
+        total_variants += len(variants)
+        for variant in variants:
+            if variant.get("variant_image"):
+                variants_with_images += 1
+    
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
         "products_loaded": len(PRODUCTS),
+        "variants_loaded": total_variants,
+        "variants_with_images": variants_with_images,
+        "variant_images_percentage": f"{(variants_with_images/total_variants*100):.1f}%" if total_variants > 0 else "0%",
         "last_load_time": LAST_LOAD,
         "openai_configured": bool(client),
         "openai_vision_available": bool(client and OPENAI_API_KEY),
@@ -2736,6 +2964,8 @@ def health_check():
         "fanpage_name_source": "Facebook Graph API" if FANPAGE_NAME_CACHE and FANPAGE_NAME_CACHE != FANPAGE_NAME else "Environment Variable",
         "fanpage_cache_age": int(time.time() - FANPAGE_NAME_CACHE_TIME) if FANPAGE_NAME_CACHE_TIME else 0,
         "fanpage_cache_valid": (FANPAGE_NAME_CACHE_TIME and (time.time() - FANPAGE_NAME_CACHE_TIME) < FANPAGE_NAME_CACHE_TTL),
+        "variant_image_support": "ENABLED (ảnh theo thuộc tính)",
+        "variant_image_api": "/api/get-variant-image",
         "image_processing": "base64+fallback",
         "image_debounce_enabled": True,
         "image_carousel": "5_products",
@@ -2780,4 +3010,8 @@ if __name__ == "__main__":
     print(f"🟢 Max Images per Product: 20 ảnh")
     print(f"🟢 Catalog Context: Lưu retailer_id và tự động nhận diện sản phẩm")
     print(f"🟢 Fanpage Name Source: Facebook Graph API (cache 1h)")
+    print(f"🟢 Variant Image Support: BẬT (ảnh theo từng thuộc tính)")
+    print(f"🟢 Variant Image API: /api/get-variant-image")
+    print(f"🟢 Form Dynamic Images: BẬT (ảnh thay đổi theo màu/size)")
+    
     app.run(host="0.0.0.0", port=5000, debug=True)
