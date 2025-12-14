@@ -209,6 +209,134 @@ CAROUSEL_KEYWORDS = [
 ]
 
 # ============================================
+# HELPER: KIỂM TRA CÓ PHẢI FAQ RESPONSE KHÔNG
+# ============================================
+
+def is_faq_response(echo_text: str, app_id: str, attachments: list) -> bool:
+    """
+    Kiểm tra xem echo message có phải là câu trả lời FAQ từ quảng cáo không
+    FAQ (Câu hỏi thường gặp) trong Facebook Ads
+    
+    Đặc điểm FAQ:
+    1. Có app_id của bot (để Facebook gửi tự động)
+    2. Nội dung thường ngắn (< 150 ký tự)
+    3. Không có attachment
+    4. Không chứa pattern đặc trưng của bot response
+    """
+    if not echo_text or app_id not in BOT_APP_IDS:
+        return False
+    
+    # FAQ thường ngắn và không có attachment
+    if len(echo_text) > 150 or attachments:
+        return False
+    
+    # Pattern đặc trưng của bot response (Nếu có thì không phải FAQ)
+    bot_response_patterns = [
+        "Dạ, phần này trong hệ thống chưa có thông tin ạ",
+        "em sợ nói sai nên không dám khẳng định",
+        "Chào anh/chị! 👋",
+        "Em là trợ lý AI",
+        "📌 [MS",
+        "📝 MÔ TẢ:",
+        "💰 GIÁ SẢN PHẨM:",
+        "📋 Đặt hàng ngay tại đây:",
+        "Dạ em đang gặp chút trục trặc",
+        "Dạ, em đang lấy danh sách",
+        "Anh/chị vuốt sang trái/phải",
+        "💬 Gõ mã sản phẩm",
+        "📱 Anh/chị vuốt",
+        "🎯 Em phân tích được đây là",
+        "🔍 Em tìm thấy",
+        "🖼️ Em đang phân tích ảnh",
+        "🟢 Phù hợp:",
+        "❌ Lỗi phân tích ảnh",
+        "⚠️ Không thể lấy được ảnh",
+        "📊 Kết quả phân tích ảnh chi tiết",
+        "🎉 Shop đã nhận được đơn hàng mới",
+        "⏰ Shop sẽ gọi điện xác nhận",
+        "💳 Thanh toán khi nhận hàng (COD)",
+        "Cảm ơn anh/chị đã đặt hàng",
+        "Dạ em cảm ơn anh/chị",
+        "Dạ vâng. Anh/chị cho em xin",
+        "Dạ em tóm tắt lại đơn hàng",
+    ]
+    
+    # Kiểm tra nếu có pattern của bot → không phải FAQ
+    for pattern in bot_response_patterns:
+        if pattern in echo_text:
+            return False
+    
+    # Kiểm tra nếu bắt đầu bằng emoji đặc trưng của bot
+    first_line = echo_text.strip().split('\n')[0] if '\n' in echo_text else echo_text.strip()
+    if first_line and any(emoji in first_line for emoji in [
+        "👋", "📌", "📝", "💰", "📋", "🎯", "🔍", "🖼️", "🟢", "❌", 
+        "⚠️", "📊", "🎉", "⏰", "💳", "🛒", "🔔", "✅", "❓", "❗"
+    ]):
+        return False
+    
+    # Nếu không có pattern đặc trưng → có thể là FAQ
+    return True
+
+# ============================================
+# HELPER: XỬ LÝ FAQ RESPONSE
+# ============================================
+
+def handle_faq_response(recipient_id: str, echo_text: str) -> bool:
+    """
+    Xử lý FAQ response từ quảng cáo Facebook
+    Trả về True nếu đã xử lý thành công, False nếu không xử lý
+    """
+    try:
+        # Load products để đảm bảo có dữ liệu
+        load_products()
+        
+        # Tìm mã sản phẩm trong FAQ response
+        detected_ms = detect_ms_from_text(echo_text)
+        
+        if not detected_ms or detected_ms not in PRODUCTS:
+            print(f"[FAQ NO MS] FAQ không chứa mã sản phẩm hợp lệ: {echo_text[:100]}...")
+            return False
+        
+        print(f"[FAQ PROCESSING] Đang xử lý FAQ với mã: {detected_ms} cho user: {recipient_id}")
+        
+        # Lấy context user
+        ctx = USER_CONTEXT[recipient_id]
+        
+        # Kiểm tra lock để tránh xử lý song song
+        if ctx.get("processing_lock"):
+            print(f"[FAQ LOCKED] User {recipient_id} đang được xử lý, bỏ qua FAQ")
+            return False
+        
+        ctx["processing_lock"] = True
+        
+        try:
+            # Cập nhật context
+            ctx["last_ms"] = detected_ms
+            ctx["referral_source"] = "faq_response"
+            update_product_context(recipient_id, detected_ms)
+            
+            # Gửi thông báo cho khách
+            welcome_msg = f"""Chào anh/chị! 👋 
+Em là trợ lý AI của {FANPAGE_NAME}.
+
+Em thấy anh/chị quan tâm đến sản phẩm mã [{detected_ms}].
+Em sẽ gửi thông tin chi tiết sản phẩm ngay ạ!"""
+            send_message(recipient_id, welcome_msg)
+            
+            # Gửi thông tin sản phẩm (có debounce)
+            send_product_info_debounced(recipient_id, detected_ms)
+            
+            print(f"[FAQ SUCCESS] Đã xử lý FAQ thành công cho user {recipient_id}, mã: {detected_ms}")
+            return True
+            
+        finally:
+            ctx["processing_lock"] = False
+            
+    except Exception as e:
+        print(f"❌ [FAQ ERROR] Lỗi xử lý FAQ: {str(e)}")
+        return False
+
+# ============================================
 # HELPER: KIỂM TRA ECHO MESSAGE CÓ PHẢI TỪ BOT KHÔNG
 # ============================================
 
@@ -216,17 +344,24 @@ def is_bot_generated_echo(echo_text: str, app_id: str = "", attachments: list = 
     """
     Kiểm tra xem echo message có phải do bot tạo ra không
     Dựa trên app_id và nội dung tin nhắn
+    
+    CẢI TIẾN: Cho phép FAQ response đi qua để xử lý mã sản phẩm
     """
     if not echo_text and not attachments:
         return False
     
-    # 1. Kiểm tra theo app_id
+    # 1. KIỂM TRA FAQ TRƯỚC: Nếu là FAQ → cho phép xử lý (return False)
+    if is_faq_response(echo_text, app_id, attachments or []):
+        print(f"[ECHO FAQ DETECTED] Đây là FAQ response, cho phép xử lý: {echo_text[:100]}...")
+        return False  # Cho phép xử lý FAQ
+    
+    # 2. Kiểm tra theo app_id (logic cũ)
     if app_id in BOT_APP_IDS:
         return True
     
-    # 2. Kiểm tra theo nội dung (chỉ khi có echo_text)
+    # 3. Kiểm tra theo nội dung (chỉ khi có echo_text) - logic cũ
     if echo_text:
-        # Các mẫu tin nhắn đặc trưng của bot
+        # Các mẫu tin nhắn đặc trưng của bot (giữ nguyên)
         bot_response_patterns = [
             "Dạ, phần này trong hệ thống chưa có thông tin ạ",
             "em sợ nói sai nên không dám khẳng định",
@@ -268,9 +403,8 @@ def is_bot_generated_echo(echo_text: str, app_id: str = "", attachments: list = 
             if any(emoji in first_line for emoji in ["👋", "📌", "📝", "💰", "📋", "🎯", "🔍", "🖼️", "🟢", "❌", "⚠️", "📊", "🎉", "⏰", "💳"]):
                 return True
     
-    # 3. Kiểm tra attachment (hình ảnh từ bot)
+    # 4. Kiểm tra attachment (hình ảnh từ bot)
     if attachments and (not echo_text or len(echo_text.strip()) < 10):
-        # Nếu có attachment và text rỗng/ngắn, có thể là hình ảnh từ bot
         return True
     
     return False
@@ -1891,7 +2025,7 @@ def handle_text(uid: str, text: str):
             ctx["processing_lock"] = False
 
 # ============================================
-# WEBHOOK HANDLER - ĐÃ SỬA LỖI GỬI TIN NHẮN LẶP
+# WEBHOOK HANDLER - ĐÃ THÊM XỬ LÝ FAQ
 # ============================================
 
 @app.route("/", methods=["GET"])
@@ -1926,10 +2060,10 @@ def webhook():
                 continue
 
             # ============================================
-            # XỬ LÝ ECHO MESSAGE TỪ FCHAT - GIỮ NGUYÊN LOGIC TRÍCH XUẤT MÃ
+            # XỬ LÝ ECHO MESSAGE - ĐÃ THÊM FAQ HANDLING
             # ============================================
             if m.get("message", {}).get("is_echo"):
-                # Lấy recipient_id (người nhận tin nhắn echo) - chính là khách hàng
+                # Lấy recipient_id (người nhận tin nhắn echo)
                 recipient_id = m.get("recipient", {}).get("id")
                 if not recipient_id:
                     continue
@@ -1940,6 +2074,24 @@ def webhook():
                 echo_text = msg.get("text", "")
                 attachments = msg.get("attachments", [])
                 app_id = msg.get("app_id", "")
+                
+                print(f"[ECHO RECEIVED] MID: {msg_mid}, AppID: {app_id}, Text: {echo_text[:100]}...")
+                
+                # **THÊM MỚI: Xử lý FAQ response trước**
+                # Nếu là FAQ response và có mã sản phẩm → xử lý ngay
+                if is_faq_response(echo_text, app_id, attachments):
+                    print(f"[FAQ DETECTED] Phát hiện FAQ response, kiểm tra mã sản phẩm...")
+                    
+                    # Gọi hàm xử lý FAQ
+                    faq_processed = handle_faq_response(recipient_id, echo_text)
+                    
+                    if faq_processed:
+                        # Đã xử lý FAQ thành công, không cần xử lý tiếp
+                        print(f"[FAQ PROCESSED SUCCESS] Đã xử lý FAQ cho user {recipient_id}")
+                        continue
+                    else:
+                        # FAQ không có mã sản phẩm, tiếp tục logic bình thường
+                        print(f"[FAQ NO MS] FAQ không có mã sản phẩm, tiếp tục xử lý...")
                 
                 # **QUAN TRỌNG**: KIỂM TRA CÓ PHẢI ECHO TỪ BOT KHÔNG
                 # Nếu là echo từ bot → BỎ QUA để tránh lặp
@@ -1976,7 +2128,7 @@ def webhook():
                 # QUAN TRỌNG: Load sản phẩm trước khi tìm mã
                 load_products()
                 
-                # **GIỮ NGUYÊN**: Tìm mã sản phẩm trong tin nhắn echo (hỗ trợ tất cả định dạng)
+                # **GIỮ NGUYÊN**: Tìm mã sản phẩm trong tin nhắn echo
                 detected_ms = detect_ms_from_text(echo_text)
                 
                 if detected_ms and detected_ms in PRODUCTS:
@@ -2007,7 +2159,6 @@ def webhook():
                 else:
                     print(f"[ECHO FCHAT] Không tìm thấy mã sản phẩm trong echo: {echo_text[:100]}...")
                     # KHÔNG gửi tin nhắn chào nếu không tìm thấy mã sản phẩm
-                    # để tránh spam khách hàng
                 
                 continue
             
@@ -2568,6 +2719,8 @@ def health_check():
         "accuracy_improved": True,
         "fchat_echo_processing": True,
         "bot_echo_filter": True,
+        "faq_processing": True,  # THÊM MỚI: Hiển thị FAQ processing
+        "faq_detection": "app_id+content_analysis",
         "referral_auto_processing": True,
         "message_debounce_enabled": True,
         "duplicate_protection": True,
@@ -2593,6 +2746,7 @@ if __name__ == "__main__":
     print(f"🟢 Echo Message Debounce: 2 giây")
     print(f"🟢 Bot Echo Filter: BẬT (phân biệt echo từ bot vs Fchat)")
     print(f"🟢 Fchat Echo Processing: BẬT (giữ nguyên logic trích xuất mã từ Fchat)")
+    print(f"🟢 FAQ Processing: BẬT (nhận diện và xử lý FAQ từ quảng cáo)")  # THÊM MỚI
     print(f"🟢 Referral Auto Processing: BẬT")
     print(f"🟢 Duplicate Message Protection: BẬT")
     print(f"🟢 Intent Analysis: GPT-based (phát hiện yêu cầu xem ảnh)")
