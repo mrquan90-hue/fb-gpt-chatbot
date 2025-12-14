@@ -214,6 +214,57 @@ CAROUSEL_KEYWORDS = [
 ]
 
 # ============================================
+# CACHE CHO TÊN FANPAGE
+# ============================================
+FANPAGE_NAME_CACHE = None
+FANPAGE_NAME_CACHE_TIME = 0
+FANPAGE_NAME_CACHE_TTL = 3600  # Cache trong 1 giờ
+
+def get_fanpage_name_from_api():
+    """
+    Lấy tên fanpage từ Facebook Graph API với cache
+    """
+    global FANPAGE_NAME_CACHE, FANPAGE_NAME_CACHE_TIME
+    
+    now = time.time()
+    
+    # Kiểm tra cache còn hiệu lực không
+    if (FANPAGE_NAME_CACHE and 
+        FANPAGE_NAME_CACHE_TIME and 
+        (now - FANPAGE_NAME_CACHE_TIME) < FANPAGE_NAME_CACHE_TTL):
+        return FANPAGE_NAME_CACHE
+    
+    if not PAGE_ACCESS_TOKEN:
+        print("[WARN] Không có PAGE_ACCESS_TOKEN để lấy tên fanpage")
+        FANPAGE_NAME_CACHE = FANPAGE_NAME
+        FANPAGE_NAME_CACHE_TIME = now
+        return FANPAGE_NAME_CACHE
+    
+    try:
+        url = f"https://graph.facebook.com/v12.0/me?fields=name&access_token={PAGE_ACCESS_TOKEN}"
+        response = requests.get(url, timeout=5)
+        
+        if response.status_code == 200:
+            data = response.json()
+            page_name = data.get('name', FANPAGE_NAME)
+            print(f"✅ Lấy tên fanpage từ API thành công: {page_name}")
+            
+            # Lưu vào cache
+            FANPAGE_NAME_CACHE = page_name
+            FANPAGE_NAME_CACHE_TIME = now
+            return page_name
+        else:
+            print(f"❌ Lỗi khi lấy tên fanpage: {response.status_code} - {response.text}")
+            FANPAGE_NAME_CACHE = FANPAGE_NAME
+            FANPAGE_NAME_CACHE_TIME = now
+            return FANPAGE_NAME_CACHE
+    except Exception as e:
+        print(f"❌ Lỗi kết nối khi lấy tên fanpage: {str(e)}")
+        FANPAGE_NAME_CACHE = FANPAGE_NAME
+        FANPAGE_NAME_CACHE_TIME = now
+        return FANPAGE_NAME_CACHE
+
+# ============================================
 # HELPER: TRÍCH XUẤT MÃ SẢN PHẨM TỪ RETAILER_ID
 # ============================================
 
@@ -2308,7 +2359,7 @@ Anh/chị quan tâm sản phẩm nào ạ?"""
     return "OK", 200
 
 # ============================================
-# ORDER FORM PAGE (GIỮ NGUYÊN)
+# ORDER FORM PAGE (ĐÃ CẢI TIẾN)
 # ============================================
 
 @app.route("/order-form", methods=["GET"])
@@ -2344,6 +2395,9 @@ def order_form():
             404,
         )
 
+    # Lấy tên fanpage từ API
+    current_fanpage_name = get_fanpage_name_from_api()
+    
     row = PRODUCTS[ms]
     images_field = row.get("Images", "")
     urls = parse_image_urls(images_field)
@@ -2384,7 +2438,7 @@ def order_form():
     <body style="font-family: Arial, sans-serif; margin: 0; padding: 0; background: #f5f5f5;">
         <div style="max-width: 480px; margin: 0 auto; background: #fff; min-height: 100vh;">
             <div style="padding: 16px; border-bottom: 1px solid #eee; text-align: center;">
-                <h2 style="margin: 0; font-size: 18px;">ĐẶT HÀNG - {FANPAGE_NAME}</h2>
+                <h2 style="margin: 0; font-size: 18px;">ĐẶT HÀNG - {current_fanpage_name}</h2>
             </div>
             <div style="padding: 16px;">
                 <div style="display: flex; gap: 12px;">
@@ -2661,9 +2715,15 @@ def api_submit_order():
 def static_files(path):
     return send_from_directory("static", path)
 
+# ============================================
+# HEALTH CHECK (ĐÃ CẢI TIẾN)
+# ============================================
+
 @app.route("/health", methods=["GET"])
 def health_check():
     """Kiểm tra tình trạng server và bot"""
+    current_fanpage_name = get_fanpage_name_from_api()
+    
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
@@ -2672,6 +2732,10 @@ def health_check():
         "openai_configured": bool(client),
         "openai_vision_available": bool(client and OPENAI_API_KEY),
         "facebook_configured": bool(PAGE_ACCESS_TOKEN),
+        "fanpage_name": current_fanpage_name,
+        "fanpage_name_source": "Facebook Graph API" if FANPAGE_NAME_CACHE and FANPAGE_NAME_CACHE != FANPAGE_NAME else "Environment Variable",
+        "fanpage_cache_age": int(time.time() - FANPAGE_NAME_CACHE_TIME) if FANPAGE_NAME_CACHE_TIME else 0,
+        "fanpage_cache_valid": (FANPAGE_NAME_CACHE_TIME and (time.time() - FANPAGE_NAME_CACHE_TIME) < FANPAGE_NAME_CACHE_TTL),
         "image_processing": "base64+fallback",
         "image_debounce_enabled": True,
         "image_carousel": "5_products",
@@ -2696,7 +2760,7 @@ def health_check():
 if __name__ == "__main__":
     print("Starting app on http://0.0.0.0:5000")
     print(f"🟢 GPT-4o Vision API: {'SẴN SÀNG' if client and OPENAI_API_KEY else 'CHƯA CẤU HÌNH'}")
-    print(f"🟢 Fanpage: {FANPAGE_NAME}")
+    print(f"🟢 Fanpage: {get_fanpage_name_from_api()}")
     print(f"🟢 Domain: {DOMAIN}")
     print(f"🟢 Image Processing: Base64 + Fallback URL")
     print(f"🟢 Search Algorithm: TF-IDF + Cosine Similarity")
@@ -2715,4 +2779,5 @@ if __name__ == "__main__":
     print(f"🟢 Image Request Confidence Threshold: 0.85")
     print(f"🟢 Max Images per Product: 20 ảnh")
     print(f"🟢 Catalog Context: Lưu retailer_id và tự động nhận diện sản phẩm")
+    print(f"🟢 Fanpage Name Source: Facebook Graph API (cache 1h)")
     app.run(host="0.0.0.0", port=5000, debug=True)
