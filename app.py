@@ -362,7 +362,7 @@ Hãy phân tích xem khách có yêu cầu RÕ RÀNG xem ảnh sản phẩm HI�
         return {"intent": "general", "confidence": 0.3, "reason": f"Error: {str(e)}"}
 
 # ============================================
-# GỬI TOÀN BỘ ẢNH SẢN PHẨM
+# GỬI TOÀN BỘ ẢNH SẢN PHẨM - ĐÃ SỬA LỖI DEADLOCK
 # ============================================
 
 def send_all_product_images(uid: str, ms: str, max_images: int = 20):
@@ -380,12 +380,7 @@ def send_all_product_images(uid: str, ms: str, max_images: int = 20):
     
     ctx = USER_CONTEXT[uid]
     
-    # Kiểm tra lock để tránh xử lý song song
-    if ctx.get("processing_lock"):
-        print(f"[IMAGE SEND LOCKED] User {uid} đang được xử lý, bỏ qua gửi ảnh")
-        return
-    
-    # Kiểm tra debounce: không gửi ảnh quá nhanh
+    # KIỂM TRA DEBOUNCE: không gửi ảnh quá nhanh
     now = time.time()
     last_image_send_time = ctx.get("last_all_images_time", 0)
     
@@ -393,8 +388,6 @@ def send_all_product_images(uid: str, ms: str, max_images: int = 20):
         print(f"[IMAGE SEND DEBOUNCE] Bỏ qua gửi ảnh cho {uid}, chưa đủ 5s")
         return
     
-    # Set lock
-    ctx["processing_lock"] = True
     ctx["last_all_images_time"] = now
     
     try:
@@ -491,10 +484,6 @@ def send_all_product_images(uid: str, ms: str, max_images: int = 20):
             send_message(uid, "❌ Có lỗi khi tải ảnh sản phẩm. Anh/chị vui lòng thử lại sau ạ.")
         except:
             pass
-    
-    finally:
-        # Release lock
-        ctx["processing_lock"] = False
 
 # ============================================
 # HELPER: TẢI VÀ XỬ LÝ ẢNH
@@ -1874,7 +1863,7 @@ def handle_text(uid: str, text: str):
                 
                 # Gửi toàn bộ ảnh sản phẩm
                 send_all_product_images(uid, current_ms)
-                ctx["processing_lock"] = False
+                ctx["processing_lock"] = False  # Release lock sau khi gửi xong
                 return
             else:
                 print(f"[NO IMAGE REQUEST] Intent: {intent_result.get('intent')}, Confidence: {intent_result.get('confidence')}")
