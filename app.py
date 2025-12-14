@@ -39,6 +39,11 @@ if not GOOGLE_SHEET_CSV_URL:
     GOOGLE_SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/18eI8Yn-WG8xN0YK8mWqgIOvn-USBhmXBH3sR2drvWus/export?format=csv"
 
 # ============================================
+# APP ID CỦA BOT ĐỂ PHÂN BIỆT ECHO MESSAGE
+# ============================================
+BOT_APP_IDS = {"645956568292435"}  # App ID của bot từ log
+
+# ============================================
 # OPENAI CLIENT
 # ============================================
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
@@ -105,18 +110,18 @@ USER_CONTEXT = defaultdict(lambda: {
     "last_image_analysis": None,
     "last_image_url": None,
     "last_image_base64": None,
-    "last_image_time": 0,  # Thêm: thời gian xử lý ảnh gần nhất
-    "processed_image_mids": set(),  # Thêm: set các image mid đã xử lý
+    "last_image_time": 0,
+    "processed_image_mids": set(),
     # Thêm trường cho echo message từ Fchat
     "last_echo_processed_time": 0,
     "processed_echo_mids": set(),
     # Thêm trường cho debounce và duplicate detection
-    "processed_message_mids": {},  # Dict lưu message ID và thời gian xử lý
-    "last_processed_text": "",  # Lưu nội dung tin nhắn cuối cùng đã xử lý
+    "processed_message_mids": {},
+    "last_processed_text": "",
 })
 PRODUCTS = {}
-PRODUCTS_BY_NUMBER = {}  # Mapping từ số (không có số 0 đầu) đến mã đầy đủ
-PRODUCT_TEXT_EMBEDDINGS = {}  # Lưu embedding văn bản của sản phẩm để tìm kiếm
+PRODUCTS_BY_NUMBER = {}
+PRODUCT_TEXT_EMBEDDINGS = {}
 LAST_LOAD = 0
 LOAD_TTL = 300
 
@@ -199,6 +204,74 @@ CAROUSEL_KEYWORDS = [
 ]
 
 # ============================================
+# HELPER: KIỂM TRA ECHO MESSAGE CÓ PHẢI TỪ BOT KHÔNG
+# ============================================
+
+def is_bot_generated_echo(echo_text: str, app_id: str = "", attachments: list = None) -> bool:
+    """
+    Kiểm tra xem echo message có phải do bot tạo ra không
+    Dựa trên app_id và nội dung tin nhắn
+    """
+    if not echo_text and not attachments:
+        return False
+    
+    # 1. Kiểm tra theo app_id
+    if app_id in BOT_APP_IDS:
+        return True
+    
+    # 2. Kiểm tra theo nội dung (chỉ khi có echo_text)
+    if echo_text:
+        # Các mẫu tin nhắn đặc trưng của bot
+        bot_response_patterns = [
+            "Dạ, phần này trong hệ thống chưa có thông tin ạ",
+            "em sợ nói sai nên không dám khẳng định",
+            "Chào anh/chị! 👋",
+            "Em là trợ lý AI",
+            "📌 [MS",
+            "📝 MÔ TẢ:",
+            "💰 GIÁ SẢN PHẨM:",
+            "📋 Đặt hàng ngay tại đây:",
+            "Dạ em đang gặp chút trục trặc",
+            "Dạ, em đang lấy danh sách",
+            "Anh/chị vuốt sang trái/phải",
+            "💬 Gõ mã sản phẩm",
+            "📱 Anh/chị vuốt",
+            "🎯 Em phân tích được đây là",
+            "🔍 Em tìm thấy",
+            "🖼️ Em đang phân tích ảnh",
+            "🟢 Phù hợp:",
+            "❌ Lỗi phân tích ảnh",
+            "⚠️ Không thể lấy được ảnh",
+            "📊 Kết quả phân tích ảnh chi tiết",
+            "🎉 Shop đã nhận được đơn hàng mới",
+            "⏰ Shop sẽ gọi điện xác nhận",
+            "💳 Thanh toán khi nhận hàng (COD)",
+            "Cảm ơn anh/chị đã đặt hàng",
+            "Dạ em cảm ơn anh/chị",
+            "Dạ vâng. Anh/chị cho em xin",
+            "Dạ em tóm tắt lại đơn hàng",
+        ]
+        
+        for pattern in bot_response_patterns:
+            if pattern in echo_text:
+                return True
+        
+        # Kiểm tra theo cấu trúc: bắt đầu bằng emoji và có nhiều dòng
+        lines = echo_text.strip().split('\n')
+        if lines and len(lines) > 1:
+            first_line = lines[0]
+            if any(emoji in first_line for emoji in ["👋", "📌", "📝", "💰", "📋", "🎯", "🔍", "🖼️", "🟢", "❌", "⚠️", "📊", "🎉", "⏰", "💳"]):
+                return True
+    
+    # 3. Kiểm tra attachment (hình ảnh từ bot)
+    if attachments and (not echo_text or len(echo_text.strip()) < 10):
+        # Nếu có attachment và text rỗng/ngắn, có thể là hình ảnh từ bot
+        return True
+    
+    return False
+
+
+# ============================================
 # HELPER: TẢI VÀ XỬ LÝ ẢNH
 # ============================================
 
@@ -208,7 +281,6 @@ def download_image_from_facebook(image_url: str, timeout: int = 10) -> Optional[
     Trả về bytes của ảnh hoặc None nếu thất bại
     """
     try:
-        # Facebook cần user-agent để tránh bị chặn
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
@@ -226,14 +298,12 @@ def download_image_from_facebook(image_url: str, timeout: int = 10) -> Optional[
         )
         
         if response.status_code == 200:
-            # Kiểm tra content-type
             content_type = response.headers.get('content-type', '')
             if not content_type.startswith('image/'):
                 print(f"⚠️ URL không phải ảnh: {content_type}")
                 return None
             
-            # Đọc ảnh với giới hạn kích thước (max 10MB)
-            max_size = 10 * 1024 * 1024  # 10MB
+            max_size = 10 * 1024 * 1024
             content = b""
             for chunk in response.iter_content(chunk_size=8192):
                 content += chunk
@@ -263,11 +333,8 @@ def convert_image_to_base64(image_bytes: bytes) -> Optional[str]:
     Chuyển đổi ảnh bytes sang base64 string
     """
     try:
-        # Mã hóa base64
         base64_str = base64.b64encode(image_bytes).decode('utf-8')
         
-        # Xác định MIME type từ bytes (đơn giản)
-        # Thực tế nên dùng thư viện như python-magic, nhưng tạm thời dùng cách đơn giản
         if image_bytes[:4] == b'\x89PNG':
             mime_type = 'image/png'
         elif image_bytes[:3] == b'\xff\xd8\xff':
@@ -277,9 +344,8 @@ def convert_image_to_base64(image_bytes: bytes) -> Optional[str]:
         elif image_bytes[:4] == b'RIFF' and image_bytes[8:12] == b'WEBP':
             mime_type = 'image/webp'
         else:
-            mime_type = 'image/jpeg'  # Mặc định
+            mime_type = 'image/jpeg'
         
-        # Tạo data URL
         data_url = f"data:{mime_type};base64,{base64_str}"
         return data_url
         
@@ -290,9 +356,7 @@ def convert_image_to_base64(image_bytes: bytes) -> Optional[str]:
 def get_image_for_analysis(image_url: str) -> Optional[str]:
     """
     Lấy ảnh dưới dạng base64 data URL cho OpenAI
-    Thử cả 2 cách: tải về và dùng trực tiếp URL
     """
-    # Ưu tiên: Tải ảnh về và chuyển base64
     image_bytes = download_image_from_facebook(image_url)
     
     if image_bytes:
@@ -301,18 +365,16 @@ def get_image_for_analysis(image_url: str) -> Optional[str]:
             print("✅ Sử dụng ảnh base64")
             return base64_data
     
-    # Fallback: Dùng URL trực tiếp (nếu OpenAI có thể truy cập)
     print("⚠️ Fallback: Sử dụng URL trực tiếp")
     return image_url
 
 # ============================================
-# GPT-4o VISION: PHÂN TÍCH ẢNH SẢN PHẨM (CẢI TIẾN)
+# GPT-4o VISION: PHÂN TÍCH ẢNH SẢN PHẨM
 # ============================================
 
 def analyze_image_with_gpt4o(image_url: str):
     """
     Phân tích ảnh sản phẩm thời trang/gia dụng bằng GPT-4o Vision API
-    CẢI TIẾN: Prompt chi tiết hơn, tập trung vào đặc điểm nhận dạng
     """
     if not client or not OPENAI_API_KEY:
         print("⚠️ OpenAI client chưa được cấu hình, bỏ qua phân tích ảnh")
@@ -321,16 +383,13 @@ def analyze_image_with_gpt4o(image_url: str):
     try:
         print(f"🖼️ Đang phân tích ảnh: {image_url[:100]}...")
         
-        # Lấy ảnh dưới dạng base64 hoặc URL
         image_content = get_image_for_analysis(image_url)
         
         if not image_content:
             print("❌ Không thể lấy được ảnh để phân tích")
             return None
         
-        # Chuẩn bị content cho OpenAI
         if image_content.startswith('data:'):
-            # Base64 data URL
             image_message = {
                 "type": "image_url",
                 "image_url": {
@@ -338,7 +397,6 @@ def analyze_image_with_gpt4o(image_url: str):
                 }
             }
         else:
-            # Regular URL (fallback)
             image_message = {
                 "type": "image_url",
                 "image_url": {
@@ -346,7 +404,6 @@ def analyze_image_with_gpt4o(image_url: str):
                 }
             }
         
-        # CẢI TIẾN: Prompt chi tiết hơn, tập trung vào đặc điểm nhận dạng
         improved_prompt = f"""Bạn là chuyên gia tư vấn thời trang và gia dụng cho {FANPAGE_NAME}.
         
 Hãy phân tích ảnh sản phẩm và trả về JSON với cấu trúc:
@@ -368,13 +425,12 @@ Hãy phân tích ảnh sản phẩm và trả về JSON với cấu trúc:
 
 QUY TẮC QUAN TRỌNG:
 1. PHÂN TÍCH KỸ những gì thấy trong ảnh: hình dáng, kiểu dáng, chi tiết, màu sắc, họa tiết
-2. product_type phải CỤ THẾ và CHI TIẾT (ví dụ: "áo sơ mi tay ngắn cổ bẻ" thay vì chỉ "áo")
-3. search_keywords phải đa dạng: bao gồm từ khóa chung, từ khóa cụ thể, từ đồng nghĩa
-4. features: liệt kê các đặc điểm nổi bật như cổ áo, tay áo, đường may, chi tiết trang trí
+2. product_type phải CỤ THẾ và CHI TIẾT
+3. search_keywords phải đa dạng
+4. features: liệt kê các đặc điểm nổi bật
 5. Trả về CHỈ JSON, không có text nào khác
 6. Dùng tiếng Việt cho tất cả các trường"""
         
-        # Gọi OpenAI API với ảnh
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[
@@ -391,20 +447,15 @@ QUY TẮC QUAN TRỌNG:
                 }
             ],
             max_tokens=800,
-            temperature=0.1,  # Giảm temperature để kết quả ổn định hơn
+            temperature=0.1,
             response_format={"type": "json_object"}
         )
         
         result_text = response.choices[0].message.content.strip()
         print(f"📊 Kết quả phân tích ảnh chi tiết: {result_text[:300]}...")
         
-        # Parse JSON result
         analysis = json.loads(result_text)
-        
-        # Chuẩn hóa dữ liệu: chuyển tất cả về chữ thường, không dấu để dễ so sánh
         analysis["search_text"] = create_search_text_from_analysis(analysis)
-        
-        # Thêm timestamp và image_url vào kết quả
         analysis["timestamp"] = time.time()
         analysis["image_url"] = image_url
         
@@ -421,7 +472,6 @@ def create_search_text_from_analysis(analysis: dict) -> str:
     
     search_parts = []
     
-    # Thêm các trường quan trọng
     if analysis.get("product_type"):
         search_parts.append(analysis["product_type"])
     
@@ -455,11 +505,9 @@ def create_search_text_from_analysis(analysis: dict) -> str:
     if analysis.get("search_keywords"):
         search_parts.extend(analysis["search_keywords"])
     
-    # Tạo chuỗi tìm kiếm, chuẩn hóa về chữ thường, không dấu
     search_text = " ".join(search_parts)
     search_text_normalized = normalize_vietnamese(search_text.lower())
     
-    # Loại bỏ các từ dừng phổ biến (có thể mở rộng)
     stop_words = ["và", "hoặc", "của", "cho", "từ", "đến", "với", "có", "là", "ở", "trong", "trên", "dưới"]
     for word in stop_words:
         search_text_normalized = search_text_normalized.replace(f" {word} ", " ")
@@ -474,23 +522,18 @@ def create_product_search_text(product: dict) -> str:
     """Tạo chuỗi tìm kiếm cho sản phẩm từ dữ liệu"""
     search_parts = []
     
-    # Tên sản phẩm (quan trọng nhất)
     if product.get('Ten'):
         search_parts.append(product['Ten'])
     
-    # Mô tả sản phẩm
     if product.get('MoTa'):
         search_parts.append(product['MoTa'])
     
-    # Màu sắc
     if product.get("màu (Thuộc tính)"):
         search_parts.append(product["màu (Thuộc tính)"])
     
-    # Size
     if product.get("size (Thuộc tính)"):
         search_parts.append(product["size (Thuộc tính)"])
     
-    # Từ các variants
     variants = product.get("variants", [])
     for variant in variants:
         if variant.get("mau"):
@@ -498,7 +541,6 @@ def create_product_search_text(product: dict) -> str:
         if variant.get("size"):
             search_parts.append(variant["size"])
     
-    # Tạo chuỗi, chuẩn hóa về chữ thường, không dấu
     search_text = " ".join(search_parts)
     search_text_normalized = normalize_vietnamese(search_text.lower())
     
@@ -510,15 +552,9 @@ def calculate_text_similarity(text1: str, text2: str) -> float:
         return 0.0
     
     try:
-        # Tạo vectorizer
         vectorizer = TfidfVectorizer()
-        
-        # Tạo ma trận TF-IDF
         tfidf_matrix = vectorizer.fit_transform([text1, text2])
-        
-        # Tính cosine similarity
         similarity = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:2])[0][0]
-        
         return float(similarity)
     except Exception as e:
         print(f"❌ Lỗi tính similarity: {str(e)}")
@@ -526,13 +562,12 @@ def calculate_text_similarity(text1: str, text2: str) -> float:
 
 def find_products_by_image_analysis_improved(uid: str, analysis: dict, limit: int = 5) -> List[Tuple[str, float]]:
     """
-    Tìm sản phẩm phù hợp dựa trên phân tích ảnh - PHIÊN BẢN CẢI TIẾN
+    Tìm sản phẩm phù hợp dựa trên phân tích ảnh
     Trả về danh sách (mã sản phẩm, điểm số) sắp xếp theo điểm giảm dần
     """
     if not analysis or not PRODUCTS:
         return []
     
-    # Lấy chuỗi tìm kiếm từ phân tích ảnh
     analysis_search_text = analysis.get("search_text", "")
     if not analysis_search_text:
         print("❌ Không có search text từ phân tích ảnh")
@@ -543,19 +578,14 @@ def find_products_by_image_analysis_improved(uid: str, analysis: dict, limit: in
     scored_products = []
     
     for ms, product in PRODUCTS.items():
-        # Tạo chuỗi tìm kiếm cho sản phẩm
         product_search_text = create_product_search_text(product)
         
         if not product_search_text:
             continue
         
-        # Tính điểm tương đồng chính bằng TF-IDF
         similarity_score = calculate_text_similarity(analysis_search_text, product_search_text)
-        
-        # Thêm điểm bonus cho các trường khớp cụ thể
         bonus_score = 0
         
-        # Kiểm tra màu sắc
         main_color = analysis.get("main_color", "").lower()
         if main_color:
             main_color_normalized = normalize_vietnamese(main_color)
@@ -565,14 +595,12 @@ def find_products_by_image_analysis_improved(uid: str, analysis: dict, limit: in
             if main_color_normalized in product_colors_normalized:
                 bonus_score += 0.3
         
-        # Kiểm tra loại sản phẩm
         product_type = analysis.get("product_type", "").lower()
         if product_type:
             product_type_normalized = normalize_vietnamese(product_type)
             product_name = product.get('Ten', '').lower()
             product_name_normalized = normalize_vietnamese(product_name)
             
-            # Kiểm tra từng từ trong product_type có trong tên sản phẩm không
             type_words = product_type_normalized.split()
             name_words = set(product_name_normalized.split())
             
@@ -580,7 +608,6 @@ def find_products_by_image_analysis_improved(uid: str, analysis: dict, limit: in
             if matching_words > 0:
                 bonus_score += (matching_words / len(type_words)) * 0.4
         
-        # Kiểm tra features/đặc điểm
         features = analysis.get("features", [])
         if features:
             for feature in features:
@@ -588,11 +615,9 @@ def find_products_by_image_analysis_improved(uid: str, analysis: dict, limit: in
                 if feature_normalized in product_search_text:
                     bonus_score += 0.1
         
-        # Tổng điểm
         total_score = similarity_score + bonus_score
         
-        # Chỉ thêm sản phẩm có điểm đủ cao
-        if total_score > 0.1:  # Ngưỡng tối thiểu
+        if total_score > 0.1:
             scored_products.append({
                 "ms": ms,
                 "score": total_score,
@@ -601,13 +626,9 @@ def find_products_by_image_analysis_improved(uid: str, analysis: dict, limit: in
                 "product": product
             })
     
-    # Sắp xếp theo điểm số giảm dần
     scored_products.sort(key=lambda x: x["score"], reverse=True)
-    
-    # Lấy top sản phẩm
     top_products = [(item["ms"], item["score"]) for item in scored_products[:limit]]
     
-    # Log chi tiết để debug
     if scored_products:
         print(f"📊 Tìm thấy {len(scored_products)} sản phẩm có điểm > 0.1")
         for i, item in enumerate(scored_products[:3]):
@@ -657,7 +678,6 @@ def call_facebook_send_api(payload: dict, retry_count=2):
     
     return {}
 
-
 def send_message(recipient_id: str, text: str):
     if not text:
         return
@@ -670,7 +690,6 @@ def send_message(recipient_id: str, text: str):
         "message": {"text": text},
     }
     return call_facebook_send_api(payload)
-
 
 def send_image(recipient_id: str, image_url: str):
     if not image_url:
@@ -685,7 +704,6 @@ def send_image(recipient_id: str, image_url: str):
         },
     }
     return call_facebook_send_api(payload)
-
 
 def send_carousel_template(recipient_id: str, elements: list):
     if not elements:
@@ -704,7 +722,6 @@ def send_carousel_template(recipient_id: str, elements: list):
     }
     return call_facebook_send_api(payload)
 
-
 def send_quick_replies(recipient_id: str, text: str, quick_replies: list):
     payload = {
         "recipient": {"id": recipient_id},
@@ -714,7 +731,6 @@ def send_quick_replies(recipient_id: str, text: str, quick_replies: list):
         },
     }
     return call_facebook_send_api(payload)
-
 
 # ============================================
 # HELPER: PRODUCTS
@@ -739,12 +755,10 @@ def parse_image_urls(raw: str):
             result.append(u)
     return result
 
-
 def should_use_as_first_image(url: str):
     if not url:
         return False
     return True
-
 
 def short_description(text: str, limit: int = 220) -> str:
     """Rút gọn mô tả sản phẩm cho dễ đọc trong chat."""
@@ -754,7 +768,6 @@ def short_description(text: str, limit: int = 220) -> str:
     if len(clean) <= limit:
         return clean
     return clean[:limit].rstrip() + "..."
-
 
 def extract_price_int(price_str: str):
     """Trả về giá dạng int từ chuỗi '849.000đ', '849,000'... Nếu không đọc được trả về None."""
@@ -768,7 +781,6 @@ def extract_price_int(price_str: str):
         return int(cleaned)
     except Exception:
         return None
-
 
 def load_products(force=False):
     """
@@ -873,14 +885,11 @@ def load_products(force=False):
             p["size (Thuộc tính)"] = ", ".join(sizes) if sizes else p.get("size (Thuộc tính)", "")
             p["ShortDesc"] = short_description(p.get("MoTa", ""))
             
-            # Tạo embedding text cho sản phẩm
             product_text = create_product_search_text(p)
             product_text_embeddings[ms] = product_text
             
-            # Xây dựng mapping từ số (không có số 0 đầu) đến mã đầy đủ
             if ms.startswith("MS"):
-                num_part = ms[2:]  # Bỏ "MS"
-                # Loại bỏ số 0 ở đầu
+                num_part = ms[2:]
                 num_without_leading_zeros = num_part.lstrip('0')
                 if num_without_leading_zeros:
                     products_by_number[num_without_leading_zeros] = ms
@@ -895,7 +904,6 @@ def load_products(force=False):
     except Exception as e:
         print("❌ load_products ERROR:", e)
 
-
 # ============================================
 # GPT INTEGRATION - XỬ LÝ MỌI CÂU HỎI
 # ============================================
@@ -908,7 +916,6 @@ def build_comprehensive_product_context(ms: str) -> str:
     product = PRODUCTS[ms]
     mota = product.get("MoTa", "")
     
-    # Trích xuất thông tin chính sách từ mô tả
     shipping_info = ""
     warranty_info = ""
     return_info = ""
@@ -926,7 +933,6 @@ def build_comprehensive_product_context(ms: str) -> str:
         elif any(keyword in line_lower for keyword in ['thanh toán', 'payment', 'cod', 'chuyển khoản']):
             payment_info += line + " "
     
-    # Thu thập biến thể
     variants_text = ""
     variants = product.get("variants", [])
     if variants:
@@ -966,73 +972,55 @@ def build_comprehensive_product_context(ms: str) -> str:
     
     return context
 
-
 def detect_ms_from_text(text: str):
     """Tìm mã sản phẩm trong tin nhắn, hỗ trợ nhiều định dạng"""
-    # **QUAN TRỌNG**: Bỏ qua mã sản phẩm có dấu # (#MS123456) vì đó là tin nhắn từ Fchat
-    # Chỉ tìm mã sản phẩm KHÔNG có dấu #
+    # GIỮ NGUYÊN LOGIC GỐC: Hỗ trợ tất cả định dạng
     
-    # Ưu tiên tìm theo pattern cũ: [MS\d{6}] hoặc MS\d{6}
+    # 1. Tìm [MS123456]
     ms_list = re.findall(r"\[MS(\d{6})\]", text.upper())
     if ms_list:
         ms = "MS" + ms_list[0]
         if ms in PRODUCTS:
             return ms
     
-    # Tìm pattern: MS\d{6} nhưng KHÔNG có # trước đó
-    # Sử dụng negative lookbehind để đảm bảo không có # trước MS
-    ms_list = re.findall(r"(?<!#)MS(\d{6})", text.upper())
+    # 2. Tìm MS123456 (không có dấu [])
+    ms_list = re.findall(r"MS(\d{6})", text.upper())
     if ms_list:
         ms = "MS" + ms_list[0]
         if ms in PRODUCTS:
             return ms
     
-    # THÊM: Tìm pattern với dấu #MS\d{6} nhưng sẽ BỎ QUA ở trên rồi
-    # ms_list = re.findall(r"#MS(\d{6})", text.upper())
-    # if ms_list:
-    #     ms = "MS" + ms_list[0]
-    #     if ms in PRODUCTS:
-    #         return ms
+    # 3. Tìm #MS123456 (thêm hỗ trợ cho Fchat)
+    ms_list = re.findall(r"#MS(\d{6})", text.upper())
+    if ms_list:
+        ms = "MS" + ms_list[0]
+        if ms in PRODUCTS:
+            return ms
     
-    # Chuẩn hóa text: chuyển về chữ thường, bỏ dấu tiếng Việt
-    # Loại bỏ ký tự # để tránh nhầm lẫn
+    # 4. Tìm số đơn thuần
     text_normalized = normalize_vietnamese(text.lower())
-    text_normalized = text_normalized.replace('#', ' ')  # Thay # bằng khoảng trắng
-    
-    # Tìm số trong chuỗi (hỗ trợ nhiều định dạng số)
     numbers = re.findall(r'\d{1,6}', text_normalized)
     
     if numbers:
-        # Lấy số đầu tiên tìm được
         num = numbers[0]
-        
-        # Loại bỏ số 0 ở đầu
         num_stripped = num.lstrip('0')
-        if not num_stripped:  # Nếu tất cả đều là 0
+        if not num_stripped:
             num_stripped = "0"
         
-        # Tìm trong PRODUCTS_BY_NUMBER
         if num_stripped in PRODUCTS_BY_NUMBER:
             return PRODUCTS_BY_NUMBER[num_stripped]
         
-        # Nếu không tìm thấy, thử các định dạng khác
-        # Tạo các candidate có thể
         candidates = []
-        
-        # MS + số (không có số 0 đầu)
         candidates.append("MS" + num_stripped)
-        
-        # MS + số với độ dài 2-6 ký tự (thêm số 0 đầu)
         for length in range(2, 7):
             padded = num_stripped.zfill(length)
             candidates.append("MS" + padded)
         
-        # Thử từng candidate
         for candidate in candidates:
             if candidate in PRODUCTS:
                 return candidate
     
-    # Nếu không tìm thấy số trực tiếp, tìm pattern kết hợp từ khóa và số
+    # 5. Tìm pattern kết hợp
     patterns = [
         r'(?:ms|ma|maso|ma so|san pham|tu van|xem)\s*(\d{1,6})',
         r'(\d{1,6})\s*(?:ms|ma|maso|ma so|san pham)?'
@@ -1049,7 +1037,6 @@ def detect_ms_from_text(text: str):
             if num_stripped in PRODUCTS_BY_NUMBER:
                 return PRODUCTS_BY_NUMBER[num_stripped]
             
-            # Thử các định dạng khác
             candidates = ["MS" + num_stripped]
             for length in range(2, 7):
                 padded = num_stripped.zfill(length)
@@ -1061,14 +1048,12 @@ def detect_ms_from_text(text: str):
     
     return None
 
-
 def generate_gpt_response(uid: str, user_message: str, ms: str = None):
     """Gọi GPT để trả lời câu hỏi của khách"""
     if not client or not OPENAI_API_KEY:
         return "Hiện tại hệ thống trợ lý AI đang bảo trì, vui lòng thử lại sau ạ."
     
     try:
-        # Xây dựng system prompt
         if ms and ms in PRODUCTS:
             product_context = build_comprehensive_product_context(ms)
             system_prompt = f"""Bạn là CHUYÊN GIA TƯ VẤN BÁN HÀNG của {FANPAGE_NAME}.
@@ -1104,25 +1089,19 @@ QUY TẮC:
 
 Hãy bắt đầu bằng câu chào và hỏi khách về sản phẩm họ quan tâm."""
         
-        # Lấy conversation history
         ctx = USER_CONTEXT[uid]
         conversation = ctx.get("conversation_history", [])
         
-        # Giới hạn history
         if len(conversation) > 10:
             conversation = conversation[-10:]
         
-        # Tạo messages
         messages = [{"role": "system", "content": system_prompt}]
         
-        # Thêm conversation history
         for msg in conversation:
             messages.append(msg)
         
-        # Thêm message hiện tại
         messages.append({"role": "user", "content": user_message})
         
-        # Gọi OpenAI API
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=messages,
@@ -1133,7 +1112,6 @@ Hãy bắt đầu bằng câu chào và hỏi khách về sản phẩm họ quan
         
         reply = response.choices[0].message.content.strip()
         
-        # Lưu vào conversation history
         conversation.append({"role": "user", "content": user_message})
         conversation.append({"role": "assistant", "content": reply})
         ctx["conversation_history"] = conversation
@@ -1143,7 +1121,6 @@ Hãy bắt đầu bằng câu chào và hỏi khách về sản phẩm họ quan
     except Exception as e:
         print(f"GPT Error: {e}")
         return "Dạ em đang gặp chút trục trặc kỹ thuật. Anh/chị vui lòng thử lại sau ít phút ạ."
-
 
 # ============================================
 # CẢI THIỆN NGỮ CẢNH
@@ -1166,7 +1143,6 @@ def update_product_context(uid: str, ms: str):
     if len(ctx["product_history"]) > 5:
         ctx["product_history"] = ctx["product_history"][:5]
 
-
 def get_relevant_product_for_question(uid: str, text: str) -> str | None:
     """Tìm sản phẩm phù hợp nhất cho câu hỏi dựa trên ngữ cảnh"""
     ctx = USER_CONTEXT[uid]
@@ -1185,7 +1161,6 @@ def get_relevant_product_for_question(uid: str, text: str) -> str | None:
             return ms
     
     return None
-
 
 # ============================================
 # SEND PRODUCT INFO (GIỮ NGUYÊN)
@@ -1324,49 +1299,42 @@ def send_product_info_debounced(uid: str, ms: str):
     finally:
         ctx["processing_lock"] = False
 
-
 # ============================================
 # HANDLE IMAGE - VERSION CẢI TIẾN ĐỘ CHÍNH XÁC
 # ============================================
 
 def handle_image(uid: str, image_url: str):
-    """Xử lý ảnh sản phẩm - gửi carousel với 5 sản phẩm phù hợp nhất (ĐỘ CHÍNH XÁC CAO)"""
+    """Xử lý ảnh sản phẩm - gửi carousel với 5 sản phẩm phù hợp nhất"""
     if not client or not OPENAI_API_KEY:
         send_message(uid, "📷 Em đã nhận được ảnh! Hiện AI đang bảo trì, anh/chị vui lòng gửi mã sản phẩm để em tư vấn ạ.")
         return
     
     ctx = USER_CONTEXT[uid]
     
-    # Kiểm tra debounce: tránh xử lý ảnh quá nhanh
     now = time.time()
     last_image_time = ctx.get("last_image_time", 0)
-    if now - last_image_time < 3:  # 3 giây debounce
+    if now - last_image_time < 3:
         print(f"[IMAGE DEBOUNCE] Bỏ qua ảnh mới, chưa đủ thời gian")
         return
     
     ctx["last_image_time"] = now
     
-    # Gửi thông báo đang xử lý
     send_message(uid, "🖼️ Em đang phân tích ảnh sản phẩm của anh/chị...")
     
     try:
-        # 1. Phân tích ảnh bằng GPT-4o Vision (phiên bản cải tiến)
         analysis = analyze_image_with_gpt4o(image_url)
         
         if not analysis:
             send_message(uid, "❌ Em chưa phân tích được ảnh này. Anh/chị có thể mô tả sản phẩm hoặc gửi mã sản phẩm được không ạ?")
             return
         
-        # 2. Lưu kết quả phân tích
         ctx["last_image_analysis"] = analysis
         ctx["last_image_url"] = image_url
         ctx["referral_source"] = "image_upload_analyzed"
         
-        # 3. Tìm sản phẩm phù hợp (phiên bản cải tiến độ chính xác cao)
         matched_products = find_products_by_image_analysis_improved(uid, analysis, limit=5)
         
         if matched_products and len(matched_products) > 0:
-            # 4. Gửi thông báo kết quả phân tích
             product_type = analysis.get("product_type", "sản phẩm")
             main_color = analysis.get("main_color", "")
             confidence = analysis.get("confidence_score", 0)
@@ -1388,7 +1356,6 @@ def handle_image(uid: str, image_url: str):
             else:
                 send_message(uid, f"🔍 Em tìm thấy {len(matched_products)} sản phẩm phù hợp với ảnh của anh/chị:")
             
-            # 5. Tạo và gửi carousel với 5 sản phẩm
             carousel_elements = []
             
             for i, (ms, score) in enumerate(matched_products[:5], 1):
@@ -1405,7 +1372,6 @@ def handle_image(uid: str, image_url: str):
                     gia_int = extract_price_int(gia_raw)
                     price_display = f"{gia_int:,.0f}đ" if gia_int else "Liên hệ"
                     
-                    # Thêm độ phù hợp vào subtitle
                     match_percentage = min(int(score * 100), 99)
                     subtitle = f"🟢 Phù hợp: {match_percentage}% | 💰 {price_display}"
                     if short_desc:
@@ -1435,7 +1401,6 @@ def handle_image(uid: str, image_url: str):
                 send_message(uid, "📱 Anh/chị vuốt sang trái/phải để xem thêm sản phẩm nhé!")
                 send_message(uid, "💬 Bấm 'Xem chi tiết' để xem thông tin và chính sách cụ thể của từng sản phẩm.")
                 
-                # Cập nhật context với sản phẩm đầu tiên
                 first_ms = matched_products[0][0]
                 ctx["last_ms"] = first_ms
                 update_product_context(uid, first_ms)
@@ -1444,7 +1409,6 @@ def handle_image(uid: str, image_url: str):
                 send_fallback_suggestions(uid)
             
         else:
-            # Không tìm thấy sản phẩm phù hợp
             product_type = analysis.get("product_type", "sản phẩm")
             main_color = analysis.get("main_color", "")
             
@@ -1468,7 +1432,6 @@ def send_fallback_suggestions(uid: str):
     send_message(uid, "3. Mô tả chi tiết hơn về sản phẩm này")
     send_message(uid, "4. Hoặc gửi mã sản phẩm nếu anh/chị đã biết mã")
 
-
 # ============================================
 # HANDLE ORDER FORM STATE
 # ============================================
@@ -1477,7 +1440,6 @@ def reset_order_state(uid: str):
     ctx = USER_CONTEXT[uid]
     ctx["order_state"] = None
     ctx["order_data"] = {}
-
 
 def handle_order_form_step(uid: str, text: str):
     """
@@ -1528,7 +1490,6 @@ def handle_order_form_step(uid: str, text: str):
 
     return False
 
-
 # ============================================
 # HANDLE TEXT - GPT XỬ LÝ MỌI CÂU HỎI
 # ============================================
@@ -1547,11 +1508,9 @@ def handle_text(uid: str, text: str):
     ctx["processing_lock"] = True
 
     try:
-        # THÊM: Kiểm tra debounce dựa trên thời gian và nội dung
         now = time.time()
         last_msg_time = ctx.get("last_msg_time", 0)
         
-        # Nếu tin nhắn mới đến quá nhanh (< 1 giây) và nội dung giống nhau, có thể bỏ qua
         if now - last_msg_time < 1:
             last_text = ctx.get("last_processed_text", "")
             if text.strip().lower() == last_text.lower():
@@ -1565,14 +1524,12 @@ def handle_text(uid: str, text: str):
         load_products()
         ctx["postback_count"] = 0
 
-        # Xử lý order form step (nếu đang trong flow đặt hàng)
         if handle_order_form_step(uid, text):
             ctx["processing_lock"] = False
             return
 
         lower = text.lower()
         
-        # KIỂM TRA TỪ KHÓA CAROUSEL
         if any(kw in lower for kw in CAROUSEL_KEYWORDS):
             if PRODUCTS:
                 send_message(uid, "Dạ, em đang lấy danh sách sản phẩm cho anh/chị...")
@@ -1618,69 +1575,51 @@ def handle_text(uid: str, text: str):
                 ctx["processing_lock"] = False
                 return
 
-        # Tìm mã sản phẩm trong text
         detected_ms = detect_ms_from_text(text)
         
-        # Xác định mã sản phẩm sẽ dùng cho GPT
         current_ms = None
-        
-        # KIỂM TRA NẾU CHỈ GỬI MÃ SẢN PHẨM (KHÔNG CÓ NỘI DUNG KHÁC)
         is_only_product_code = False
+        
         if detected_ms and detected_ms in PRODUCTS:
-            # Kiểm tra xem tin nhắn có chỉ chứa mã sản phẩm không
             temp_text = normalize_vietnamese(text.lower())
             
-            # Loại bỏ các từ thông dụng chỉ mã sản phẩm
             keywords = ['ms', 'ma', 'maso', 'ma so', 'san pham', 'tu van', 'xem', 'so']
             
-            # Loại bỏ mã sản phẩm đầy đủ
             temp_text = re.sub(re.escape(detected_ms.lower()), '', temp_text)
             
-            # Loại bỏ các keyword
             for kw in keywords:
                 temp_text = re.sub(r'\b' + re.escape(kw) + r'\b', '', temp_text)
             
-            # Loại bỏ số trong mã
             ms_number = re.search(r'MS(\d+)', detected_ms)
             if ms_number:
                 num = ms_number.group(1)
-                # Loại bỏ số 0 ở đầu
                 num_stripped = num.lstrip('0')
                 if num_stripped:
                     temp_text = re.sub(r'\b' + re.escape(num_stripped) + r'\b', '', temp_text)
-                    # Cũng thử loại bỏ số có số 0 đầu
                     for i in range(1, 7):
                         padded = num_stripped.zfill(i)
                         temp_text = re.sub(r'\b' + re.escape(padded) + r'\b', '', temp_text)
             
-            # Loại bỏ khoảng trắng và ký tự đặc biệt
             temp_text = re.sub(r'[^\w]', '', temp_text)
             
-            # Nếu sau khi loại bỏ tất cả, không còn ký tự nào thì là only product code
             is_only_product_code = len(temp_text.strip()) == 0
         
         if detected_ms and detected_ms in PRODUCTS:
-            # Có mã sản phẩm trong tin nhắn
             current_ms = detected_ms
             ctx["last_ms"] = detected_ms
             update_product_context(uid, detected_ms)
             
-            # NẾU CHỈ GỬI MÃ SẢN PHẨM: gửi thông tin chi tiết với hình ảnh
             if is_only_product_code:
                 send_product_info_debounced(uid, detected_ms)
                 ctx["processing_lock"] = False
                 return
-            # NẾU CÓ KÈM CÂU HỎI KHÁC: tiếp tục xử lý bằng GPT
         else:
-            # Dùng mã sản phẩm từ context
             current_ms = get_relevant_product_for_question(uid, text)
         
-        # TẤT CẢ CÂU HỎI CÒN LẠI do GPT xử lý
         print(f"[GPT CALL] User: {uid}, MS: {current_ms}, Text: {text}")
         gpt_response = generate_gpt_response(uid, text, current_ms)
         send_message(uid, gpt_response)
         
-        # Kiểm tra từ khóa đặt hàng để gửi link
         if current_ms and current_ms in PRODUCTS and any(kw in lower for kw in ORDER_KEYWORDS):
             domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
             order_link = f"{domain}/order-form?ms={current_ms}&uid={uid}"
@@ -1696,19 +1635,6 @@ def handle_text(uid: str, text: str):
         if ctx.get("processing_lock"):
             ctx["processing_lock"] = False
 
-
-# ============================================
-# HELPER: KIỂM TRA MÃ SẢN PHẨM CÓ DẤU #
-# ============================================
-
-def contains_hashtag_ms(text: str) -> bool:
-    """Kiểm tra xem text có chứa mã sản phẩm dạng #MS123456 không"""
-    if not text:
-        return False
-    # Tìm pattern #MS + 6 số
-    return bool(re.search(r'#MS\d{6}', text.upper()))
-
-
 # ============================================
 # WEBHOOK HANDLER - ĐÃ SỬA LỖI GỬI TIN NHẮN LẶP
 # ============================================
@@ -1716,7 +1642,6 @@ def contains_hashtag_ms(text: str) -> bool:
 @app.route("/", methods=["GET"])
 def home():
     return "OK", 200
-
 
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
@@ -1746,7 +1671,7 @@ def webhook():
                 continue
 
             # ============================================
-            # XỬ LÝ ECHO MESSAGE TỪ FCHAT - ĐÃ SỬA LỖI LẶP
+            # XỬ LÝ ECHO MESSAGE TỪ FCHAT - GIỮ NGUYÊN LOGIC TRÍCH XUẤT MÃ
             # ============================================
             if m.get("message", {}).get("is_echo"):
                 # Lấy recipient_id (người nhận tin nhắn echo) - chính là khách hàng
@@ -1754,103 +1679,74 @@ def webhook():
                 if not recipient_id:
                     continue
                 
-                # Lấy thông tin chi tiết về echo message
+                # Lấy thông tin echo message
                 msg = m["message"]
                 msg_mid = msg.get("mid")
                 echo_text = msg.get("text", "")
                 attachments = msg.get("attachments", [])
+                app_id = msg.get("app_id", "")
                 
-                # **QUY TẮC QUAN TRỌNG**: 
-                # 1. Nếu echo message CÓ chứa mã sản phẩm dạng #MS123456 → BỎ QUA (là tin nhắn từ Fchat)
-                # 2. Nếu echo message KHÔNG có #MS123456 → XỬ LÝ (là bình luận người dùng)
-                
-                # KIỂM TRA 1: Echo message có mã sản phẩm dạng #MS123456 không?
-                if contains_hashtag_ms(echo_text):
-                    print(f"[ECHO FCHAT MS] Bỏ qua echo message chứa mã sản phẩm #MS: {echo_text[:100]}...")
+                # **QUAN TRỌNG**: KIỂM TRA CÓ PHẢI ECHO TỪ BOT KHÔNG
+                # Nếu là echo từ bot → BỎ QUA để tránh lặp
+                if is_bot_generated_echo(echo_text, app_id, attachments):
+                    print(f"[ECHO BOT] Bỏ qua echo message từ bot: {echo_text[:50]}...")
                     continue
                 
-                # KIỂM TRA 2: Echo message có attachment không? (hình ảnh bot đã gửi)
-                if attachments:
-                    print(f"[ECHO ATTACHMENT] Bỏ qua echo message có attachment")
-                    continue
-                
-                # KIỂM TRA 3: Echo message quá ngắn?
-                if not echo_text or len(echo_text.strip()) < 5:
-                    print(f"[ECHO EMPTY] Bỏ qua echo message trống hoặc quá ngắn")
-                    continue
-                
-                # KIỂM TRA 4: Debounce và duplicate
+                # **GIỮ NGUYÊN**: Kiểm tra duplicate echo message
                 if msg_mid:
                     ctx = USER_CONTEXT[recipient_id]
                     if "processed_echo_mids" not in ctx:
                         ctx["processed_echo_mids"] = set()
                     
-                    # DEBOUNCE: Chỉ xử lý mỗi message ID một lần
                     if msg_mid in ctx["processed_echo_mids"]:
                         print(f"[ECHO DUPLICATE] Bỏ qua echo message đã xử lý: {msg_mid}")
                         continue
                     
-                    # Kiểm tra thời gian giữa các lần xử lý
                     now = time.time()
                     last_echo_time = ctx.get("last_echo_processed_time", 0)
                     
-                    # DEBOUNCE: Chỉ xử lý mỗi 3 giây một lần
-                    if now - last_echo_time < 3:
-                        print(f"[ECHO DEBOUNCE] Bỏ qua echo message, chưa đủ 3s: {msg_mid}")
+                    if now - last_echo_time < 2:
+                        print(f"[ECHO DEBOUNCE] Bỏ qua echo message, chưa đủ 2s: {msg_mid}")
                         continue
                     
                     ctx["last_echo_processed_time"] = now
                     ctx["processed_echo_mids"].add(msg_mid)
                     
-                    # Giới hạn bộ nhớ
                     if len(ctx["processed_echo_mids"]) > 20:
                         ctx["processed_echo_mids"] = set(list(ctx["processed_echo_mids"])[-20:])
                 
-                # **ĐÂY LÀ ECHO TỪ BÌNH LUẬN NGƯỜI DÙNG THẬT SỰ**
-                print(f"[ECHO USER COMMENT] Xử lý echo từ bình luận người dùng: {echo_text[:100]}...")
+                # **GIỮ NGUYÊN LOGIC CŨ**: Xử lý echo từ bình luận người dùng
+                print(f"[ECHO USER] Đang xử lý echo từ bình luận người dùng")
                 
-                # QUAN TRỌNG: Load sản phẩm
+                # QUAN TRỌNG: Load sản phẩm trước khi tìm mã
                 load_products()
                 
-                # Tìm mã sản phẩm trong tin nhắn echo (KHÔNG có dấu #)
+                # **GIỮ NGUYÊN**: Tìm mã sản phẩm trong tin nhắn echo (hỗ trợ tất cả định dạng)
                 detected_ms = detect_ms_from_text(echo_text)
                 
                 if detected_ms and detected_ms in PRODUCTS:
                     print(f"[ECHO FCHAT] Phát hiện mã sản phẩm: {detected_ms} cho user: {recipient_id}")
                     
-                    # KIỂM TRA LOCK
+                    # KIỂM TRA LOCK để tránh xử lý song song
                     ctx = USER_CONTEXT[recipient_id]
                     if ctx.get("processing_lock"):
-                        print(f"[ECHO LOCKED] User {recipient_id} đang được xử lý, bỏ qua")
+                        print(f"[ECHO LOCKED] User {recipient_id} đang được xử lý, bỏ qua echo")
                         continue
                     
                     ctx["processing_lock"] = True
                     
                     try:
-                        # Kiểm tra xem vừa gửi sản phẩm này chưa
-                        last_ms_sent = ctx.get("product_info_sent_ms")
-                        last_sent_time = ctx.get("last_product_info_time", 0)
-                        now = time.time()
-                        
-                        if last_ms_sent == detected_ms and (now - last_sent_time) < 10:
-                            print(f"[ECHO RECENT] Vừa gửi sản phẩm {detected_ms} cách đây {int(now - last_sent_time)}s, bỏ qua")
-                            continue
-                        
-                        # Cập nhật context
+                        # **GIỮ NGUYÊN**: Cập nhật context cho người dùng
                         ctx["last_ms"] = detected_ms
                         ctx["referral_source"] = "fchat_echo"
                         update_product_context(recipient_id, detected_ms)
                         
-                        # Gửi thông báo và sản phẩm
-                        welcome_msg = f"""Chào anh/chị! 👋 
-Em là trợ lý AI của {FANPAGE_NAME}.
-
-Em thấy anh/chị quan tâm đến sản phẩm mã [{detected_ms}] từ bình luận.
-Em sẽ gửi thông tin chi tiết sản phẩm ngay ạ!"""
-                        send_message(recipient_id, welcome_msg)
+                        print(f"[CONTEXT UPDATED] Đã ghi nhận mã {detected_ms} vào ngữ cảnh cho user {recipient_id}")
                         
-                        # Gửi thông tin sản phẩm
-                        send_product_info_debounced(recipient_id, detected_ms)
+                        # **THAY ĐỔI QUAN TRỌNG**: CHỈ GHI NHẬN NGỮ CẢNH, KHÔNG GỬI TIN NHẮN
+                        # Để tránh spam, chỉ ghi nhận mã sản phẩm vào context
+                        # Khi khách hỏi tiếp, bot sẽ dùng mã này để trả lời
+                        
                     finally:
                         ctx["processing_lock"] = False
                 else:
@@ -1875,18 +1771,15 @@ Em sẽ gửi thông tin chi tiết sản phẩm ngay ạ!"""
                 
                 print(f"[REFERRAL] User {sender_id} từ {ctx['referral_source']} với payload: {referral_payload}")
                 
-                # Tự động xử lý nếu referral payload chứa mã sản phẩm
                 if referral_payload:
                     detected_ms = detect_ms_from_text(referral_payload)
                     
                     if detected_ms and detected_ms in PRODUCTS:
                         print(f"[REFERRAL AUTO] Nhận diện mã sản phẩm từ referral: {detected_ms}")
                         
-                        # Cập nhật context
                         ctx["last_ms"] = detected_ms
                         update_product_context(sender_id, detected_ms)
                         
-                        # Gửi thông báo và sản phẩm
                         welcome_msg = f"""Chào anh/chị! 👋 
 Em là trợ lý AI của {FANPAGE_NAME}.
 
@@ -1896,7 +1789,6 @@ Em sẽ gửi thông tin chi tiết sản phẩm ngay ạ!"""
                         send_product_info_debounced(sender_id, detected_ms)
                         continue
                     else:
-                        # Nếu không tìm thấy mã sản phẩm, gửi message chào mừng thông thường
                         welcome_msg = f"""Chào anh/chị! 👋 
 Em là trợ lý AI của {FANPAGE_NAME}.
 
@@ -1919,12 +1811,10 @@ Anh/chị quan tâm sản phẩm nào ạ?"""
                     postback_id = m["postback"].get("mid")
                     now = time.time()
                     
-                    # Kiểm tra duplicate postback
                     if postback_id and postback_id in ctx.get("processed_postbacks", set()):
                         print(f"[POSTBACK DUPLICATE] Bỏ qua postback trùng: {postback_id}")
                         continue
                     
-                    # DEBOUNCE cho postback
                     last_postback_time = ctx.get("last_postback_time", 0)
                     if now - last_postback_time < 1:
                         print(f"[POSTBACK SPAM] User {sender_id} gửi postback quá nhanh")
@@ -1939,7 +1829,6 @@ Anh/chị quan tâm sản phẩm nào ạ?"""
                     
                     ctx["last_postback_time"] = now
                     
-                    # Xử lý postback
                     if payload == "GET_STARTED":
                         ctx["referral_source"] = "get_started"
                         welcome_msg = f"""Chào anh/chị! 👋 
@@ -1954,14 +1843,13 @@ Anh/chị quan tâm sản phẩm nào ạ?"""
                         send_message(sender_id, welcome_msg)
                     
                     elif payload.startswith("ADVICE_"):
-                        # KIỂM TRA LOCK để tránh xử lý song song
                         if ctx.get("processing_lock"):
                             print(f"[POSTBACK LOCKED] User {sender_id} đang được xử lý, bỏ qua ADVICE")
                             continue
                         
                         ctx["processing_lock"] = True
                         try:
-                            load_products()  # Đảm bảo đã load sản phẩm
+                            load_products()
                             ms = payload.replace("ADVICE_", "")
                             if ms in PRODUCTS:
                                 ctx["last_ms"] = ms
@@ -1973,14 +1861,13 @@ Anh/chị quan tâm sản phẩm nào ạ?"""
                             ctx["processing_lock"] = False
                     
                     elif payload.startswith("ORDER_"):
-                        # KIỂM TRA LOCK để tránh xử lý song song
                         if ctx.get("processing_lock"):
                             print(f"[POSTBACK LOCKED] User {sender_id} đang được xử lý, bỏ qua ORDER")
                             continue
                         
                         ctx["processing_lock"] = True
                         try:
-                            load_products()  # Đảm bảo đã load sản phẩm
+                            load_products()
                             ms = payload.replace("ORDER_", "")
                             if ms in PRODUCTS:
                                 ctx["last_ms"] = ms
@@ -2004,7 +1891,6 @@ Anh/chị quan tâm sản phẩm nào ạ?"""
                 text = msg.get("text")
                 attachments = msg.get("attachments") or []
                 
-                # Kiểm tra duplicate message bằng message id và timestamp
                 msg_mid = msg.get("mid")
                 timestamp = m.get("timestamp", 0)
                 
@@ -2013,20 +1899,16 @@ Anh/chị quan tâm sản phẩm nào ạ?"""
                     if "processed_message_mids" not in ctx:
                         ctx["processed_message_mids"] = {}
                     
-                    # Kiểm tra xem message đã được xử lý chưa
                     if msg_mid in ctx["processed_message_mids"]:
                         processed_time = ctx["processed_message_mids"][msg_mid]
                         now = time.time()
-                        # Nếu đã xử lý trong vòng 3 giây gần đây, bỏ qua
                         if now - processed_time < 3:
                             print(f"[MSG DUPLICATE] Bỏ qua message đã xử lý: {msg_mid}")
                             continue
                     
-                    # DEBOUNCE: Kiểm tra thời gian giữa các message
                     last_msg_time = ctx.get("last_msg_time", 0)
                     now = time.time()
                     
-                    # Nếu message mới đến quá nhanh (< 500ms), có thể là duplicate
                     if now - last_msg_time < 0.5:
                         print(f"[MSG DEBOUNCE] Message đến quá nhanh, bỏ qua: {msg_mid}")
                         continue
@@ -2034,14 +1916,11 @@ Anh/chị quan tâm sản phẩm nào ạ?"""
                     ctx["last_msg_time"] = now
                     ctx["processed_message_mids"][msg_mid] = now
                     
-                    # Giới hạn bộ nhớ
                     if len(ctx["processed_message_mids"]) > 50:
-                        # Giữ lại 30 message gần nhất
                         sorted_items = sorted(ctx["processed_message_mids"].items(), key=lambda x: x[1], reverse=True)[:30]
                         ctx["processed_message_mids"] = dict(sorted_items)
                 
                 if text:
-                    # KIỂM TRA LOCK để tránh xử lý song song
                     ctx = USER_CONTEXT[sender_id]
                     if ctx.get("processing_lock"):
                         print(f"[TEXT LOCKED] User {sender_id} đang được xử lý, bỏ qua text: {text[:50]}...")
@@ -2053,7 +1932,6 @@ Anh/chị quan tâm sản phẩm nào ạ?"""
                         if att.get("type") == "image":
                             image_url = att.get("payload", {}).get("url")
                             if image_url:
-                                # KIỂM TRA LOCK để tránh xử lý song song
                                 ctx = USER_CONTEXT[sender_id]
                                 if ctx.get("processing_lock"):
                                     print(f"[IMAGE LOCKED] User {sender_id} đang được xử lý, bỏ qua image")
@@ -2062,7 +1940,6 @@ Anh/chị quan tâm sản phẩm nào ạ?"""
                                 handle_image(sender_id, image_url)
 
     return "OK", 200
-
 
 # ============================================
 # ORDER FORM PAGE (GIỮ NGUYÊN)
@@ -2271,7 +2148,6 @@ def order_form():
     """
     return html
 
-
 # ============================================
 # API ENDPOINTS (GIỮ NGUYÊN)
 # ============================================
@@ -2316,7 +2192,6 @@ def api_get_product():
         "price": price_int,
         "price_display": f"{price_int:,.0f} đ",
     }
-
 
 @app.route("/api/get-variant-price")
 def api_get_variant_price():
@@ -2375,7 +2250,6 @@ def api_get_variant_price():
         "price_display": price_display,
     }
 
-
 @app.route("/api/submit-order", methods=["POST"])
 def api_submit_order():
     data = request.get_json() or {}
@@ -2417,11 +2291,9 @@ def api_submit_order():
 
     return {"status": "ok", "message": "Đơn hàng đã được tiếp nhận"}
 
-
 @app.route("/static/<path:path>")
 def static_files(path):
     return send_from_directory("static", path)
-
 
 @app.route("/health", methods=["GET"])
 def health_check():
@@ -2440,12 +2312,11 @@ def health_check():
         "search_algorithm": "TF-IDF_cosine_similarity",
         "accuracy_improved": True,
         "fchat_echo_processing": True,
+        "bot_echo_filter": True,
         "referral_auto_processing": True,
         "message_debounce_enabled": True,
-        "duplicate_protection": True,
-        "hashtag_ms_filter": True  # Thêm thông tin về filter #MS
+        "duplicate_protection": True
     }, 200
-
 
 # ============================================
 # MAIN
@@ -2461,11 +2332,9 @@ if __name__ == "__main__":
     print(f"🟢 Image Carousel: 5 sản phẩm phù hợp nhất")
     print(f"🟢 Image Debounce: 3 giây")
     print(f"🟢 Text Message Debounce: 1 giây")
-    print(f"🟢 Echo Message Debounce: 3 giây")
-    print(f"🟢 Accuracy: CẢI THIỆN ĐỘ CHÍNH XÁC")
-    print(f"🟢 Fchat Echo Processing: BẬT (tự động nhận diện sản phẩm từ bình luận)")
-    print(f"🟢 Hashtag MS Filter: BẬT (bỏ qua echo có #MS123456)")
-    print(f"🟢 Referral Auto Processing: BẬT (tự động nhận diện từ quảng cáo/Facebook Shop)")
-    print(f"🟢 Bot Message Filter: BẬT (tránh lặp tin nhắn)")
-    print(f"🟢 Duplicate Message Protection: BẬT (tránh xử lý cùng message nhiều lần)")
+    print(f"🟢 Echo Message Debounce: 2 giây")
+    print(f"🟢 Bot Echo Filter: BẬT (phân biệt echo từ bot vs Fchat)")
+    print(f"🟢 Fchat Echo Processing: BẬT (giữ nguyên logic trích xuất mã từ Fchat)")
+    print(f"🟢 Referral Auto Processing: BẬT")
+    print(f"🟢 Duplicate Message Protection: BẬT")
     app.run(host="0.0.0.0", port=5000, debug=True)
