@@ -127,6 +127,8 @@ USER_CONTEXT = defaultdict(lambda: {
     "last_product_id": None,
     "catalog_view_time": 0,
     "last_catalog_product": None,
+    # Thêm dict để lưu nhiều sản phẩm từ catalog
+    "catalog_products": {},
 })
 
 PRODUCTS = {}
@@ -449,6 +451,59 @@ Hãy phân tích xem khách có yêu cầu RÕ RÀNG xem ảnh sản phẩm HI�
     except Exception as e:
         print(f"❌ Lỗi phân tích intent: {str(e)}")
         return {"intent": "general", "confidence": 0.3, "reason": f"Error: {str(e)}"}
+
+# ============================================
+# XỬ LÝ CATALOG FOLLOWUP
+# ============================================
+
+def handle_catalog_followup(uid: str, text: str) -> bool:
+    """
+    Xử lý tin nhắn follow-up ngay sau khi xem catalog
+    Trả về True nếu đã xử lý, False nếu không phải follow-up
+    """
+    ctx = USER_CONTEXT[uid]
+    now = time.time()
+    
+    # Kiểm tra xem có phải follow-up từ catalog không
+    last_catalog_time = ctx.get("catalog_view_time", 0)
+    retailer_id = ctx.get("last_retailer_id")
+    
+    # Chỉ xử lý trong 30 giây sau khi xem catalog
+    if not retailer_id or (now - last_catalog_time) > 30:
+        return False
+    
+    # Trích xuất mã sản phẩm từ retailer_id
+    ms = extract_ms_from_retailer_id(retailer_id)
+    if not ms or ms not in PRODUCTS:
+        return False
+    
+    print(f"[CATALOG FOLLOWUP] Xử lý tin nhắn sau catalog: {text[:50]}...")
+    
+    # Cập nhật context
+    ctx["last_ms"] = ms
+    update_product_context(uid, ms)
+    
+    # Xử lý intent
+    intent_result = analyze_intent_with_gpt(uid, text, ms)
+    
+    # Nếu là yêu cầu xem ảnh
+    if (intent_result.get('intent') == 'view_images' and 
+        intent_result.get('confidence', 0) > 0.85):
+        send_all_product_images(uid, ms)
+        return True
+    
+    # Nếu không phải xem ảnh, dùng GPT trả lời
+    gpt_response = generate_gpt_response(uid, text, ms)
+    send_message(uid, gpt_response)
+    
+    # Kiểm tra từ khóa đặt hàng
+    lower = text.lower()
+    if any(kw in lower for kw in ORDER_KEYWORDS):
+        domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
+        order_link = f"{domain}/order-form?ms={ms}&uid={uid}"
+        send_message(uid, f"📋 Anh/chị có thể đặt hàng ngay tại đây:\n{order_link}")
+    
+    return True
 
 # ============================================
 # GỬI TOÀN BỘ ẢNH SẢN PHẨM - ĐÃ SỬA LỖI DEADLOCK
@@ -1941,6 +1996,11 @@ def handle_text(uid: str, text: str):
         if handle_order_form_step(uid, text):
             ctx["processing_lock"] = False
             return
+        
+        # ƯU TIÊN: Xử lý follow-up từ catalog
+        if handle_catalog_followup(uid, text):
+            ctx["processing_lock"] = False
+            return
 
         lower = text.lower()
         
@@ -2129,6 +2189,17 @@ def webhook():
                                     ctx["last_product_id"] = product_id
                                     ctx["catalog_view_time"] = time.time()
                                     
+                                    # Lưu vào catalog_products dict
+                                    if "catalog_products" not in ctx:
+                                        ctx["catalog_products"] = {}
+                                    ctx["catalog_products"][product_id] = retailer_id
+                                    
+                                    # Giới hạn kích thước catalog_products
+                                    if len(ctx["catalog_products"]) > 10:
+                                        # Xóa phần tử cũ nhất
+                                        oldest_key = list(ctx["catalog_products"].keys())[0]
+                                        del ctx["catalog_products"][oldest_key]
+                                    
                                     # Trích xuất mã sản phẩm từ retailer_id
                                     ms_from_retailer = extract_ms_from_retailer_id(retailer_id)
                                     if ms_from_retailer:
@@ -2246,6 +2317,28 @@ def webhook():
                 if "product" in ref:
                     product_info = ref["product"]
                     product_id = product_info.get("id")
+                    
+                    # THÊM: Tìm retailer_id từ catalog_products dict
+                    retailer_id = ctx.get("catalog_products", {}).get(product_id)
+                    
+                    if retailer_id:
+                        ms_from_retailer = extract_ms_from_retailer_id(retailer_id)
+                        
+                        if ms_from_retailer and ms_from_retailer in PRODUCTS:
+                            print(f"[CATALOG REFERRAL] Sử dụng retailer_id từ catalog_products: {retailer_id} -> {ms_from_retailer}")
+                            
+                            ctx["last_ms"] = ms_from_retailer
+                            update_product_context(sender_id, ms_from_retailer)
+                            
+                            # Tự động gửi thông tin sản phẩm
+                            welcome_msg = f"""Chào anh/chị! 👋 
+Em là trợ lý AI của {FANPAGE_NAME}.
+
+Em thấy anh/chị quan tâm đến sản phẩm từ catalog.
+Em sẽ gửi thông tin chi tiết sản phẩm ngay ạ!"""
+                            send_message(sender_id, welcome_msg)
+                            send_product_info_debounced(sender_id, ms_from_retailer)
+                            continue
                     
                     # ƯU TIÊN: Nếu có retailer_id trong context (từ attachment template trước đó)
                     if "last_retailer_id" in ctx:
@@ -3672,5 +3765,6 @@ if __name__ == "__main__":
     print(f"🟢 Variant Image Support: BẬT (ảnh theo từng thuộc tính)")
     print(f"🟢 Variant Image API: /api/get-variant-image")
     print(f"🟢 Form Dynamic Images: BẬT (ảnh thay đổi theo màu/size)")
+    print(f"🟢 Catalog Follow-up Processing: BẬT (30 giây sau khi xem catalog)")
     
     app.run(host="0.0.0.0", port=5000, debug=True)
