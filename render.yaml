@@ -1,19 +1,23 @@
 services:
   - type: web
-    name: fb-gpt-chatbot
+    name: fb-chatbot
     env: python
-    region: oregon
-    plan: free
-    buildCommand: "pip install --no-cache-dir -r requirements.txt"
-    startCommand: "gunicorn app:app"
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
     envVars:
-      - key: OPENAI_API_KEY
+      - key: PAGE_ACCESS_TOKEN
         sync: false
       - key: VERIFY_TOKEN
         sync: false
-      - key: PAGE_ACCESS_TOKEN
+      - key: OPENAI_API_KEY
         sync: false
-      - key: SHEET_CSV_URL
+      - key: GOOGLE_SHEET_CSV_URL
         sync: false
+      - key: DOMAIN
+        value: fb-gpt-chatbot.onrender.com
       - key: FANPAGE_NAME
+        value: "Shop thời trang"
+      - key: FCHAT_WEBHOOK_URL
+        sync: false
+      - key: FCHAT_TOKEN
         sync: false
