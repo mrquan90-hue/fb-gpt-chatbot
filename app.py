@@ -19,6 +19,19 @@ from flask import Flask, request, send_from_directory, jsonify, render_template_
 from openai import OpenAI
 
 # ============================================
+# GOOGLE SHEETS API INTEGRATION - NEW IMPORTS
+# ============================================
+
+try:
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build
+    from googleapiclient.errors import HttpError
+    GOOGLE_API_AVAILABLE = True
+except ImportError:
+    print("⚠️ Google API libraries not installed. Google Sheets integration will be disabled.")
+    GOOGLE_API_AVAILABLE = False
+
+# ============================================
 # FLASK APP
 # ============================================
 app = Flask(__name__)
@@ -34,6 +47,12 @@ DOMAIN = os.getenv("DOMAIN", "").strip() or "fb-gpt-chatbot.onrender.com"
 FANPAGE_NAME = os.getenv("FANPAGE_NAME", "Shop thời trang")
 FCHAT_WEBHOOK_URL = os.getenv("FCHAT_WEBHOOK_URL", "").strip()
 FCHAT_TOKEN = os.getenv("FCHAT_TOKEN", "").strip()
+
+# ============================================
+# GOOGLE SHEETS API CONFIGURATION - NEW
+# ============================================
+GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "").strip()  # From spreadsheet URL
+GOOGLE_SHEETS_CREDENTIALS_JSON = os.getenv("GOOGLE_SHEETS_CREDENTIALS_JSON", "").strip()
 
 if not GOOGLE_SHEET_CSV_URL:
     GOOGLE_SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/18eI8Yn-WG8xN0YK8mWqgIOvn-USBhmXBH3sR2drvWus/export?format=csv"
@@ -2132,6 +2151,176 @@ def handle_text(uid: str, text: str):
             ctx["processing_lock"] = False
 
 # ============================================
+# GOOGLE SHEETS API FUNCTIONS - NEW SECTION
+# ============================================
+
+def get_google_sheets_service():
+    """
+    Khởi tạo và trả về đối tượng service của Google Sheets API.
+    Sử dụng Service Account credentials từ biến môi trường.
+    """
+    if not GOOGLE_SHEETS_CREDENTIALS_JSON or not GOOGLE_SHEET_ID:
+        print("⚠️ Cảnh báo: Chưa cấu hình đầy đủ GOOGLE_SHEETS_CREDENTIALS_JSON hoặc GOOGLE_SHEET_ID.")
+        return None
+
+    if not GOOGLE_API_AVAILABLE:
+        print("⚠️ Google API libraries chưa được cài đặt. Hãy thêm vào requirements.txt: google-api-python-client google-auth google-auth-oauthlib google-auth-httplib2")
+        return None
+
+    try:
+        # Parse JSON credentials từ biến môi trường
+        creds_dict = json.loads(GOOGLE_SHEETS_CREDENTIALS_JSON)
+        
+        # Tạo credentials từ Service Account
+        credentials = service_account.Credentials.from_service_account_info(
+            creds_dict,
+            scopes=['https://www.googleapis.com/auth/spreadsheets']
+        )
+        
+        # Xây dựng dịch vụ Google Sheets
+        service = build('sheets', 'v4', credentials=credentials)
+        print("✅ Đã khởi tạo Google Sheets service thành công.")
+        return service
+        
+    except json.JSONDecodeError as e:
+        print(f"❌ Lỗi định dạng JSON trong GOOGLE_SHEETS_CREDENTIALS_JSON: {e}")
+    except Exception as e:
+        print(f"❌ Lỗi không mong muốn khi khởi tạo Google Sheets service: {e}")
+    
+    return None
+
+def write_order_to_google_sheet_api(order_data: dict):
+    """
+    GHI ĐƠN HÀNG VÀO GOOGLE SHEET 'Orders' BẰNG GOOGLE SHEETS API.
+    
+    Args:
+        order_data: Dictionary chứa toàn bộ thông tin đơn hàng.
+        
+    Returns:
+        bool: True nếu ghi thành công, False nếu thất bại.
+    """
+    # Lấy service
+    service = get_google_sheets_service()
+    if service is None:
+        print("❌ Không thể ghi vì không khởi tạo được Google Sheets Service.")
+        return False
+    
+    # Tên sheet (tab) mục tiêu trong Google Sheet
+    sheet_name = "Orders"
+    
+    try:
+        # 1. Chuẩn bị dữ liệu hàng (row) mới
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        order_id = f"ORD{int(time.time())}_{order_data.get('uid', '')[-4:]}"
+        
+        new_row = [
+            timestamp,                              # Cột A: Thời gian
+            order_id,                               # Cột B: Mã đơn
+            "Mới",                                  # Cột C: Trạng thái
+            order_data.get("ms", ""),               # D: Mã SP
+            order_data.get("product_name", ""),     # E: Tên SP
+            order_data.get("color", ""),            # F: Màu
+            order_data.get("size", ""),             # G: Size
+            order_data.get("quantity", 1),          # H: Số lượng
+            order_data.get("unit_price", 0),        # I: Đơn giá
+            order_data.get("total_price", 0),       # J: Tổng tiền
+            order_data.get("customer_name", ""),    # K: Tên KH
+            order_data.get("phone", ""),            # L: SĐT
+            order_data.get("address", ""),          # M: Địa chỉ đầy đủ
+            order_data.get("province", ""),         # N: Tỉnh
+            order_data.get("district", ""),         # O: Quận
+            order_data.get("ward", ""),             # P: Phường
+            order_data.get("address_detail", ""),   # Q: Chi tiết địa chỉ
+            "COD",                                  # R: Thanh toán
+            "ViettelPost",                          # S: Vận chuyển
+            f"Đơn từ Facebook Bot ({order_data.get('referral_source', 'direct')})", # T: Ghi chú
+            order_data.get("uid", ""),              # U: Facebook UID
+            order_data.get("referral_source", "direct") # V: Nguồn
+        ]
+        
+        # 2. Gọi API để thêm dòng mới vào cuối sheet
+        request = service.spreadsheets().values().append(
+            spreadsheetId=GOOGLE_SHEET_ID,
+            range=f"{sheet_name}!A:V",  # Ghi vào các cột A đến V
+            valueInputOption="USER_ENTERED",  # Dữ liệu được xử lý như người dùng nhập
+            insertDataOption="INSERT_ROWS",   # Luôn chèn hàng mới
+            body={"values": [new_row]}
+        )
+        
+        response = request.execute()
+        
+        print(f"✅ ĐÃ GHI ĐƠN HÀNG VÀO GOOGLE SHEET THÀNH CÔNG!")
+        print(f"   - Mã đơn: {order_id}")
+        print(f"   - Sheet: {sheet_name}")
+        print(f"   - Ô được cập nhật: {response.get('updates', {}).get('updatedCells', 'N/A')}")
+        
+        return True
+        
+    except HttpError as err:
+        # Xử lý lỗi đặc trưng từ Google API
+        print(f"❌ Lỗi Google Sheets API khi ghi đơn:")
+        print(f"   - Mã lỗi: {err.resp.status}")
+        print(f"   - Nội dung: {err.error_details if hasattr(err, 'error_details') else err}")
+        
+        # Gợi ý khắc phục dựa trên mã lỗi phổ biến 
+        if err.resp.status == 403:
+            print("   ⚠️ Gợi ý: Service Account có thể chưa được chia sẻ quyền 'Editor' cho Google Sheet này.")
+        elif err.resp.status == 404:
+            print(f"   ⚠️ Gợi ý: Không tìm thấy Sheet ID '{GOOGLE_SHEET_ID}' hoặc tab '{sheet_name}'. Hãy kiểm tra lại.")
+        
+    except Exception as e:
+        print(f"❌ Lỗi không xác định khi gọi Google Sheets API: {type(e).__name__}: {e}")
+    
+    return False
+
+def save_order_to_local_csv(order_data: dict):
+    """
+    Lưu đơn hàng vào file CSV local (backup khi không ghi được Google Sheet)
+    """
+    try:
+        file_path = "orders_backup.csv"
+        file_exists = os.path.exists(file_path)
+        
+        # Chuẩn bị dữ liệu
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        order_id = f"ORD{int(time.time())}_{order_data.get('uid', '')[-4:]}"
+        
+        row_data = {
+            "timestamp": timestamp,
+            "order_id": order_id,
+            "status": "Mới",
+            "product_code": order_data.get("ms", ""),
+            "product_name": order_data.get("product_name", ""),
+            "color": order_data.get("color", ""),
+            "size": order_data.get("size", ""),
+            "quantity": order_data.get("quantity", 1),
+            "unit_price": order_data.get("unit_price", 0),
+            "total_price": order_data.get("total_price", 0),
+            "customer_name": order_data.get("customer_name", ""),
+            "phone": order_data.get("phone", ""),
+            "address": order_data.get("address", ""),
+            "province": order_data.get("province", ""),
+            "district": order_data.get("district", ""),
+            "ward": order_data.get("ward", ""),
+            "address_detail": order_data.get("address_detail", ""),
+            "payment_method": "COD",
+            "shipping_method": "ViettelPost",
+            "notes": f"Đơn từ Facebook Bot ({order_data.get('referral_source', 'direct')})",
+            "fb_user_id": order_data.get("uid", ""),
+            "referral_source": order_data.get("referral_source", "direct")
+        }
+        
+        with open(file_path, 'a', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=row_data.keys())
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow(row_data)
+        
+        print(f"📁 Đã lưu đơn hàng vào file local backup: {order_id}")
+    except Exception as e:
+        print(f"❌ Lỗi khi lưu file local backup: {str(e)}")
+
+# ============================================
 # WEBHOOK HANDLER - ĐÃ SỬA LỖI GỬI TIN NHẮN LẶP + THÊM HỖ TRỢ CATALOG
 # ============================================
 
@@ -2228,7 +2417,7 @@ def webhook():
                 attachments = msg.get("attachments", [])
                 app_id = msg.get("app_id", "")
                 
-                # **QUAN TRỌNG**: KIỂM TRA CÓ PHẢI ECHO TỪ BOT KHÔNG
+                # **QUAN TRỢNG**: KIỂM TRA CÓ PHẢI ECHO TỪ BOT KHÔNG
                 # Nếu là echo từ bot → BỎ QUA để tránh lặp
                 if is_bot_generated_echo(echo_text, app_id, attachments):
                     print(f"[ECHO BOT] Bỏ qua echo message từ bot: {echo_text[:50]}...")
@@ -3615,7 +3804,7 @@ def api_submit_order():
     color = data.get("color") or ""
     size = data.get("size") or ""
     quantity = int(data.get("quantity") or 1)
-    customerName = data.get("customerName") or ""
+    customer_name = data.get("customerName") or ""
     phone = data.get("phone") or ""
     address = data.get("address") or ""
     
@@ -3633,16 +3822,22 @@ def api_submit_order():
     price_str = row.get("Gia", "0")
     price_int = extract_price_int(price_str) or 0
     total = price_int * quantity
+    
+    product_name = row.get('Ten', '')
 
     if uid:
+        # Lấy referral source từ context
+        ctx = USER_CONTEXT.get(uid, {})
+        referral_source = ctx.get("referral_source", "direct")
+        
         # Tin nhắn chi tiết hơn với thông tin địa chỉ đầy đủ
         msg = (
             "🎉 Shop đã nhận được đơn hàng mới:\n"
-            f"🛍 Sản phẩm: [{ms}] {row.get('Ten','')}\n"
+            f"🛍 Sản phẩm: [{ms}] {product_name}\n"
             f"🎨 Phân loại: {color} / {size}\n"
             f"📦 Số lượng: {quantity}\n"
             f"💰 Thành tiền: {total:,.0f} đ\n"
-            f"👤 Người nhận: {customerName}\n"
+            f"👤 Người nhận: {customer_name}\n"
             f"📱 SĐT: {phone}\n"
             f"🏠 Địa chỉ: {address}\n"
             f"📍 Chi tiết: {address_detail}\n"
@@ -3655,19 +3850,68 @@ def api_submit_order():
             "Cảm ơn anh/chị đã đặt hàng! ❤️"
         )
         send_message(uid, msg)
+    
+    # ============================================
+    # GHI ĐƠN HÀNG VÀO GOOGLE SHEET QUA API - UPDATED
+    # ============================================
+    order_data = {
+        "ms": ms,
+        "uid": uid,
+        "color": color,
+        "size": size,
+        "quantity": quantity,
+        "customer_name": customer_name,
+        "phone": phone,
+        "address": address,
+        "province": province_name,
+        "district": district_name,
+        "ward": ward_name,
+        "address_detail": address_detail,
+        "product_name": product_name,
+        "unit_price": price_int,
+        "total_price": total,
+        "referral_source": ctx.get("referral_source", "direct")
+    }
+    
+    # Ưu tiên 1: Ghi vào Google Sheet qua API
+    write_success = write_order_to_google_sheet_api(order_data)
+    
+    # Fallback: Nếu không thành công, lưu vào file local backup
+    if not write_success:
+        print("⚠️ Ghi Google Sheet thất bại, thực hiện lưu vào file local backup...")
+        save_order_to_local_csv(order_data)
+    
+    # Gửi notification đến Fchat webhook (nếu có)
+    if FCHAT_WEBHOOK_URL and FCHAT_TOKEN:
+        try:
+            fchat_payload = {
+                "token": FCHAT_TOKEN,
+                "message": f"🛒 ĐƠN HÀNG MỚI\nMã: {ms}\nKH: {customer_name}\nSĐT: {phone}\nTổng: {total:,.0f}đ",
+                "metadata": {
+                    "order_data": order_data,
+                    "timestamp": datetime.now().isoformat()
+                }
+            }
+            requests.post(FCHAT_WEBHOOK_URL, json=fchat_payload, timeout=5)
+        except Exception as e:
+            print(f"⚠️ Không thể gửi notification đến Fchat: {str(e)}")
 
     return {
         "status": "ok", 
         "message": "Đơn hàng đã được tiếp nhận",
+        "order_written": write_success,
         "order_details": {
+            "order_id": f"ORD{int(time.time())}_{uid[-4:] if uid else '0000'}",
             "product_code": ms,
-            "customer_name": customerName,
+            "product_name": product_name,
+            "customer_name": customer_name,
             "phone": phone,
             "address": address,
             "province": province_name,
             "district": district_name,
             "ward": ward_name,
-            "total": total
+            "total": total,
+            "timestamp": datetime.now().isoformat()
         }
     }
 
@@ -3676,7 +3920,7 @@ def static_files(path):
     return send_from_directory("static", path)
 
 # ============================================
-# HEALTH CHECK (ĐÃ CẢI TIẾN)
+# HEALTH CHECK (ĐÃ CẢI TIẾN) - UPDATED
 # ============================================
 
 @app.route("/health", methods=["GET"])
@@ -3695,6 +3939,21 @@ def health_check():
             if variant.get("variant_image"):
                 variants_with_images += 1
     
+    # Kiểm tra Google Sheets Service
+    sheets_service_status = "Not Configured"
+    if GOOGLE_SHEET_ID and GOOGLE_SHEETS_CREDENTIALS_JSON:
+        try:
+            service = get_google_sheets_service()
+            if service:
+                # Thử một thao tác đọc nhẹ để kiểm tra quyền
+                result = service.spreadsheets().get(spreadsheetId=GOOGLE_SHEET_ID).execute()
+                sheet_title = result.get('properties', {}).get('title', 'Unknown')
+                sheets_service_status = f"Connected to Sheet: '{sheet_title}' (ID: {GOOGLE_SHEET_ID[:10]}...)"
+            else:
+                sheets_service_status = "Service Initialization Failed"
+        except Exception as e:
+            sheets_service_status = f"Connection Error: {type(e).__name__}"
+    
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
@@ -3707,6 +3966,14 @@ def health_check():
         "openai_vision_available": bool(client and OPENAI_API_KEY),
         "facebook_configured": bool(PAGE_ACCESS_TOKEN),
         "fanpage_name": current_fanpage_name,
+        "google_sheets_integration": {
+            "method": "Official Google Sheets API v4",
+            "sheet_id_configured": bool(GOOGLE_SHEET_ID),
+            "credentials_configured": bool(GOOGLE_SHEETS_CREDENTIALS_JSON),
+            "service_status": sheets_service_status,
+            "order_write_logic": "Primary API -> Local CSV Backup"
+        },
+        "fchat_webhook": "Configured" if FCHAT_WEBHOOK_URL and FCHAT_TOKEN else "Not configured",
         "fanpage_name_source": "Facebook Graph API" if FANPAGE_NAME_CACHE and FANPAGE_NAME_CACHE != FANPAGE_NAME else "Environment Variable",
         "fanpage_cache_age": int(time.time() - FANPAGE_NAME_CACHE_TIME) if FANPAGE_NAME_CACHE_TIME else 0,
         "fanpage_cache_valid": (FANPAGE_NAME_CACHE_TIME and (time.time() - FANPAGE_NAME_CACHE_TIME) < FANPAGE_NAME_CACHE_TTL),
@@ -3741,6 +4008,8 @@ if __name__ == "__main__":
     print(f"🟢 GPT-4o Vision API: {'SẴN SÀNG' if client and OPENAI_API_KEY else 'CHƯA CẤU HÌNH'}")
     print(f"🟢 Fanpage: {get_fanpage_name_from_api()}")
     print(f"🟢 Domain: {DOMAIN}")
+    print(f"🟢 Google Sheets API: {'SẴN SÀNG' if GOOGLE_SHEET_ID and GOOGLE_SHEETS_CREDENTIALS_JSON else 'CHƯA CẤU HÌNH'}")
+    print(f"🟢 Sheet ID: {GOOGLE_SHEET_ID[:20]}..." if GOOGLE_SHEET_ID else "🟡 Chưa cấu hình")
     print(f"🟢 Image Processing: Base64 + Fallback URL")
     print(f"🟢 Search Algorithm: TF-IDF + Cosine Similarity")
     print(f"🟢 Image Carousel: 5 sản phẩm phù hợp nhất")
@@ -3766,5 +4035,6 @@ if __name__ == "__main__":
     print(f"🟢 Variant Image API: /api/get-variant-image")
     print(f"🟢 Form Dynamic Images: BẬT (ảnh thay đổi theo màu/size)")
     print(f"🟢 Catalog Follow-up Processing: BẬT (30 giây sau khi xem catalog)")
+    print(f"🟢 Order Backup System: Local CSV khi Google Sheet không kết nối được")
     
     app.run(host="0.0.0.0", port=5000, debug=True)
