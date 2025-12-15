@@ -1,94 +1,139 @@
 <!DOCTYPE html>
 <html lang="vi">
 <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport"
-          content="width=device-width, initial-scale=1.0" />
-          
-    <title>Đặt hàng nhanh</title>
-
-    <!-- CSS của bạn -->
-    <link rel="stylesheet" href="/static/order.css" />
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap"
-          rel="stylesheet">
-
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Đặt hàng - {fanpage_name}</title>
+    <link rel="stylesheet" href="/static/order.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/select2/4.0.13/css/select2.min.css">
 </head>
-
 <body>
+    <div class="container">
+        <div class="header">
+            <h2>ĐẶT HÀNG - {fanpage_name}</h2>
+        </div>
+        
+        <div class="content">
+            <!-- Product Info Section -->
+            <div class="product-section">
+                <div class="product-image-container" id="image-container">
+                    {image_html}
+                </div>
+                <div class="product-info">
+                    <div class="product-code">Mã: {ms}</div>
+                    <h3 class="product-title">{product_name}</h3>
+                    <div class="product-price" id="price-display">{price_display}</div>
+                </div>
+            </div>
 
-<div class="form-container">
+            <!-- Order Form -->
+            <form id="orderForm">
+                <!-- Color Selection -->
+                <div class="form-group">
+                    <label for="color">Màu sắc:</label>
+                    <select id="color" class="form-control">
+                        {color_options}
+                    </select>
+                </div>
 
-    <!-- Header -->
-    <div id="header">
-        <h2 id="fanpageName">Shop</h2>
+                <!-- Size Selection -->
+                <div class="form-group">
+                    <label for="size">Size:</label>
+                    <select id="size" class="form-control">
+                        {size_options}
+                    </select>
+                </div>
+
+                <!-- Quantity -->
+                <div class="form-group">
+                    <label for="quantity">Số lượng:</label>
+                    <input type="number" id="quantity" class="form-control" value="1" min="1">
+                </div>
+
+                <!-- Total Price -->
+                <div class="total-section">
+                    <div class="total-label">Tạm tính:</div>
+                    <div class="total-amount" id="total-display">{total_display}</div>
+                </div>
+
+                <!-- Customer Information -->
+                <div class="form-group">
+                    <label for="customerName">Họ và tên:</label>
+                    <input type="text" id="customerName" class="form-control" required>
+                </div>
+
+                <div class="form-group">
+                    <label for="phone">Số điện thoại:</label>
+                    <input type="tel" id="phone" class="form-control" required>
+                </div>
+
+                <!-- Address Section with ViettelPost API -->
+                <div class="form-group">
+                    <label>Địa chỉ nhận hàng:</label>
+                    
+                    <div class="address-row">
+                        <div class="address-col">
+                            <select id="province" class="form-control select2-address" 
+                                    data-placeholder="Chọn Tỉnh/Thành phố">
+                                <option value=""></option>
+                            </select>
+                        </div>
+                        <div class="address-col">
+                            <select id="district" class="form-control select2-address" disabled
+                                    data-placeholder="Chọn Quận/Huyện">
+                                <option value=""></option>
+                            </select>
+                        </div>
+                        <div class="address-col">
+                            <select id="ward" class="form-control select2-address" disabled
+                                    data-placeholder="Chọn Phường/Xã">
+                                <option value=""></option>
+                            </select>
+                        </div>
+                    </div>
+                    
+                    <div class="form-group" style="margin-top: 10px;">
+                        <input type="text" id="addressDetail" class="form-control" 
+                               placeholder="Số nhà, tên đường, tòa nhà..." required>
+                    </div>
+                    
+                    <!-- Address Preview -->
+                    <div id="addressPreview" class="address-preview"></div>
+                    
+                    <input type="hidden" id="fullAddress" name="fullAddress">
+                    <input type="hidden" id="provinceName">
+                    <input type="hidden" id="districtName">
+                    <input type="hidden" id="wardName">
+                </div>
+
+                <!-- Submit Button -->
+                <button type="button" id="submitBtn" class="submit-btn" onclick="submitOrder()">
+                    ĐẶT HÀNG NGAY
+                </button>
+
+                <p class="note">
+                    Shop sẽ gọi xác nhận trong 5-10 phút. Thanh toán khi nhận hàng (COD).
+                </p>
+            </form>
+        </div>
     </div>
 
-    <!-- Ảnh sản phẩm -->
-    <img id="productImage" src="" alt="Ảnh sản phẩm" />
-
-    <!-- Tên sản phẩm -->
-    <div class="section-title">THÔNG TIN SẢN PHẨM</div>
-
-    <label>Sản phẩm</label>
-    <input id="productName" readonly />
-
-    <label>Đơn giá</label>
-    <input id="price" readonly />
-
-    <label>Size</label>
-    <select id="size"></select>
-
-    <label>Màu</label>
-    <select id="color"></select>
-
-    <label>Số lượng</label>
-    <select id="quantity">
-        <option>1</option>
-        <option>2</option>
-        <option>3</option>
-        <option>4</option>
-        <option>5</option>
-    </select>
-
-    <label>Thành tiền</label>
-    <input id="total" readonly />
-
-    <!-- THÔNG TIN KHÁCH HÀNG -->
-    <div class="section-title">THÔNG TIN KHÁCH HÀNG</div>
-
-    <label>Họ tên</label>
-    <input id="customerName" placeholder="Nhập họ tên" />
-
-    <label>Số điện thoại</label>
-    <input id="phone" placeholder="Nhập số điện thoại" />
-
-    <label>Địa chỉ (Số nhà, tổ, thôn...)</label>
-    <input id="home" placeholder="Ví dụ: Số 10, Ngõ 5" />
-
-    <label>Tỉnh / Thành phố</label>
-    <select id="province"></select>
-
-    <label>Phường / Xã</label>
-    <select id="ward"></select>
-
-    <!-- Huyện ẩn -->
-    <select id="district" style="display:none"></select>
-    <div class="note-area">
-        * Sau sáp nhập không cần chọn quận/huyện – chỉ cần TỈNH + XÃ
-    </div>
-
-    <label>Ghi chú đơn hàng</label>
-    <textarea id="note"
-              rows="3"
-              placeholder="Ví dụ: Giao giờ hành chính..."></textarea>
-
-    <!-- BUTTON -->
-    <button id="orderBtn">ĐẶT HÀNG NGAY</button>
-
-</div>
-
-<!-- JS -->
-<script src="/static/order-form.js"></script>
-
+    <!-- JavaScript Libraries -->
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/select2/4.0.13/js/select2.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/select2/4.0.13/js/i18n/vi.js"></script>
+    
+    <!-- App Scripts -->
+    <script>
+        // Global variables
+        const VIETTELPOST_TOKEN = "51D25F6942D338044E732CC1B08FBB82";
+        const PRODUCT_MS = "{ms}";
+        const PRODUCT_UID = "{uid}";
+        const BASE_PRICE = {base_price};
+        const DOMAIN = "{domain}";
+        const API_BASE_URL = "{api_base_url}";
+    </script>
+    
+    <script src="/static/order-form.js"></script>
 </body>
 </html>
