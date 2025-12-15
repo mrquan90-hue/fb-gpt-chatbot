@@ -87,7 +87,7 @@ async function updateVariantInfo() {
 }
 
 // ============================================
-// VIETTELPOST ADDRESS API
+// VIETNAM ADDRESS API (Open API - provinces.open-api.vn)
 // ============================================
 
 let provincesCache = [];
@@ -106,7 +106,7 @@ function initAddressSelect2() {
     });
 }
 
-// Load provinces from ViettelPost API
+// Load provinces from Open API
 async function loadProvinces() {
     const provinceSelect = $('#province');
     
@@ -115,27 +115,20 @@ async function loadProvinces() {
         provinceSelect.html('<option value="">Đang tải tỉnh/thành...</option>');
         provinceSelect.prop('disabled', true);
         
-        const response = await fetch('https://partner.viettelpost.vn/v2/categories/listProvince', {
-            method: 'GET',
-            headers: {
-                'Content-Type': 'application/json',
-                'Token': VIETTELPOST_TOKEN
-            }
-        });
+        const response = await fetch('https://provinces.open-api.vn/api/p/');
         
-        const data = await response.json();
-        
-        if (data.status === 200 && data.data) {
-            provincesCache = data.data.sort((a, b) => 
-                a.PROVINCE_NAME.localeCompare(b.PROVINCE_NAME, 'vi')
+        if (response.ok) {
+            const data = await response.json();
+            provincesCache = data.sort((a, b) => 
+                a.name.localeCompare(b.name, 'vi')
             );
             
             provinceSelect.html('<option value=""></option>');
             provincesCache.forEach(province => {
-                provinceSelect.append(new Option(province.PROVINCE_NAME, province.PROVINCE_ID));
+                provinceSelect.append(new Option(province.name, province.code));
             });
             
-            console.log(`Đã tải ${provincesCache.length} tỉnh/thành phố`);
+            console.log(`✅ Đã tải ${provincesCache.length} tỉnh/thành phố từ API miễn phí`);
             
             // Reinitialize Select2
             provinceSelect.select2({
@@ -143,19 +136,17 @@ async function loadProvinces() {
                 placeholder: "Chọn Tỉnh/Thành phố",
                 width: '100%',
                 allowClear: true
-            });
+            }).prop('disabled', false);
             
             // Load preset address from URL if any
             loadPresetAddress();
         } else {
-            throw new Error('Không lấy được dữ liệu từ ViettelPost');
+            throw new Error('Không lấy được dữ liệu từ API');
         }
     } catch (error) {
-        console.error('Lỗi khi load tỉnh/thành:', error);
+        console.error('❌ Lỗi khi load tỉnh/thành:', error);
         // Fallback to static list
         loadStaticProvinces();
-    } finally {
-        provinceSelect.prop('disabled', false);
     }
 }
 
@@ -186,27 +177,21 @@ async function loadDistricts(provinceId) {
         districtSelect.prop('disabled', true);
         wardSelect.prop('disabled', true);
         
-        const response = await fetch(`https://partner.viettelpost.vn/v2/categories/listDistrict?provinceId=${provinceId}`, {
-            method: 'GET',
-            headers: {
-                'Content-Type': 'application/json',
-                'Token': VIETTELPOST_TOKEN
-            }
-        });
+        const response = await fetch(`https://provinces.open-api.vn/api/p/${provinceId}?depth=2`);
         
-        const data = await response.json();
-        
-        if (data.status === 200 && data.data) {
-            districtsCache = data.data.sort((a, b) => 
-                a.DISTRICT_NAME.localeCompare(b.DISTRICT_NAME, 'vi')
-            );
+        if (response.ok) {
+            const provinceData = await response.json();
+            districtsCache = provinceData.districts || [];
+            
+            // Sắp xếp theo tên
+            districtsCache.sort((a, b) => a.name.localeCompare(b.name, 'vi'));
             
             districtSelect.html('<option value=""></option>');
             districtsCache.forEach(district => {
-                districtSelect.append(new Option(district.DISTRICT_NAME, district.DISTRICT_ID));
+                districtSelect.append(new Option(district.name, district.code));
             });
             
-            console.log(`Đã tải ${districtsCache.length} quận/huyện`);
+            console.log(`✅ Đã tải ${districtsCache.length} quận/huyện`);
             
             // Reinitialize Select2
             districtSelect.select2({
@@ -222,9 +207,11 @@ async function loadDistricts(provinceId) {
                 placeholder: "Chọn Phường/Xã",
                 disabled: true
             });
+        } else {
+            districtSelect.html('<option value="">Không có dữ liệu</option>');
         }
     } catch (error) {
-        console.error('Lỗi khi load quận/huyện:', error);
+        console.error('❌ Lỗi khi load quận/huyện:', error);
         districtSelect.html('<option value="">Lỗi tải dữ liệu</option>');
     } finally {
         updateFullAddress();
@@ -250,27 +237,21 @@ async function loadWards(districtId) {
         wardSelect.html('<option value="">Đang tải phường/xã...</option>');
         wardSelect.prop('disabled', true);
         
-        const response = await fetch(`https://partner.viettelpost.vn/v2/categories/listWards?districtId=${districtId}`, {
-            method: 'GET',
-            headers: {
-                'Content-Type': 'application/json',
-                'Token': VIETTELPOST_TOKEN
-            }
-        });
+        const response = await fetch(`https://provinces.open-api.vn/api/d/${districtId}?depth=2`);
         
-        const data = await response.json();
-        
-        if (data.status === 200 && data.data) {
-            wardsCache = data.data.sort((a, b) => 
-                a.WARDS_NAME.localeCompare(b.WARDS_NAME, 'vi')
-            );
+        if (response.ok) {
+            const districtData = await response.json();
+            wardsCache = districtData.wards || [];
+            
+            // Sắp xếp theo tên
+            wardsCache.sort((a, b) => a.name.localeCompare(b.name, 'vi'));
             
             wardSelect.html('<option value=""></option>');
             wardsCache.forEach(ward => {
-                wardSelect.append(new Option(ward.WARDS_NAME, ward.WARDS_ID));
+                wardSelect.append(new Option(ward.name, ward.code));
             });
             
-            console.log(`Đã tải ${wardsCache.length} phường/xã`);
+            console.log(`✅ Đã tải ${wardsCache.length} phường/xã`);
             
             // Reinitialize Select2
             wardSelect.select2({
@@ -279,9 +260,11 @@ async function loadWards(districtId) {
                 width: '100%',
                 allowClear: true
             }).prop('disabled', false);
+        } else {
+            wardSelect.html('<option value="">Không có dữ liệu</option>');
         }
     } catch (error) {
-        console.error('Lỗi khi load phường/xã:', error);
+        console.error('❌ Lỗi khi load phường/xã:', error);
         wardSelect.html('<option value="">Lỗi tải dữ liệu</option>');
     } finally {
         updateFullAddress();
@@ -320,7 +303,7 @@ function loadStaticProvinces() {
         allowClear: true
     }).prop('disabled', false);
     
-    console.log('Đã tải danh sách tỉnh thành tĩnh (fallback)');
+    console.log('⚠️ Đã tải danh sách tỉnh thành tĩnh (fallback)');
 }
 
 // Update full address from all components
