@@ -15,7 +15,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
 import requests
-from flask import Flask, request, send_from_directory, jsonify
+from flask import Flask, request, send_from_directory, jsonify, render_template_string
 from openai import OpenAI
 
 # ============================================
@@ -2440,7 +2440,7 @@ Anh/chị quan tâm sản phẩm nào ạ?"""
     return "OK", 200
 
 # ============================================
-# ORDER FORM PAGE (ĐÃ CẢI TIẾN - ẢNH THEO THUỘC TÍNH)
+# ORDER FORM PAGE (CẢI TIẾN VỚI VIETTELPOST API)
 # ============================================
 
 @app.route("/order-form", methods=["GET"])
@@ -2505,32 +2505,93 @@ def order_form():
     price_str = row.get("Gia", "0")
     price_int = extract_price_int(price_str) or 0
 
+    # Tạo HTML với form địa chỉ cải tiến sử dụng ViettelPost API
     html = f"""
+    <!DOCTYPE html>
     <html>
     <head>
         <meta charset="utf-8" />
         <title>Đặt hàng - {row.get('Ten','')}</title>
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <style>
-            .image-container {{
+            * {{
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+            }}
+            
+            body {{
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+                min-height: 100vh;
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                padding: 20px;
+                color: #333;
+            }}
+            
+            .container {{
+                max-width: 480px;
+                width: 100%;
+                background: #fff;
+                border-radius: 20px;
+                box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+                overflow: hidden;
+            }}
+            
+            .header {{
+                background: linear-gradient(135deg, #1DB954 0%, #17a74d 100%);
+                padding: 20px;
+                text-align: center;
+                color: white;
+            }}
+            
+            .header h2 {{
+                font-size: 20px;
+                font-weight: 600;
+                margin: 0;
+            }}
+            
+            .content {{
+                padding: 20px;
+            }}
+            
+            .product-section {{
+                display: flex;
+                gap: 15px;
+                margin-bottom: 25px;
+                padding-bottom: 20px;
+                border-bottom: 1px solid #eee;
+            }}
+            
+            .product-image-container {{
                 width: 120px;
                 height: 120px;
+                border-radius: 12px;
                 overflow: hidden;
-                border-radius: 8px;
-                background: #f0f0f0;
+                background: #f8f9fa;
                 display: flex;
                 align-items: center;
                 justify-content: center;
+                flex-shrink: 0;
             }}
-            .image-container img {{
+            
+            .product-image {{
                 width: 100%;
                 height: 100%;
                 object-fit: cover;
-                transition: opacity 0.3s ease;
+                transition: transform 0.3s ease;
             }}
-            .loading {{
+            
+            .product-image:hover {{
+                transform: scale(1.05);
+            }}
+            
+            .product-image.loading {{
                 opacity: 0.7;
             }}
+            
             .placeholder-image {{
                 width: 100%;
                 height: 100%;
@@ -2539,125 +2600,379 @@ def order_form():
                 justify-content: center;
                 background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
                 color: white;
-                font-size: 14px;
+                font-size: 13px;
                 text-align: center;
                 padding: 10px;
+                border-radius: 12px;
             }}
+            
+            .product-info {{
+                flex: 1;
+            }}
+            
             .product-code {{
                 font-size: 12px;
                 color: #666;
                 background: #f5f5f5;
-                padding: 4px 8px;
-                border-radius: 4px;
+                padding: 6px 10px;
+                border-radius: 6px;
                 display: inline-block;
                 margin-bottom: 8px;
-                font-family: monospace;
+                font-family: 'Courier New', monospace;
+                font-weight: 500;
+            }}
+            
+            .product-title {{
+                font-size: 16px;
+                font-weight: 600;
+                margin: 0 0 8px 0;
+                line-height: 1.4;
+                color: #222;
+            }}
+            
+            .product-price {{
+                color: #FF3B30;
+                font-size: 18px;
+                font-weight: 700;
+            }}
+            
+            .form-group {{
+                margin-bottom: 18px;
+            }}
+            
+            .form-group label {{
+                display: block;
+                margin-bottom: 6px;
+                font-size: 14px;
+                font-weight: 500;
+                color: #444;
+            }}
+            
+            .form-control {{
+                width: 100%;
+                padding: 12px 15px;
+                border: 2px solid #e1e5e9;
+                border-radius: 10px;
+                font-size: 14px;
+                transition: all 0.3s ease;
+                background: #fff;
+            }}
+            
+            .form-control:focus {{
+                outline: none;
+                border-color: #1DB954;
+                box-shadow: 0 0 0 3px rgba(29, 185, 84, 0.1);
+            }}
+            
+            .form-control:disabled {{
+                background-color: #f8f9fa;
+                cursor: not-allowed;
+            }}
+            
+            .address-row {{
+                display: flex;
+                gap: 10px;
+                margin-bottom: 10px;
+            }}
+            
+            .address-col {{
+                flex: 1;
+            }}
+            
+            .address-preview {{
+                margin-top: 15px;
+                padding: 15px;
+                background: #f8f9fa;
+                border-radius: 10px;
+                border-left: 4px solid #1DB954;
+                display: none;
+            }}
+            
+            .address-preview-content {{
+                font-size: 13px;
+                line-height: 1.5;
+            }}
+            
+            .address-preview-content strong {{
+                color: #444;
+                display: block;
+                margin-bottom: 5px;
+            }}
+            
+            .address-preview-content p {{
+                margin: 0;
+                color: #666;
+            }}
+            
+            .total-section {{
+                background: #f8f9fa;
+                padding: 18px;
+                border-radius: 12px;
+                margin: 25px 0;
+                text-align: center;
+            }}
+            
+            .total-label {{
+                font-size: 14px;
+                color: #666;
+                margin-bottom: 5px;
+            }}
+            
+            .total-amount {{
+                font-size: 24px;
+                font-weight: 700;
+                color: #FF3B30;
+            }}
+            
+            .submit-btn {{
+                width: 100%;
+                padding: 16px;
+                border: none;
+                border-radius: 50px;
+                background: linear-gradient(135deg, #1DB954 0%, #17a74d 100%);
+                color: white;
+                font-size: 16px;
+                font-weight: 600;
+                cursor: pointer;
+                transition: all 0.3s ease;
+                margin-top: 10px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                gap: 10px;
+            }}
+            
+            .submit-btn:hover {{
+                transform: translateY(-2px);
+                box-shadow: 0 5px 15px rgba(29, 185, 84, 0.3);
+            }}
+            
+            .submit-btn:active {{
+                transform: translateY(0);
+            }}
+            
+            .submit-btn:disabled {{
+                opacity: 0.7;
+                cursor: not-allowed;
+                transform: none;
+            }}
+            
+            .loading-spinner {{
+                display: inline-block;
+                width: 18px;
+                height: 18px;
+                border: 2px solid rgba(255, 255, 255, 0.3);
+                border-top: 2px solid white;
+                border-radius: 50%;
+                animation: spin 1s linear infinite;
+            }}
+            
+            @keyframes spin {{
+                0% {{ transform: rotate(0deg); }}
+                100% {{ transform: rotate(360deg); }}
+            }}
+            
+            .note {{
+                margin-top: 15px;
+                font-size: 12px;
+                color: #888;
+                text-align: center;
+                line-height: 1.5;
+            }}
+            
+            @media (max-width: 480px) {{
+                .container {{
+                    border-radius: 15px;
+                }}
+                
+                .content {{
+                    padding: 15px;
+                }}
+                
+                .product-section {{
+                    flex-direction: column;
+                    text-align: center;
+                }}
+                
+                .product-image-container {{
+                    width: 100%;
+                    height: 200px;
+                    margin: 0 auto 15px;
+                }}
+                
+                .address-row {{
+                    flex-direction: column;
+                    gap: 10px;
+                }}
+                
+                .header h2 {{
+                    font-size: 18px;
+                }}
+                
+                .total-amount {{
+                    font-size: 22px;
+                }}
+            }}
+            
+            .error-message {{
+                color: #FF3B30;
+                font-size: 12px;
+                margin-top: 5px;
+                display: none;
+            }}
+            
+            .form-control.error + .error-message {{
+                display: block;
             }}
         </style>
     </head>
-    <body style="font-family: Arial, sans-serif; margin: 0; padding: 0; background: #f5f5f5;">
-        <div style="max-width: 480px; margin: 0 auto; background: #fff; min-height: 100vh;">
-            <div style="padding: 16px; border-bottom: 1px solid #eee; text-align: center;">
-                <h2 style="margin: 0; font-size: 18px;">ĐẶT HÀNG - {current_fanpage_name}</h2>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h2>ĐẶT HÀNG - {current_fanpage_name}</h2>
             </div>
-            <div style="padding: 16px;">
-                <div style="display: flex; gap: 12px;">
-                    <div class="image-container" id="image-container">
-                        {"<img id='product-image' src='" + default_image + "' style='width: 100%; height: 100%; object-fit: cover;' onerror=\"this.onerror=null; this.src='https://via.placeholder.com/120x120?text=No+Image'\" />" if default_image else "<div class='placeholder-image'>Chưa có ảnh sản phẩm</div>"}
+            
+            <div class="content">
+                <!-- Product Info Section -->
+                <div class="product-section">
+                    <div class="product-image-container" id="image-container">
+                        {"<img id='product-image' src='" + default_image + "' class='product-image' onerror=\"this.onerror=null; this.src='https://via.placeholder.com/120x120?text=No+Image'\" />" if default_image else "<div class='placeholder-image'>Chưa có ảnh sản phẩm</div>"}
                     </div>
-                    <div style="flex: 1;">
-                        <!-- THAY ĐỔI: Bỏ mã sản phẩm khỏi tiêu đề, hiển thị riêng với kích thước nhỏ -->
+                    <div class="product-info">
                         <div class="product-code">Mã: {ms}</div>
-                        <h3 style="margin-top: 0; font-size: 16px; margin-bottom: 4px;">{row.get('Ten','')}</h3>
-                        <div style="color: #FF3B30; font-weight: bold; font-size: 16px;" id="price-display">
-                            {price_int:,.0f} đ
+                        <h3 class="product-title">{row.get('Ten','')}</h3>
+                        <div class="product-price" id="price-display">{price_int:,.0f} đ</div>
+                    </div>
+                </div>
+
+                <!-- Order Form -->
+                <form id="orderForm">
+                    <!-- Color Selection -->
+                    <div class="form-group">
+                        <label for="color">Màu sắc:</label>
+                        <select id="color" class="form-control">
+                            {''.join(f"<option value='{c}'>{c}</option>" for c in colors)}
+                        </select>
+                    </div>
+
+                    <!-- Size Selection -->
+                    <div class="form-group">
+                        <label for="size">Size:</label>
+                        <select id="size" class="form-control">
+                            {''.join(f"<option value='{s}'>{s}</option>" for s in sizes)}
+                        </select>
+                    </div>
+
+                    <!-- Quantity -->
+                    <div class="form-group">
+                        <label for="quantity">Số lượng:</label>
+                        <input type="number" id="quantity" class="form-control" value="1" min="1">
+                    </div>
+
+                    <!-- Total Price -->
+                    <div class="total-section">
+                        <div class="total-label">Tạm tính:</div>
+                        <div class="total-amount" id="total-display">{price_int:,.0f} đ</div>
+                    </div>
+
+                    <!-- Customer Information -->
+                    <div class="form-group">
+                        <label for="customerName">Họ và tên:</label>
+                        <input type="text" id="customerName" class="form-control" required>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="phone">Số điện thoại:</label>
+                        <input type="tel" id="phone" class="form-control" required>
+                    </div>
+
+                    <!-- Address Section with ViettelPost API -->
+                    <div class="form-group">
+                        <label>Địa chỉ nhận hàng:</label>
+                        
+                        <div class="address-row">
+                            <div class="address-col">
+                                <select id="province" class="form-control" 
+                                        onchange="loadDistricts(this.value)">
+                                    <option value="">Chọn Tỉnh/Thành phố</option>
+                                </select>
+                            </div>
+                            <div class="address-col">
+                                <select id="district" class="form-control" disabled
+                                        onchange="loadWards(this.value)">
+                                    <option value="">Chọn Quận/Huyện</option>
+                                </select>
+                            </div>
+                            <div class="address-col">
+                                <select id="ward" class="form-control" disabled>
+                                    <option value="">Chọn Phường/Xã</option>
+                                </select>
+                            </div>
                         </div>
+                        
+                        <div class="form-group" style="margin-top: 10px;">
+                            <input type="text" id="addressDetail" class="form-control" 
+                                   placeholder="Số nhà, tên đường, tòa nhà..." required>
+                        </div>
+                        
+                        <!-- Address Preview -->
+                        <div id="addressPreview" class="address-preview"></div>
+                        
+                        <input type="hidden" id="fullAddress" name="fullAddress">
+                        <input type="hidden" id="provinceName">
+                        <input type="hidden" id="districtName">
+                        <input type="hidden" id="wardName">
                     </div>
-                </div>
 
-                <div style="margin-top: 16px;">
-                    <label for="color" style="display: block; margin-bottom: 4px; font-size: 14px;">Màu sắc:</label>
-                    <select id="color" style="width: 100%; padding: 8px; border-radius: 4px; border: 1px solid #ccc;">
-                        {''.join(f"<option value='{c}'>{c}</option>" for c in colors)}
-                    </select>
-                </div>
+                    <!-- Submit Button -->
+                    <button type="button" id="submitBtn" class="submit-btn" onclick="submitOrder()">
+                        ĐẶT HÀNG NGAY
+                    </button>
 
-                <div style="margin-top: 12px;">
-                    <label for="size" style="display: block; margin-bottom: 4px; font-size: 14px;">Size:</label>
-                    <select id="size" style="width: 100%; padding: 8px; border-radius: 4px; border: 1px solid #ccc;">
-                        {''.join(f"<option value='{s}'>{s}</option>" for s in sizes)}
-                    </select>
-                </div>
-
-                <div style="margin-top: 12px;">
-                    <label for="quantity" style="display: block; margin-bottom: 4px; font-size: 14px;">Số lượng:</label>
-                    <input type="number" id="quantity" value="1" min="1" style="width: 100%; padding: 8px; border-radius: 4px; border: 1px solid #ccc;" />
-                </div>
-
-                <div style="margin-top: 16px; padding: 12px; background: #f9f9f9; border-radius: 8px;">
-                    <div style="font-size: 14px; margin-bottom: 4px;">Tạm tính:</div>
-                    <div id="total-display" style="font-size: 18px; color: #FF3B30; font-weight: bold;">
-                        {price_int:,.0f} đ
-                    </div>
-                </div>
-
-                <div style="margin-top: 16px;">
-                    <label for="customerName" style="display: block; margin-bottom: 4px; font-size: 14px;">Họ và tên:</label>
-                    <input type="text" id="customerName" style="width: 100%; padding: 8px; border-radius: 4px; border: 1px solid #ccc;" />
-                </div>
-
-                <div style="margin-top: 12px;">
-                    <label for="phone" style="display: block; margin-bottom: 4px; font-size: 14px;">Số điện thoại:</label>
-                    <input type="tel" id="phone" style="width: 100%; padding: 8px; border-radius: 4px; border: 1px solid #ccc;" />
-                </div>
-
-                <div style="margin-top: 12px;">
-                    <label for="address" style="display: block; margin-bottom: 4px; font-size: 14px;">Địa chỉ nhận hàng:</label>
-                    <textarea id="address" rows="3" style="width: 100%; padding: 8px; border-radius: 4px; border: 1px solid #ccc;"></textarea>
-                </div>
-
-                <button onclick="submitOrder()" style="margin-top: 20px; width: 100%; padding: 12px; border-radius: 999px; border: none; background: #1DB954; color: #fff; font-size: 16px; font-weight: bold;">
-                    ĐẶT HÀNG NGAY
-                </button>
-
-                <p style="margin-top: 12px; font-size: 12px; color: #666; text-align: center;">
-                    Shop sẽ gọi xác nhận trong 5-10 phút. Thanh toán khi nhận hàng (COD).
-                </p>
+                    <p class="note">
+                        Shop sẽ gọi xác nhận trong 5-10 phút. Thanh toán khi nhận hàng (COD).
+                    </p>
+                </form>
             </div>
         </div>
 
         <script>
-            const basePrice = {price_int};
-            const productMS = "{ms}";
-
+            // Global variables
+            const VIETTELPOST_TOKEN = "51D25F6942D338044E732CC1B08FBB82";
+            const PRODUCT_MS = "{ms}";
+            const PRODUCT_UID = "{uid}";
+            const BASE_PRICE = {price_int};
+            const DOMAIN = "{'https://' + DOMAIN if not DOMAIN.startswith('http') else DOMAIN}";
+            const API_BASE_URL = "{('/api' if DOMAIN.startswith('http') else 'https://' + DOMAIN + '/api')}";
+            
+            // ============================================
+            // PRODUCT VARIANT HANDLING
+            // ============================================
+            
             function formatPrice(n) {{
                 return n.toLocaleString('vi-VN') + ' đ';
             }}
-
+            
             async function updateImageByVariant() {{
                 const color = document.getElementById('color').value;
                 const size = document.getElementById('size').value;
                 const imageContainer = document.getElementById('image-container');
                 
-                // Hiển thị loading
+                // Show loading
                 const currentImg = imageContainer.querySelector('img');
                 if (currentImg) {{
                     currentImg.classList.add('loading');
                 }}
                 
                 try {{
-                    const res = await fetch(`/api/get-variant-image?ms=${{productMS}}&color=${{encodeURIComponent(color)}}&size=${{encodeURIComponent(size)}}`);
+                    const res = await fetch(`${{API_BASE_URL}}/get-variant-image?ms=${{PRODUCT_MS}}&color=${{encodeURIComponent(color)}}&size=${{encodeURIComponent(size)}}`);
                     if (res.ok) {{
                         const data = await res.json();
                         if (data.image && data.image.trim() !== '') {{
-                            // Cập nhật ảnh mới
                             let imgElement = imageContainer.querySelector('img');
                             if (!imgElement) {{
-                                // Nếu chưa có thẻ img, tạo mới
                                 imgElement = document.createElement('img');
-                                imgElement.style.width = '100%';
-                                imgElement.style.height = '100%';
-                                imgElement.style.objectFit = 'cover';
+                                imgElement.className = 'product-image';
                                 imgElement.onerror = function() {{
                                     this.onerror = null;
                                     this.src = 'https://via.placeholder.com/120x120?text=No+Image';
@@ -2667,107 +2982,448 @@ def order_form():
                             }}
                             imgElement.src = data.image;
                         }} else {{
-                            // Nếu không có ảnh, hiển thị placeholder
                             imageContainer.innerHTML = '<div class="placeholder-image">Chưa có ảnh cho thuộc tính này</div>';
                         }}
                     }}
                 }} catch (e) {{
                     console.error('Error updating image:', e);
                 }} finally {{
-                    // Bỏ loading
                     if (currentImg) {{
                         setTimeout(() => currentImg.classList.remove('loading'), 300);
                     }}
                 }}
             }}
-
+            
             async function updatePriceByVariant() {{
                 const color = document.getElementById('color').value;
                 const size = document.getElementById('size').value;
                 const quantity = parseInt(document.getElementById('quantity').value || '1');
 
                 try {{
-                    const res = await fetch(`/api/get-variant-price?ms=${{productMS}}&color=${{encodeURIComponent(color)}}&size=${{encodeURIComponent(size)}}`);
-                    if (!res.ok) throw new Error('request failed');
-                    const data = await res.json();
-                    const price = data.price || basePrice;
+                    const res = await fetch(`${{API_BASE_URL}}/get-variant-price?ms=${{PRODUCT_MS}}&color=${{encodeURIComponent(color)}}&size=${{encodeURIComponent(size)}}`);
+                    if (res.ok) {{
+                        const data = await res.json();
+                        const price = data.price || BASE_PRICE;
 
-                    document.getElementById('price-display').innerText = formatPrice(price);
-                    document.getElementById('total-display').innerText = formatPrice(price * quantity);
+                        document.getElementById('price-display').innerText = formatPrice(price);
+                        document.getElementById('total-display').innerText = formatPrice(price * quantity);
+                    }}
                 }} catch (e) {{
-                    document.getElementById('price-display').innerText = formatPrice(basePrice);
-                    document.getElementById('total-display').innerText = formatPrice(basePrice * quantity);
+                    document.getElementById('price-display').innerText = formatPrice(BASE_PRICE);
+                    document.getElementById('total-display').innerText = formatPrice(BASE_PRICE * quantity);
                 }}
             }}
-
-            // Cập nhật cả ảnh và giá khi thay đổi màu/size
+            
             async function updateVariantInfo() {{
                 await Promise.all([
                     updateImageByVariant(),
                     updatePriceByVariant()
                 ]);
             }}
-
-            document.getElementById('color').addEventListener('change', updateVariantInfo);
-            document.getElementById('size').addEventListener('change', updateVariantInfo);
-            document.getElementById('quantity').addEventListener('input', updatePriceByVariant);
-
-            // Cập nhật lần đầu khi tải trang
-            document.addEventListener('DOMContentLoaded', function() {{
-                updateVariantInfo();
-            }});
-
-            async function submitOrder() {{
-                const color = document.getElementById('color').value;
-                const size = document.getElementById('size').value;
-                const quantity = parseInt(document.getElementById('quantity').value || '1');
-                const customerName = document.getElementById('customerName').value;
-                const phone = document.getElementById('phone').value;
-                const address = document.getElementById('address').value;
-
-                // Kiểm tra thông tin bắt buộc
-                if (!customerName.trim()) {{
-                    alert('Vui lòng nhập họ và tên');
-                    return;
-                }}
-                if (!phone.trim()) {{
-                    alert('Vui lòng nhập số điện thoại');
-                    return;
-                }}
-                if (!address.trim()) {{
-                    alert('Vui lòng nhập địa chỉ nhận hàng');
-                    return;
-                }}
-
+            
+            // ============================================
+            // VIETTELPOST ADDRESS API
+            // ============================================
+            
+            // Load provinces from ViettelPost API
+            async function loadProvinces() {{
+                const provinceSelect = document.getElementById('province');
+                
                 try {{
-                    const res = await fetch('/api/submit-order', {{
+                    // Show loading
+                    provinceSelect.innerHTML = '<option value="">Đang tải tỉnh/thành...</option>';
+                    provinceSelect.disabled = true;
+                    
+                    const response = await fetch('https://partner.viettelpost.vn/v2/categories/listProvince', {{
+                        method: 'GET',
+                        headers: {{
+                            'Content-Type': 'application/json',
+                            'Token': VIETTELPOST_TOKEN
+                        }}
+                    }});
+                    
+                    const data = await response.json();
+                    
+                    if (data.status === 200 && data.data) {{
+                        // Sort provinces by name
+                        const provinces = data.data.sort((a, b) => 
+                            a.PROVINCE_NAME.localeCompare(b.PROVINCE_NAME, 'vi')
+                        );
+                        
+                        provinceSelect.innerHTML = '<option value="">Chọn Tỉnh/Thành phố</option>';
+                        provinces.forEach(province => {{
+                            const option = document.createElement('option');
+                            option.value = province.PROVINCE_ID;
+                            option.textContent = province.PROVINCE_NAME;
+                            provinceSelect.appendChild(option);
+                        }});
+                        
+                        console.log(`Đã tải ${{provinces.length}} tỉnh/thành phố`);
+                        
+                        // Load preset address from URL if any
+                        loadPresetAddress();
+                    }} else {{
+                        throw new Error('Không lấy được dữ liệu từ ViettelPost');
+                    }}
+                }} catch (error) {{
+                    console.error('Lỗi khi load tỉnh/thành:', error);
+                    // Fallback to static list
+                    loadStaticProvinces();
+                }} finally {{
+                    provinceSelect.disabled = false;
+                }}
+            }}
+            
+            // Load districts based on selected province
+            async function loadDistricts(provinceId) {{
+                const districtSelect = document.getElementById('district');
+                const wardSelect = document.getElementById('ward');
+                
+                if (!provinceId) {{
+                    districtSelect.innerHTML = '<option value="">Chọn Quận/Huyện</option>';
+                    wardSelect.innerHTML = '<option value="">Chọn Phường/Xã</option>';
+                    districtSelect.disabled = true;
+                    wardSelect.disabled = true;
+                    updateFullAddress();
+                    return;
+                }}
+                
+                try {{
+                    districtSelect.innerHTML = '<option value="">Đang tải quận/huyện...</option>';
+                    districtSelect.disabled = true;
+                    wardSelect.disabled = true;
+                    
+                    const response = await fetch(`https://partner.viettelpost.vn/v2/categories/listDistrict?provinceId=${{provinceId}}`, {{
+                        method: 'GET',
+                        headers: {{
+                            'Content-Type': 'application/json',
+                            'Token': VIETTELPOST_TOKEN
+                        }}
+                    }});
+                    
+                    const data = await response.json();
+                    
+                    if (data.status === 200 && data.data) {{
+                        // Sort districts by name
+                        const districts = data.data.sort((a, b) => 
+                            a.DISTRICT_NAME.localeCompare(b.DISTRICT_NAME, 'vi')
+                        );
+                        
+                        districtSelect.innerHTML = '<option value="">Chọn Quận/Huyện</option>';
+                        districts.forEach(district => {{
+                            const option = document.createElement('option');
+                            option.value = district.DISTRICT_ID;
+                            option.textContent = district.DISTRICT_NAME;
+                            districtSelect.appendChild(option);
+                        }});
+                        
+                        console.log(`Đã tải ${{districts.length}} quận/huyện`);
+                        districtSelect.disabled = false;
+                        
+                        // Clear wards
+                        wardSelect.innerHTML = '<option value="">Chọn Phường/Xã</option>';
+                        wardSelect.disabled = true;
+                    }} else {{
+                        districtSelect.innerHTML = '<option value="">Không có dữ liệu</option>';
+                    }}
+                }} catch (error) {{
+                    console.error('Lỗi khi load quận/huyện:', error);
+                    districtSelect.innerHTML = '<option value="">Lỗi tải dữ liệu</option>';
+                }} finally {{
+                    updateFullAddress();
+                }}
+            }}
+            
+            // Load wards based on selected district
+            async function loadWards(districtId) {{
+                const wardSelect = document.getElementById('ward');
+                
+                if (!districtId) {{
+                    wardSelect.innerHTML = '<option value="">Chọn Phường/Xã</option>';
+                    wardSelect.disabled = true;
+                    updateFullAddress();
+                    return;
+                }}
+                
+                try {{
+                    wardSelect.innerHTML = '<option value="">Đang tải phường/xã...</option>';
+                    wardSelect.disabled = true;
+                    
+                    const response = await fetch(`https://partner.viettelpost.vn/v2/categories/listWards?districtId=${{districtId}}`, {{
+                        method: 'GET',
+                        headers: {{
+                            'Content-Type': 'application/json',
+                            'Token': VIETTELPOST_TOKEN
+                        }}
+                    }});
+                    
+                    const data = await response.json();
+                    
+                    if (data.status === 200 && data.data) {{
+                        // Sort wards by name
+                        const wards = data.data.sort((a, b) => 
+                            a.WARDS_NAME.localeCompare(b.WARDS_NAME, 'vi')
+                        );
+                        
+                        wardSelect.innerHTML = '<option value="">Chọn Phường/Xã</option>';
+                        wards.forEach(ward => {{
+                            const option = document.createElement('option');
+                            option.value = ward.WARDS_ID;
+                            option.textContent = ward.WARDS_NAME;
+                            wardSelect.appendChild(option);
+                        }});
+                        
+                        console.log(`Đã tải ${{wards.length}} phường/xã`);
+                        wardSelect.disabled = false;
+                    }} else {{
+                        wardSelect.innerHTML = '<option value="">Không có dữ liệu</option>';
+                    }}
+                }} catch (error) {{
+                    console.error('Lỗi khi load phường/xã:', error);
+                    wardSelect.innerHTML = '<option value="">Lỗi tải dữ liệu</option>';
+                }} finally {{
+                    updateFullAddress();
+                }}
+            }}
+            
+            // Fallback: Static province list
+            function loadStaticProvinces() {{
+                const staticProvinces = [
+                    "An Giang", "Bà Rịa - Vũng Tàu", "Bắc Giang", "Bắc Kạn", "Bạc Liêu", 
+                    "Bắc Ninh", "Bến Tre", "Bình Định", "Bình Dương", "Bình Phước", 
+                    "Bình Thuận", "Cà Mau", "Cao Bằng", "Cần Thơ", "Đà Nẵng", 
+                    "Đắk Lắk", "Đắk Nông", "Điện Biên", "Đồng Nai", "Đồng Tháp", 
+                    "Gia Lai", "Hà Giang", "Hà Nam", "Hà Nội", "Hà Tĩnh", 
+                    "Hải Dương", "Hải Phòng", "Hậu Giang", "Hòa Bình", "Hưng Yên", 
+                    "Khánh Hòa", "Kiên Giang", "Kon Tum", "Lai Châu", "Lâm Đồng", 
+                    "Lạng Sơn", "Lào Cai", "Long An", "Nam Định", "Nghệ An", 
+                    "Ninh Bình", "Ninh Thuận", "Phú Thọ", "Phú Yên", "Quảng Bình", 
+                    "Quảng Nam", "Quảng Ngãi", "Quảng Ninh", "Quảng Trị", "Sóc Trăng", 
+                    "Sơn La", "Tây Ninh", "Thái Bình", "Thái Nguyên", "Thanh Hóa", 
+                    "Thừa Thiên Huế", "Tiền Giang", "TP Hồ Chí Minh", "Trà Vinh", 
+                    "Tuyên Quang", "Vĩnh Long", "Vĩnh Phúc", "Yên Bái"
+                ];
+                
+                const provinceSelect = document.getElementById('province');
+                provinceSelect.innerHTML = '<option value="">Chọn Tỉnh/Thành phố</option>';
+                
+                staticProvinces.forEach((province, index) => {{
+                    const option = document.createElement('option');
+                    option.value = index + 1;
+                    option.textContent = province;
+                    provinceSelect.appendChild(option);
+                }});
+                
+                provinceSelect.disabled = false;
+                console.log('Đã tải danh sách tỉnh thành tĩnh (fallback)');
+            }}
+            
+            // Update full address from all components
+            function updateFullAddress() {{
+                const provinceText = document.getElementById('province').options[document.getElementById('province').selectedIndex]?.text || '';
+                const districtText = document.getElementById('district').options[document.getElementById('district').selectedIndex]?.text || '';
+                const wardText = document.getElementById('ward').options[document.getElementById('ward').selectedIndex]?.text || '';
+                const detailText = document.getElementById('addressDetail').value || '';
+                
+                // Save to hidden fields
+                document.getElementById('provinceName').value = provinceText;
+                document.getElementById('districtName').value = districtText;
+                document.getElementById('wardName').value = wardText;
+                
+                // Build full address
+                const fullAddress = [detailText, wardText, districtText, provinceText]
+                    .filter(part => part.trim() !== '')
+                    .join(', ');
+                
+                document.getElementById('fullAddress').value = fullAddress;
+                
+                // Update preview
+                const previewElement = document.getElementById('addressPreview');
+                if (fullAddress.trim()) {{
+                    previewElement.innerHTML = `
+                        <div class="address-preview-content">
+                            <strong>Địa chỉ nhận hàng:</strong>
+                            <p>${{fullAddress}}</p>
+                        </div>
+                    `;
+                    previewElement.style.display = 'block';
+                }} else {{
+                    previewElement.style.display = 'none';
+                }}
+                
+                return fullAddress;
+            }}
+            
+            // Load preset address from URL parameters
+            function loadPresetAddress() {{
+                const urlParams = new URLSearchParams(window.location.search);
+                const presetAddress = urlParams.get('address');
+                
+                if (presetAddress) {{
+                    document.getElementById('addressDetail').value = presetAddress;
+                    updateFullAddress();
+                }}
+            }}
+            
+            // ============================================
+            // FORM VALIDATION AND SUBMISSION
+            // ============================================
+            
+            async function submitOrder() {{
+                // Collect form data
+                const formData = {{
+                    ms: PRODUCT_MS,
+                    uid: PRODUCT_UID,
+                    color: document.getElementById('color').value,
+                    size: document.getElementById('size').value,
+                    quantity: parseInt(document.getElementById('quantity').value || '1'),
+                    customerName: document.getElementById('customerName').value.trim(),
+                    phone: document.getElementById('phone').value.trim(),
+                    address: updateFullAddress(),
+                    provinceId: document.getElementById('province').value,
+                    districtId: document.getElementById('district').value,
+                    wardId: document.getElementById('ward').value,
+                    provinceName: document.getElementById('provinceName').value,
+                    districtName: document.getElementById('districtName').value,
+                    wardName: document.getElementById('wardName').value,
+                    addressDetail: document.getElementById('addressDetail').value.trim()
+                }};
+                
+                // Validate required fields
+                if (!formData.customerName) {{
+                    alert('Vui lòng nhập họ và tên');
+                    document.getElementById('customerName').focus();
+                    return;
+                }}
+                
+                if (!formData.phone) {{
+                    alert('Vui lòng nhập số điện thoại');
+                    document.getElementById('phone').focus();
+                    return;
+                }}
+                
+                // Validate phone number
+                const phoneRegex = /^(0|\\+84)(\\d{{9,10}})$/;
+                if (!phoneRegex.test(formData.phone)) {{
+                    alert('Số điện thoại không hợp lệ. Vui lòng nhập số điện thoại 10-11 chữ số');
+                    document.getElementById('phone').focus();
+                    return;
+                }}
+                
+                // Validate address
+                if (!formData.provinceId) {{
+                    alert('Vui lòng chọn Tỉnh/Thành phố');
+                    document.getElementById('province').focus();
+                    return;
+                }}
+                
+                if (!formData.districtId) {{
+                    alert('Vui lòng chọn Quận/Huyện');
+                    document.getElementById('district').focus();
+                    return;
+                }}
+                
+                if (!formData.wardId) {{
+                    alert('Vui lòng chọn Phường/Xã');
+                    document.getElementById('ward').focus();
+                    return;
+                }}
+                
+                if (!formData.addressDetail) {{
+                    alert('Vui lòng nhập địa chỉ chi tiết (số nhà, tên đường)');
+                    document.getElementById('addressDetail').focus();
+                    return;
+                }}
+                
+                // Show loading
+                const submitBtn = document.getElementById('submitBtn');
+                const originalText = submitBtn.innerHTML;
+                submitBtn.innerHTML = '<span class="loading-spinner"></span> ĐANG XỬ LÝ...';
+                submitBtn.disabled = true;
+                
+                try {{
+                    const response = await fetch(`${{API_BASE_URL}}/submit-order`, {{
                         method: 'POST',
                         headers: {{
                             'Content-Type': 'application/json'
                         }},
-                        body: JSON.stringify({{
-                            ms: "{ms}",
-                            uid: "{uid}",
-                            color,
-                            size,
-                            quantity,
-                            customerName,
-                            phone,
-                            address
-                        }})
+                        body: JSON.stringify(formData)
                     }});
-
-                    const data = await res.json();
-                    if (res.ok) {{
+                    
+                    const data = await response.json();
+                    
+                    if (response.ok) {{
+                        // Success
                         alert('🎉 Đã gửi đơn hàng thành công!\\n\\nShop sẽ liên hệ xác nhận trong 5-10 phút.\\nCảm ơn anh/chị đã đặt hàng! ❤️');
-                        // Có thể reset form hoặc redirect
+                        
+                        // Reset form (optional)
+                        document.getElementById('customerName').value = '';
+                        document.getElementById('phone').value = '';
+                        document.getElementById('addressDetail').value = '';
+                        document.getElementById('province').selectedIndex = 0;
+                        document.getElementById('district').innerHTML = '<option value="">Chọn Quận/Huyện</option>';
+                        document.getElementById('ward').innerHTML = '<option value="">Chọn Phường/Xã</option>';
+                        document.getElementById('district').disabled = true;
+                        document.getElementById('ward').disabled = true;
+                        updateFullAddress();
+                        
                     }} else {{
-                        alert('❌ Có lỗi xảy ra: ' + (data.message || 'Vui lòng thử lại sau'));
+                        // Error
+                        alert(`❌ ${{data.message || 'Có lỗi xảy ra. Vui lòng thử lại sau'}}`);
                     }}
-                }} catch (e) {{
+                }} catch (error) {{
+                    console.error('Lỗi khi gửi đơn hàng:', error);
                     alert('❌ Lỗi kết nối. Vui lòng thử lại sau!');
+                }} finally {{
+                    // Restore button
+                    submitBtn.innerHTML = originalText;
+                    submitBtn.disabled = false;
                 }}
             }}
+            
+            // ============================================
+            // INITIALIZATION
+            // ============================================
+            
+            document.addEventListener('DOMContentLoaded', function() {{
+                // Load provinces
+                loadProvinces();
+                
+                // Event listeners for product variant changes
+                document.getElementById('color').addEventListener('change', updateVariantInfo);
+                document.getElementById('size').addEventListener('change', updateVariantInfo);
+                document.getElementById('quantity').addEventListener('input', updatePriceByVariant);
+                
+                // Event listeners for address changes
+                document.getElementById('province').addEventListener('change', function() {{
+                    loadDistricts(this.value);
+                    updateFullAddress();
+                }});
+                
+                document.getElementById('district').addEventListener('change', function() {{
+                    loadWards(this.value);
+                    updateFullAddress();
+                }});
+                
+                document.getElementById('ward').addEventListener('change', updateFullAddress);
+                document.getElementById('addressDetail').addEventListener('input', updateFullAddress);
+                
+                // Initialize product variant info
+                updateVariantInfo();
+                
+                // Enter key to submit form
+                document.getElementById('orderForm').addEventListener('keypress', function(e) {{
+                    if (e.which === 13) {{
+                        e.preventDefault();
+                        submitOrder();
+                    }}
+                }});
+                
+                // Focus on first field
+                setTimeout(() => {{
+                    document.getElementById('customerName').focus();
+                }}, 500);
+            }});
         </script>
     </body>
     </html>
@@ -2907,7 +3563,13 @@ def api_submit_order():
     customerName = data.get("customerName") or ""
     phone = data.get("phone") or ""
     address = data.get("address") or ""
-
+    
+    # Thêm các trường mới từ form địa chỉ
+    province_name = data.get("provinceName", "")
+    district_name = data.get("districtName", "")
+    ward_name = data.get("wardName", "")
+    address_detail = data.get("addressDetail", "")
+    
     load_products()
     row = PRODUCTS.get(ms)
     if not row:
@@ -2918,6 +3580,7 @@ def api_submit_order():
     total = price_int * quantity
 
     if uid:
+        # Tin nhắn chi tiết hơn với thông tin địa chỉ đầy đủ
         msg = (
             "🎉 Shop đã nhận được đơn hàng mới:\n"
             f"🛍 Sản phẩm: [{ms}] {row.get('Ten','')}\n"
@@ -2927,15 +3590,31 @@ def api_submit_order():
             f"👤 Người nhận: {customerName}\n"
             f"📱 SĐT: {phone}\n"
             f"🏠 Địa chỉ: {address}\n"
+            f"📍 Chi tiết: {address_detail}\n"
+            f"🗺️ Khu vực: {ward_name}, {district_name}, {province_name}\n"
             "────────────────────\n"
             "⏰ Shop sẽ gọi điện xác nhận trong 5-10 phút.\n"
+            "🚚 Đơn hàng sẽ được giao bởi ViettelPost\n"
             "💳 Thanh toán khi nhận hàng (COD)\n"
             "────────────────────\n"
             "Cảm ơn anh/chị đã đặt hàng! ❤️"
         )
         send_message(uid, msg)
 
-    return {"status": "ok", "message": "Đơn hàng đã được tiếp nhận"}
+    return {
+        "status": "ok", 
+        "message": "Đơn hàng đã được tiếp nhận",
+        "order_details": {
+            "product_code": ms,
+            "customer_name": customerName,
+            "phone": phone,
+            "address": address,
+            "province": province_name,
+            "district": district_name,
+            "ward": ward_name,
+            "total": total
+        }
+    }
 
 @app.route("/static/<path:path>")
 def static_files(path):
@@ -2992,7 +3671,11 @@ def health_check():
         "duplicate_protection": True,
         "intent_analysis": "GPT-based",
         "image_send_debounce": "5s",
-        "image_request_processing": "Enabled with confidence > 0.85"
+        "image_request_processing": "Enabled with confidence > 0.85",
+        "address_form": "ViettelPost API (dropdown 3 cấp)",
+        "viettelpost_token": "configured",
+        "address_validation": "enabled",
+        "phone_validation": "regex validation"
     }, 200
 
 # ============================================
@@ -3007,6 +3690,10 @@ if __name__ == "__main__":
     print(f"🟢 Image Processing: Base64 + Fallback URL")
     print(f"🟢 Search Algorithm: TF-IDF + Cosine Similarity")
     print(f"🟢 Image Carousel: 5 sản phẩm phù hợp nhất")
+    print(f"🟢 Address Form: ViettelPost API (dropdown 3 cấp)")
+    print(f"🟢 ViettelPost Token: {'CẤU HÌNH' if VIETTELPOST_TOKEN else 'CHƯA CẤU HÌNH'}")
+    print(f"🟢 Address Validation: BẬT")
+    print(f"🟢 Phone Validation: BẬT (regex)")
     print(f"🟢 Image Debounce: 3 giây")
     print(f"🟢 Text Message Debounce: 1 giây")
     print(f"🟢 Echo Message Debounce: 2 giây")
