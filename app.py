@@ -2440,7 +2440,7 @@ Anh/chị quan tâm sản phẩm nào ạ?"""
     return "OK", 200
 
 # ============================================
-# ORDER FORM PAGE (CẢI TIẾN VỚI VIETTELPOST API)
+# ORDER FORM PAGE (ĐÃ SỬA DÙNG API MIỄN PHÍ - provinces.open-api.vn)
 # ============================================
 
 @app.route("/order-form", methods=["GET"])
@@ -2505,7 +2505,7 @@ def order_form():
     price_str = row.get("Gia", "0")
     price_int = extract_price_int(price_str) or 0
 
-    # Tạo HTML với form địa chỉ cải tiến sử dụng ViettelPost API
+    # Tạo HTML với form địa chỉ sử dụng API miễn phí
     html = f"""
     <!DOCTYPE html>
     <html>
@@ -2886,7 +2886,7 @@ def order_form():
                         <input type="tel" id="phone" class="form-control" required>
                     </div>
 
-                    <!-- Address Section with ViettelPost API -->
+                    <!-- Address Section với Open API -->
                     <div class="form-group">
                         <label>Địa chỉ nhận hàng:</label>
                         
@@ -2938,7 +2938,6 @@ def order_form():
 
         <script>
             // Global variables
-            const VIETTELPOST_TOKEN = "51D25F6942D338044E732CC1B08FBB82";
             const PRODUCT_MS = "{ms}";
             const PRODUCT_UID = "{uid}";
             const BASE_PRICE = {price_int};
@@ -3022,10 +3021,10 @@ def order_form():
             }}
             
             // ============================================
-            // VIETTELPOST ADDRESS API
+            // VIETNAM ADDRESS API (Open API - provinces.open-api.vn)
             // ============================================
             
-            // Load provinces from ViettelPost API
+            // Load provinces từ Open API
             async function loadProvinces() {{
                 const provinceSelect = document.getElementById('province');
                 
@@ -3034,39 +3033,28 @@ def order_form():
                     provinceSelect.innerHTML = '<option value="">Đang tải tỉnh/thành...</option>';
                     provinceSelect.disabled = true;
                     
-                    const response = await fetch('https://partner.viettelpost.vn/v2/categories/listProvince', {{
-                        method: 'GET',
-                        headers: {{
-                            'Content-Type': 'application/json',
-                            'Token': VIETTELPOST_TOKEN
-                        }}
-                    }});
-                    
+                    const response = await fetch('https://provinces.open-api.vn/api/p/');
                     const data = await response.json();
                     
-                    if (data.status === 200 && data.data) {{
-                        // Sort provinces by name
-                        const provinces = data.data.sort((a, b) => 
-                            a.PROVINCE_NAME.localeCompare(b.PROVINCE_NAME, 'vi')
-                        );
-                        
-                        provinceSelect.innerHTML = '<option value="">Chọn Tỉnh/Thành phố</option>';
-                        provinces.forEach(province => {{
-                            const option = document.createElement('option');
-                            option.value = province.PROVINCE_ID;
-                            option.textContent = province.PROVINCE_NAME;
-                            provinceSelect.appendChild(option);
-                        }});
-                        
-                        console.log(`Đã tải ${{provinces.length}} tỉnh/thành phố`);
-                        
-                        // Load preset address from URL if any
-                        loadPresetAddress();
-                    }} else {{
-                        throw new Error('Không lấy được dữ liệu từ ViettelPost');
-                    }}
+                    // Sắp xếp provinces theo tên
+                    const provinces = data.sort((a, b) => 
+                        a.name.localeCompare(b.name, 'vi')
+                    );
+                    
+                    provinceSelect.innerHTML = '<option value="">Chọn Tỉnh/Thành phố</option>';
+                    provinces.forEach(province => {{
+                        const option = document.createElement('option');
+                        option.value = province.code;
+                        option.textContent = province.name;
+                        provinceSelect.appendChild(option);
+                    }});
+                    
+                    console.log(`✅ Đã tải ${{provinces.length}} tỉnh/thành phố từ Open API`);
+                    
+                    // Load preset address từ URL nếu có
+                    loadPresetAddress();
                 }} catch (error) {{
-                    console.error('Lỗi khi load tỉnh/thành:', error);
+                    console.error('❌ Lỗi khi load tỉnh/thành:', error);
                     // Fallback to static list
                     loadStaticProvinces();
                 }} finally {{
@@ -3074,7 +3062,7 @@ def order_form():
                 }}
             }}
             
-            // Load districts based on selected province
+            // Load districts dựa trên selected province
             async function loadDistricts(provinceId) {{
                 const districtSelect = document.getElementById('district');
                 const wardSelect = document.getElementById('ward');
@@ -3093,48 +3081,35 @@ def order_form():
                     districtSelect.disabled = true;
                     wardSelect.disabled = true;
                     
-                    const response = await fetch(`https://partner.viettelpost.vn/v2/categories/listDistrict?provinceId=${{provinceId}}`, {{
-                        method: 'GET',
-                        headers: {{
-                            'Content-Type': 'application/json',
-                            'Token': VIETTELPOST_TOKEN
-                        }}
+                    const response = await fetch(`https://provinces.open-api.vn/api/p/${{provinceId}}?depth=2`);
+                    const provinceData = await response.json();
+                    
+                    const districts = provinceData.districts || [];
+                    districts.sort((a, b) => a.name.localeCompare(b.name, 'vi'));
+                    
+                    districtSelect.innerHTML = '<option value="">Chọn Quận/Huyện</option>';
+                    districts.forEach(district => {{
+                        const option = document.createElement('option');
+                        option.value = district.code;
+                        option.textContent = district.name;
+                        districtSelect.appendChild(option);
                     }});
                     
-                    const data = await response.json();
+                    console.log(`✅ Đã tải ${{districts.length}} quận/huyện`);
+                    districtSelect.disabled = false;
                     
-                    if (data.status === 200 && data.data) {{
-                        // Sort districts by name
-                        const districts = data.data.sort((a, b) => 
-                            a.DISTRICT_NAME.localeCompare(b.DISTRICT_NAME, 'vi')
-                        );
-                        
-                        districtSelect.innerHTML = '<option value="">Chọn Quận/Huyện</option>';
-                        districts.forEach(district => {{
-                            const option = document.createElement('option');
-                            option.value = district.DISTRICT_ID;
-                            option.textContent = district.DISTRICT_NAME;
-                            districtSelect.appendChild(option);
-                        }});
-                        
-                        console.log(`Đã tải ${{districts.length}} quận/huyện`);
-                        districtSelect.disabled = false;
-                        
-                        // Clear wards
-                        wardSelect.innerHTML = '<option value="">Chọn Phường/Xã</option>';
-                        wardSelect.disabled = true;
-                    }} else {{
-                        districtSelect.innerHTML = '<option value="">Không có dữ liệu</option>';
-                    }}
+                    // Clear wards
+                    wardSelect.innerHTML = '<option value="">Chọn Phường/Xã</option>';
+                    wardSelect.disabled = true;
                 }} catch (error) {{
-                    console.error('Lỗi khi load quận/huyện:', error);
+                    console.error('❌ Lỗi khi load quận/huyện:', error);
                     districtSelect.innerHTML = '<option value="">Lỗi tải dữ liệu</option>';
                 }} finally {{
                     updateFullAddress();
                 }}
             }}
             
-            // Load wards based on selected district
+            // Load wards dựa trên selected district
             async function loadWards(districtId) {{
                 const wardSelect = document.getElementById('ward');
                 
@@ -3149,37 +3124,24 @@ def order_form():
                     wardSelect.innerHTML = '<option value="">Đang tải phường/xã...</option>';
                     wardSelect.disabled = true;
                     
-                    const response = await fetch(`https://partner.viettelpost.vn/v2/categories/listWards?districtId=${{districtId}}`, {{
-                        method: 'GET',
-                        headers: {{
-                            'Content-Type': 'application/json',
-                            'Token': VIETTELPOST_TOKEN
-                        }}
+                    const response = await fetch(`https://provinces.open-api.vn/api/d/${{districtId}}?depth=2`);
+                    const districtData = await response.json();
+                    
+                    const wards = districtData.wards || [];
+                    wards.sort((a, b) => a.name.localeCompare(b.name, 'vi'));
+                    
+                    wardSelect.innerHTML = '<option value="">Chọn Phường/Xã</option>';
+                    wards.forEach(ward => {{
+                        const option = document.createElement('option');
+                        option.value = ward.code;
+                        option.textContent = ward.name;
+                        wardSelect.appendChild(option);
                     }});
                     
-                    const data = await response.json();
-                    
-                    if (data.status === 200 && data.data) {{
-                        // Sort wards by name
-                        const wards = data.data.sort((a, b) => 
-                            a.WARDS_NAME.localeCompare(b.WARDS_NAME, 'vi')
-                        );
-                        
-                        wardSelect.innerHTML = '<option value="">Chọn Phường/Xã</option>';
-                        wards.forEach(ward => {{
-                            const option = document.createElement('option');
-                            option.value = ward.WARDS_ID;
-                            option.textContent = ward.WARDS_NAME;
-                            wardSelect.appendChild(option);
-                        }});
-                        
-                        console.log(`Đã tải ${{wards.length}} phường/xã`);
-                        wardSelect.disabled = false;
-                    }} else {{
-                        wardSelect.innerHTML = '<option value="">Không có dữ liệu</option>';
-                    }}
+                    console.log(`✅ Đã tải ${{wards.length}} phường/xã`);
+                    wardSelect.disabled = false;
                 }} catch (error) {{
-                    console.error('Lỗi khi load phường/xã:', error);
+                    console.error('❌ Lỗi khi load phường/xã:', error);
                     wardSelect.innerHTML = '<option value="">Lỗi tải dữ liệu</option>';
                 }} finally {{
                     updateFullAddress();
@@ -3215,10 +3177,10 @@ def order_form():
                 }});
                 
                 provinceSelect.disabled = false;
-                console.log('Đã tải danh sách tỉnh thành tĩnh (fallback)');
+                console.log('⚠️ Đã tải danh sách tỉnh thành tĩnh (fallback)');
             }}
             
-            // Update full address from all components
+            // Update full address từ tất cả các components
             function updateFullAddress() {{
                 const provinceText = document.getElementById('province').options[document.getElementById('province').selectedIndex]?.text || '';
                 const districtText = document.getElementById('district').options[document.getElementById('district').selectedIndex]?.text || '';
@@ -3254,7 +3216,7 @@ def order_form():
                 return fullAddress;
             }}
             
-            // Load preset address from URL parameters
+            // Load preset address từ URL parameters
             function loadPresetAddress() {{
                 const urlParams = new URLSearchParams(window.location.search);
                 const presetAddress = urlParams.get('address');
@@ -3672,8 +3634,7 @@ def health_check():
         "intent_analysis": "GPT-based",
         "image_send_debounce": "5s",
         "image_request_processing": "Enabled with confidence > 0.85",
-        "address_form": "ViettelPost API (dropdown 3 cấp)",
-        "viettelpost_token": "configured",
+        "address_form": "Open API - provinces.open-api.vn (dropdown 3 cấp)",
         "address_validation": "enabled",
         "phone_validation": "regex validation"
     }, 200
@@ -3690,8 +3651,7 @@ if __name__ == "__main__":
     print(f"🟢 Image Processing: Base64 + Fallback URL")
     print(f"🟢 Search Algorithm: TF-IDF + Cosine Similarity")
     print(f"🟢 Image Carousel: 5 sản phẩm phù hợp nhất")
-    print(f"🟢 Address Form: ViettelPost API (dropdown 3 cấp)")
-    print(f"🟢 ViettelPost Token: {'CẤU HÌNH' if VIETTELPOST_TOKEN else 'CHƯA CẤU HÌNH'}")
+    print(f"🟢 Address Form: Open API - provinces.open-api.vn (dropdown 3 cấp)")
     print(f"🟢 Address Validation: BẬT")
     print(f"🟢 Phone Validation: BẬT (regex)")
     print(f"🟢 Image Debounce: 3 giây")
