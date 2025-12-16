@@ -234,6 +234,52 @@ CAROUSEL_KEYWORDS = [
     "show hàng",
 ]
 
+# Các từ khóa liên quan đến yêu cầu sản phẩm khác
+CHANGE_PRODUCT_KEYWORDS = [
+    "còn hàng nào khác",
+    "có cái nào đẹp hơn",
+    "có loại nào rẻ hơn",
+    "có loại nào đắt hơn",
+    "có loại nào dài hơn",
+    "có loại nào ấm hơn",
+    "có loại nào mát hơn",
+    "có loại nào mỏng hơn",
+    "có mẫu nào khác",
+    "có sản phẩm nào khác",
+    "shop còn gì khác",
+    "có loại nào khác",
+    "có model nào khác",
+    "cho xem cái khác",
+    "xem hàng khác",
+    "hàng khác",
+    "mẫu khác",
+    "sản phẩm khác",
+    "sản phẩm mới",
+    "mẫu mới",
+    "còn mẫu nào nữa",
+    "có đa dạng không",
+    "còn kiểu nào",
+    "còn loại nào",
+    "xem thêm sản phẩm",
+    "cho em xem thêm",
+    "còn cái nào",
+    "còn cái gì",
+    "còn gì nữa",
+    "có nhiều mẫu không",
+    "có đa dạng mẫu không",
+    "còn mẫu gì",
+    "có nhiều loại không",
+    "còn loại gì",
+    "có mẫu nào hot",
+    "có sản phẩm nào hot",
+    "có sản phẩm nào bán chạy",
+    "có sản phẩm nào mới nhất",
+    "có sản phẩm mới không",
+    "có hàng mới không",
+    "cập nhật mẫu mới",
+    "hàng mới về",
+]
+
 # ============================================
 # CACHE CHO TÊN FANPAGE
 # ============================================
@@ -925,6 +971,81 @@ def create_search_text_from_analysis(analysis: dict) -> str:
     return search_text_normalized
 
 # ============================================
+# TÌM SẢN PHẨM THEO TỪ KHÓA
+# ============================================
+
+def find_product_by_keywords(text: str) -> Optional[str]:
+    """Tìm sản phẩm dựa trên từ khóa trong tin nhắn"""
+    if not text or not PRODUCTS:
+        return None
+    
+    text_lower = text.lower()
+    normalized_text = normalize_vietnamese(text_lower)
+    
+    print(f"[KEYWORD SEARCH] Tìm sản phẩm cho: {text_lower}")
+    
+    # Ánh xạ từ khóa -> mã sản phẩm (có thể mở rộng)
+    keyword_to_ms = {
+        "váy và áo đỏ": "MS000004",
+        "bộ váy và áo đỏ": "MS000004", 
+        "áo đỏ": "MS000004",
+        "set len": "MS000004",
+        "váy liền": "MS000004",
+        "len dáng dài": "MS000004",
+        "che khuyết điểm": "MS000004",
+        "nàng mũm mĩm": "MS000004",
+    }
+    
+    # Kiểm tra ánh xạ trực tiếp
+    for keyword, ms in keyword_to_ms.items():
+        if keyword in normalized_text and ms in PRODUCTS:
+            print(f"[KEYWORD MATCH] Tìm thấy qua ánh xạ: {keyword} -> {ms}")
+            return ms
+    
+    # Tìm kiếm động trong tên và mô tả sản phẩm
+    best_match = None
+    best_score = 0
+    
+    for ms, product in PRODUCTS.items():
+        score = 0
+        
+        # Tên sản phẩm
+        product_name = product.get('Ten', '').lower()
+        product_name_norm = normalize_vietnamese(product_name)
+        
+        # Mô tả
+        product_desc = product.get('MoTa', '').lower()
+        product_desc_norm = normalize_vietnamese(product_desc)
+        
+        # Màu sắc
+        product_colors = product.get('màu (Thuộc tính)', '').lower()
+        product_colors_norm = normalize_vietnamese(product_colors)
+        
+        # Tách các từ trong tin nhắn
+        text_words = set(normalized_text.split())
+        
+        # Tính điểm cho tên sản phẩm
+        for word in text_words:
+            if len(word) > 2:  # Bỏ qua từ quá ngắn
+                if word in product_name_norm:
+                    score += 3
+                if word in product_desc_norm:
+                    score += 2
+                if word in product_colors_norm:
+                    score += 2
+        
+        # Ưu tiên sản phẩm có điểm cao nhất
+        if score > best_score:
+            best_score = score
+            best_match = ms
+    
+    if best_match and best_score >= 2:  # Ngưỡng tối thiểu
+        print(f"[KEYWORD SEARCH] Tìm thấy tốt nhất: {best_match} (điểm: {best_score})")
+        return best_match
+    
+    return None
+
+# ============================================
 # TÌM SẢN PHẨM VỚI ĐỘ CHÍNH XÁC CAO
 # ============================================
 
@@ -1553,9 +1674,15 @@ def generate_gpt_response(uid: str, user_message: str, ms: str = None):
         return "Hiện tại hệ thống trợ lý AI đang bảo trì, vui lòng thử lại sau ạ."
     
     try:
+        # Tạo link đặt hàng nếu có mã sản phẩm
+        order_link = ""
+        if ms and ms in PRODUCTS:
+            domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
+            order_link = f"{domain}/order-form?ms={ms}&uid={uid}"
+        
         if ms and ms in PRODUCTS:
             product_context = build_comprehensive_product_context(ms)
-            # PROMPT NGẮN GỌN, KHÔNG DÀI DÒNG
+            # PROMPT NGẮN GỌN, KHÔNG DÀI DÒN
             system_prompt = f"""Bạn là NHÂN VIÊN TƯ VẤN BÁN HÀNG của {FANPAGE_NAME}.
 Bạn đang tư vấn sản phẩm mã: {ms}
 
@@ -1563,17 +1690,18 @@ QUY TẮC TRẢ LỜI (BẮT BUỘC):
 1. TRẢ LỜI NGẮN GỌN - TỐI ĐA 2-3 DÒNG
 2. LUÔN XÁC NHẬN SẢN PHẨM CÒN HÀNG
 3. Nếu khách muốn đặt hàng: GỬI LINK NGAY
-4. Link đặt hàng: {DOMAIN}/order-form?ms={ms}&uid={uid}
+4. Link đặt hàng: {order_link}
 5. Không hỏi lại nếu khách đã rõ
 6. Xưng "em", gọi "anh/chị"
+7. LUÔN GIỮ NGỮ CẢNH SẢN PHẨM HIỆN TẠI: [{ms}]
 
 THÔNG TIN SẢN PHẨM:
 {product_context}
 
 TRẢ LỜI MẪU:
-- Khi khách hỏi màu/size: "Dạ, sản phẩm còn hàng ạ! Anh/chị đặt tại: [link]"
+- Khi khách hỏi màu/size: "Dạ, sản phẩm còn hàng ạ! Anh/chị đặt tại đây: {order_link}"
 - Khi khách hỏi giá: "Dạ, giá sản phẩm: X.XXXđ. Còn hàng ạ!"
-- Khi khách muốn đặt: "Dạ, em gửi link đặt hàng ạ: [link]"
+- Khi khách muốn đặt: "Dạ, em gửi link đặt hàng ạ: {order_link}"
 
 Hãy trả lời NGẮN GỌN và tự nhiên."""
         else:
@@ -1608,6 +1736,10 @@ Hỏi mã sản phẩm nếu chưa biết."""
         
         reply = response.choices[0].message.content.strip()
         
+        # **QUAN TRỌNG: Thay thế [link] bằng link thật nếu có**
+        if order_link and "[link]" in reply:
+            reply = reply.replace("[link]", order_link)
+        
         conversation.append({"role": "user", "content": user_message})
         conversation.append({"role": "assistant", "content": reply})
         ctx["conversation_history"] = conversation
@@ -1623,32 +1755,48 @@ Hỏi mã sản phẩm nếu chưa biết."""
 # ============================================
 
 def update_product_context(uid: str, ms: str):
-    """Cập nhật ngữ cảnh sản phẩm cho user"""
+    """Cập nhật ngữ cảnh sản phẩm cho user - GHI NHỚ LỊCH SỬ"""
     ctx = USER_CONTEXT[uid]
     
+    # Cập nhật last_ms
     ctx["last_ms"] = ms
     
+    # Cập nhật lịch sử sản phẩm
     if "product_history" not in ctx:
         ctx["product_history"] = []
     
-    if ms in ctx["product_history"]:
-        ctx["product_history"].remove(ms)
+    # Chỉ thêm nếu chưa có hoặc không phải sản phẩm cuối cùng
+    if not ctx["product_history"] or ctx["product_history"][0] != ms:
+        # Loại bỏ nếu đã có trong lịch sử
+        if ms in ctx["product_history"]:
+            ctx["product_history"].remove(ms)
+        
+        # Thêm vào đầu danh sách
+        ctx["product_history"].insert(0, ms)
     
-    ctx["product_history"].insert(0, ms)
-    
+    # Giới hạn lịch sử (5 sản phẩm gần nhất)
     if len(ctx["product_history"]) > 5:
         ctx["product_history"] = ctx["product_history"][:5]
+    
+    print(f"[CONTEXT UPDATE] User {uid}: last_ms={ms}, history={ctx['product_history']}")
 
 def get_relevant_product_for_question(uid: str, text: str) -> str | None:
-    """Tìm sản phẩm phù hợp nhất cho câu hỏi dựa trên ngữ cảnh"""
+    """Tìm sản phẩm phù hợp nhất cho câu hỏi dựa trên ngữ cảnh và xử lý từ khóa chuyển đổi sản phẩm"""
     ctx = USER_CONTEXT[uid]
+    lower = text.lower()
+    
+    # **QUAN TRỌNG: Kiểm tra từ khóa yêu cầu sản phẩm khác trước**
+    if any(kw in lower for kw in CHANGE_PRODUCT_KEYWORDS):
+        # Hướng dẫn vào gian hàng Facebook Shop
+        return "GUIDE_TO_FACEBOOK_SHOP"
     
     # 1. Tìm mã sản phẩm trong tin nhắn
     ms_from_text = detect_ms_from_text(text)
     if ms_from_text and ms_from_text in PRODUCTS:
+        print(f"[CONTEXT] Phát hiện mã mới trong tin nhắn: {ms_from_text}")
         return ms_from_text
     
-    # 2. Nếu không có trong tin nhắn, thử sử dụng retailer_id từ catalog
+    # 2. Sử dụng retailer_id từ catalog
     retailer_id = ctx.get("last_retailer_id")
     if retailer_id:
         ms_from_retailer = extract_ms_from_retailer_id(retailer_id)
@@ -1656,16 +1804,24 @@ def get_relevant_product_for_question(uid: str, text: str) -> str | None:
             print(f"[CATALOG CONTEXT] Sử dụng retailer_id {retailer_id} -> {ms_from_retailer}")
             return ms_from_retailer
     
-    # 3. Sử dụng last_ms từ context
+    # 3. Sử dụng last_ms từ context (ƯU TIÊN CAO)
     last_ms = ctx.get("last_ms")
     if last_ms and last_ms in PRODUCTS:
+        print(f"[CONTEXT] Sử dụng last_ms từ context: {last_ms}")
         return last_ms
     
     # 4. Sử dụng product history
     product_history = ctx.get("product_history", [])
     for ms in product_history:
         if ms in PRODUCTS:
+            print(f"[CONTEXT] Sử dụng từ product history: {ms}")
             return ms
+    
+    # 5. Tìm theo từ khóa trong sản phẩm
+    found_ms = find_product_by_keywords(text)
+    if found_ms and found_ms in PRODUCTS:
+        print(f"[CONTEXT] Tìm thấy sản phẩm theo từ khóa: {found_ms}")
+        return found_ms
     
     return None
 
@@ -1687,6 +1843,8 @@ def send_product_info_debounced(uid: str, ms: str):
     elif last_ms != ms:
         ctx["last_product_info_time"] = 0
     
+    # **QUAN TRỌNG: Cập nhật context khi gửi sản phẩm mới**
+    print(f"[PRODUCT INFO] Gửi thông tin sản phẩm {ms}, cập nhật context")
     ctx["product_info_sent_ms"] = ms
     ctx["last_product_info_time"] = now
     ctx["processing_lock"] = True
@@ -1699,6 +1857,8 @@ def send_product_info_debounced(uid: str, ms: str):
             ctx["processing_lock"] = False
             return
 
+        # **QUAN TRỌNG: Cập nhật context khi gửi sản phẩm mới**
+        ctx["last_ms"] = ms
         update_product_context(uid, ms)
 
         product_name = product.get('Ten', 'Sản phẩm')
@@ -2043,15 +2203,28 @@ def handle_text(uid: str, text: str):
 
         lower = text.lower()
         
+        # **QUAN TRỌNG: Xử lý từ khóa yêu cầu sản phẩm khác**
+        if any(kw in lower for kw in CHANGE_PRODUCT_KEYWORDS):
+            print(f"[CHANGE PRODUCT] User {uid} yêu cầu sản phẩm khác: {text}")
+            
+            # Hướng dẫn vào gian hàng Facebook Shop
+            guide_message = """Dạ, hiện tại shop có nhiều mẫu mã đa dạng ạ!
+
+Để xem thêm nhiều sản phẩm khác, anh/chị có thể:
+1. Bấm vào biểu tượng 🛒 rổ hàng trên Messenger để vào gian hàng
+2. Xem danh mục sản phẩm đầy đủ tại Facebook Shop của shop
+3. Hoặc gõ "xem sản phẩm" để em gửi danh sách một số sản phẩm nổi bật
+
+Anh/chị muốn xem sản phẩm nào cụ thể ạ?"""
+            
+            send_message(uid, guide_message)
+            ctx["processing_lock"] = False
+            return
+        
         # ƯU TIÊN 1: Xử lý từ khóa đặt hàng TRƯỚC
         if any(kw in lower for kw in ORDER_KEYWORDS):
-            detected_ms = detect_ms_from_text(text)
-            current_ms = None
-            
-            if detected_ms and detected_ms in PRODUCTS:
-                current_ms = detected_ms
-            else:
-                current_ms = get_relevant_product_for_question(uid, text)
+            # Tìm sản phẩm phù hợp
+            current_ms = get_relevant_product_for_question(uid, text)
             
             if current_ms and current_ms in PRODUCTS:
                 domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
@@ -2066,6 +2239,10 @@ def handle_text(uid: str, text: str):
                 # Reply cực ngắn - LUÔN BÁO CÒN HÀNG
                 reply = f"Dạ, sản phẩm{variant_info} còn hàng ạ!\nĐặt tại: {order_link}"
                 send_message(uid, reply)
+                
+                # Cập nhật context
+                ctx["last_ms"] = current_ms
+                update_product_context(uid, current_ms)
                 
                 ctx["processing_lock"] = False
                 return
@@ -2115,46 +2292,37 @@ def handle_text(uid: str, text: str):
                 ctx["processing_lock"] = False
                 return
 
+        # Tìm sản phẩm phù hợp
+        current_ms = get_relevant_product_for_question(uid, text)
+        
+        # Xử lý đặc biệt khi yêu cầu vào gian hàng
+        if current_ms == "GUIDE_TO_FACEBOOK_SHOP":
+            guide_message = """Dạ, hiện tại shop có nhiều mẫu mã đa dạng ạ!
+
+Để xem thêm nhiều sản phẩm khác, anh/chị có thể:
+1. Bấm vào biểu tượng 🛒 rổ hàng trên Messenger để vào gian hàng
+2. Xem danh mục sản phẩm đầy đủ tại Facebook Shop của shop
+3. Hoặc gõ "xem sản phẩm" để em gửi danh sách một số sản phẩm nổi bật
+
+Anh/chị muốn xem sản phẩm nào cụ thể ạ?"""
+            
+            send_message(uid, guide_message)
+            ctx["processing_lock"] = False
+            return
+        
+        # Kiểm tra xem có mã sản phẩm mới trong tin nhắn không
         detected_ms = detect_ms_from_text(text)
-        
-        current_ms = None
-        is_only_product_code = False
-        
         if detected_ms and detected_ms in PRODUCTS:
-            temp_text = normalize_vietnamese(text.lower())
-            
-            keywords = ['ms', 'ma', 'maso', 'ma so', 'san pham', 'tu van', 'xem', 'so']
-            
-            temp_text = re.sub(re.escape(detected_ms.lower()), '', temp_text)
-            
-            for kw in keywords:
-                temp_text = re.sub(r'\b' + re.escape(kw) + r'\b', '', temp_text)
-            
-            ms_number = re.search(r'MS(\d+)', detected_ms)
-            if ms_number:
-                num = ms_number.group(1)
-                num_stripped = num.lstrip('0')
-                if num_stripped:
-                    temp_text = re.sub(r'\b' + re.escape(num_stripped) + r'\b', '', temp_text)
-                    for i in range(1, 7):
-                        padded = num_stripped.zfill(i)
-                        temp_text = re.sub(r'\b' + re.escape(padded) + r'\b', '', temp_text)
-            
-            temp_text = re.sub(r'[^\w]', '', temp_text)
-            
-            is_only_product_code = len(temp_text.strip()) == 0
-        
-        if detected_ms and detected_ms in PRODUCTS:
+            print(f"[MS DETECTED] Phát hiện mã mới: {detected_ms}")
             current_ms = detected_ms
             ctx["last_ms"] = detected_ms
             update_product_context(uid, detected_ms)
-            
-            if is_only_product_code:
-                send_product_info_debounced(uid, detected_ms)
-                ctx["processing_lock"] = False
-                return
-        else:
-            current_ms = get_relevant_product_for_question(uid, text)
+        
+        # **QUAN TRỌNG: Cập nhật context nếu tìm thấy sản phẩm**
+        if current_ms and current_ms in PRODUCTS and current_ms != ctx.get("last_ms"):
+            print(f"[CONTEXT UPDATE] Cập nhật last_ms từ {ctx.get('last_ms')} -> {current_ms}")
+            ctx["last_ms"] = current_ms
+            update_product_context(uid, current_ms)
         
         # PHÂN TÍCH INTENT KHI CÓ SẢN PHẨM HIỆN TẠI
         if current_ms and current_ms in PRODUCTS:
@@ -2508,7 +2676,7 @@ def webhook():
                     ctx["processing_lock"] = True
                     
                     try:
-                        # **GIỮ NGUYÊN**: Cập nhật context cho người dùng
+                        # **QUAN TRỌNG: Cập nhật context khi phát hiện mã từ Fchat echo**
                         ctx["last_ms"] = detected_ms
                         ctx["referral_source"] = "fchat_echo"
                         update_product_context(recipient_id, detected_ms)
@@ -2542,6 +2710,11 @@ def webhook():
                 ctx["referral_payload"] = referral_payload
                 
                 print(f"[REFERRAL] User {sender_id} từ {ctx['referral_source']} với payload: {referral_payload}")
+                
+                # **QUAN TRỌNG: Reset context khi khách xem catalog/bài viết khác**
+                print(f"[CATALOG RESET] User {sender_id} xem catalog mới, reset context")
+                ctx["last_ms"] = None
+                ctx["product_history"] = []
                 
                 # Kiểm tra xem referral có chứa product không (từ catalog)
                 if "product" in ref:
@@ -3421,7 +3594,7 @@ def order_form():
                     console.log(`✅ Đã tải ${{districts.length}} quận/huyện`);
                     districtSelect.disabled = false;
                     
-                    // Clear wards
+                    # Clear wards
                     wardSelect.innerHTML = '<option value="">Chọn Phường/Xã</option>';
                     wardSelect.disabled = true;
                 }} catch (error) {{
@@ -3432,7 +3605,7 @@ def order_form():
                 }}
             }}
             
-            // Load wards dựa trên selected district
+            # Load wards dựa trên selected district
             async function loadWards(districtId) {{
                 const wardSelect = document.getElementById('ward');
                 
@@ -3471,7 +3644,7 @@ def order_form():
                 }}
             }}
             
-            // Fallback: Static province list
+            # Fallback: Static province list
             function loadStaticProvinces() {{
                 const staticProvinces = [
                     "An Giang", "Bà Rịa - Vũng Tàu", "Bắc Giang", "Bắc Kạn", "Bạc Liêu", 
@@ -3503,26 +3676,26 @@ def order_form():
                 console.log('⚠️ Đã tải danh sách tỉnh thành tĩnh (fallback)');
             }}
             
-            // Update full address từ tất cả các components
+            # Update full address từ tất cả các components
             function updateFullAddress() {{
                 const provinceText = document.getElementById('province').options[document.getElementById('province').selectedIndex]?.text || '';
                 const districtText = document.getElementById('district').options[document.getElementById('district').selectedIndex]?.text || '';
                 const wardText = document.getElementById('ward').options[document.getElementById('ward').selectedIndex]?.text || '';
                 const detailText = document.getElementById('addressDetail').value || '';
                 
-                // Save to hidden fields
+                # Save to hidden fields
                 document.getElementById('provinceName').value = provinceText;
                 document.getElementById('districtName').value = districtText;
                 document.getElementById('wardName').value = wardText;
                 
-                // Build full address
+                # Build full address
                 const fullAddress = [detailText, wardText, districtText, provinceText]
                     .filter(part => part.trim() !== '')
                     .join(', ');
                 
                 document.getElementById('fullAddress').value = fullAddress;
                 
-                // Update preview
+                # Update preview
                 const previewElement = document.getElementById('addressPreview');
                 if (fullAddress.trim()) {{
                     previewElement.innerHTML = `
@@ -3539,7 +3712,7 @@ def order_form():
                 return fullAddress;
             }}
             
-            // Load preset address từ URL parameters
+            # Load preset address từ URL parameters
             function loadPresetAddress() {{
                 const urlParams = new URLSearchParams(window.location.search);
                 const presetAddress = urlParams.get('address');
@@ -3550,12 +3723,12 @@ def order_form():
                 }}
             }}
             
-            // ============================================
-            // FORM VALIDATION AND SUBMISSION
-            // ============================================
+            # ============================================
+            # FORM VALIDATION AND SUBMISSION
+            # ============================================
             
             async function submitOrder() {{
-                // Collect form data
+                # Collect form data
                 const formData = {{
                     ms: PRODUCT_MS,
                     uid: PRODUCT_UID,
@@ -3574,7 +3747,7 @@ def order_form():
                     addressDetail: document.getElementById('addressDetail').value.trim()
                 }};
                 
-                // Validate required fields
+                # Validate required fields
                 if (!formData.customerName) {{
                     alert('Vui lòng nhập họ và tên');
                     document.getElementById('customerName').focus();
@@ -3587,7 +3760,7 @@ def order_form():
                     return;
                 }}
                 
-                // Validate phone number
+                # Validate phone number
                 const phoneRegex = /^(0|\\+84)(\\d{{9,10}})$/;
                 if (!phoneRegex.test(formData.phone)) {{
                     alert('Số điện thoại không hợp lệ. Vui lòng nhập số điện thoại 10-11 chữ số');
@@ -3595,7 +3768,7 @@ def order_form():
                     return;
                 }}
                 
-                // Validate address
+                # Validate address
                 if (!formData.provinceId) {{
                     alert('Vui lòng chọn Tỉnh/Thành phố');
                     document.getElementById('province').focus();
@@ -3620,7 +3793,7 @@ def order_form():
                     return;
                 }}
                 
-                // Show loading
+                # Show loading
                 const submitBtn = document.getElementById('submitBtn');
                 const originalText = submitBtn.innerHTML;
                 submitBtn.innerHTML = '<span class="loading-spinner"></span> ĐANG XỬ LÝ...';
@@ -3638,10 +3811,10 @@ def order_form():
                     const data = await response.json();
                     
                     if (response.ok) {{
-                        // Success
+                        # Success
                         alert('🎉 Đã gửi đơn hàng thành công!\\n\\nShop sẽ liên hệ xác nhận trong 5-10 phút.\\nCảm ơn anh/chị đã đặt hàng! ❤️');
                         
-                        // Reset form (optional)
+                        # Reset form (optional)
                         document.getElementById('customerName').value = '';
                         document.getElementById('phone').value = '';
                         document.getElementById('addressDetail').value = '';
@@ -3653,33 +3826,33 @@ def order_form():
                         updateFullAddress();
                         
                     }} else {{
-                        // Error
+                        # Error
                         alert(`❌ ${{data.message || 'Có lỗi xảy ra. Vui lòng thử lại sau'}}`);
                     }}
                 }} catch (error) {{
                     console.error('Lỗi khi gửi đơn hàng:', error);
                     alert('❌ Lỗi kết nối. Vui lòng thử lại sau!');
                 }} finally {{
-                    // Restore button
+                    # Restore button
                     submitBtn.innerHTML = originalText;
                     submitBtn.disabled = false;
                 }}
             }}
             
-            // ============================================
-            // INITIALIZATION
-            // ============================================
+            # ============================================
+            # INITIALIZATION
+            # ============================================
             
             document.addEventListener('DOMContentLoaded', function() {{
-                // Load provinces
+                # Load provinces
                 loadProvinces();
                 
-                // Event listeners for product variant changes
+                # Event listeners for product variant changes
                 document.getElementById('color').addEventListener('change', updateVariantInfo);
                 document.getElementById('size').addEventListener('change', updateVariantInfo);
                 document.getElementById('quantity').addEventListener('input', updatePriceByVariant);
                 
-                // Event listeners for address changes
+                # Event listeners for address changes
                 document.getElementById('province').addEventListener('change', function() {{
                     loadDistricts(this.value);
                     updateFullAddress();
@@ -3693,10 +3866,10 @@ def order_form():
                 document.getElementById('ward').addEventListener('change', updateFullAddress);
                 document.getElementById('addressDetail').addEventListener('input', updateFullAddress);
                 
-                // Initialize product variant info
+                # Initialize product variant info
                 updateVariantInfo();
                 
-                // Enter key to submit form
+                # Enter key to submit form
                 document.getElementById('orderForm').addEventListener('keypress', function(e) {{
                     if (e.which === 13) {{
                         e.preventDefault();
@@ -3704,7 +3877,7 @@ def order_form():
                     }}
                 }});
                 
-                // Focus on first field
+                # Focus on first field
                 setTimeout(() => {{
                     document.getElementById('customerName').focus();
                 }}, 500);
@@ -4041,7 +4214,10 @@ def health_check():
         "order_response_mode": "SHORT - Always in stock",
         "max_gpt_tokens": 150,
         "stock_assumption": "ALWAYS IN STOCK",
-        "order_keywords_priority": "HIGH"
+        "order_keywords_priority": "HIGH",
+        "context_tracking": "ENABLED (tracks last_ms and product_history)",
+        "change_product_keywords": f"{len(CHANGE_PRODUCT_KEYWORDS)} từ khóa được định nghĩa",
+        "facebook_shop_guidance": "ENABLED (hướng dẫn vào gian hàng khi yêu cầu sản phẩm khác)"
     }, 200
 
 # ============================================
@@ -4081,6 +4257,9 @@ if __name__ == "__main__":
     print(f"🟢 Form Dynamic Images: BẬT (ảnh thay đổi theo màu/size)")
     print(f"🟢 Catalog Follow-up Processing: BẬT (30 giây sau khi xem catalog)")
     print(f"🟢 Order Backup System: Local CSV khi Google Sheet không kết nối được")
+    print(f"🟢 Context Tracking: BẬT (ghi nhớ last_ms và product_history)")
+    print(f"🟢 Change Product Keywords: {len(CHANGE_PRODUCT_KEYWORDS)} từ khóa")
+    print(f"🟢 Facebook Shop Guidance: BẬT (hướng dẫn vào gian hàng)")
     print(f"🔴 QUAN TRỌNG: BOT LUÔN BÁO CÒN HÀNG (không kiểm tra tồn kho)")
     print(f"🔴 GPT Reply Mode: NGẮN GỌN (max 150 tokens)")
     print(f"🔴 Order Priority: ƯU TIÊN GỬI LINK KHI CÓ TỪ KHÓA ĐẶT HÀNG")
