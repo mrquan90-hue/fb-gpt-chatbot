@@ -1521,7 +1521,7 @@ def get_variant_image(ms: str, color: str, size: str) -> str:
 # ============================================
 
 def build_comprehensive_product_context(ms: str) -> str:
-    """Xây dựng context đầy đủ về sản phẩm cho GPT - LUÔN CÒN HÀNG"""
+    """Xây dựng context đầy đủ về sản phẩm cho GPT"""
     if not ms or ms not in PRODUCTS:
         return "KHÔNG CÓ THÔNG TIN SẢN PHẨM"
     
@@ -1553,7 +1553,7 @@ def build_comprehensive_product_context(ms: str) -> str:
             mau = v.get("mau", "Mặc định")
             size = v.get("size", "Mặc định")
             gia = v.get("gia")
-            tonkho = v.get("tonkho", "Còn hàng")
+            tonkho = v.get("tonkho", "Liên hệ shop")
             if gia:
                 variants_text += f"{i}. {mau} - {size}: {gia:,.0f}đ\n"
     
@@ -1563,6 +1563,13 @@ def build_comprehensive_product_context(ms: str) -> str:
     unique_images = len(set(urls))
     image_info = f"Số lượng ảnh: {unique_images}"
     
+    # Hiển thị thông tin tồn kho thực tế
+    tonkho_info = product.get("Tồn kho", "")
+    if not tonkho_info or tonkho_info.strip() == "":
+        tonkho_display = "Liên hệ shop để biết tồn kho"
+    else:
+        tonkho_display = f"Tồn kho: {tonkho_info}"
+    
     context = f"""
 === THÔNG TIN SẢN PHẨM [{ms}] ===
 
@@ -1570,7 +1577,7 @@ def build_comprehensive_product_context(ms: str) -> str:
 
 2. GIÁ BÁN: {product.get('Gia', '')}
 
-3. TỒN KHO: Còn hàng - Sẵn sàng giao ngay
+3. {tonkho_display}
 
 4. THUỘC TÍNH:
    - Màu sắc: {product.get('màu (Thuộc tính)', 'Chưa có thông tin')}
@@ -1688,7 +1695,7 @@ Bạn đang tư vấn sản phẩm mã: {ms}
 
 QUY TẮC TRẢ LỜI (BẮT BUỘC):
 1. TRẢ LỜI NGẮN GỌN - TỐI ĐA 2-3 DÒNG
-2. LUÔN XÁC NHẬN SẢN PHẨM CÒN HÀNG
+2. Chỉ nói "còn hàng" khi khách hỏi về tồn kho/số lượng
 3. Nếu khách muốn đặt hàng: GỬI LINK NGAY
 4. Link đặt hàng: {order_link}
 5. Không hỏi lại nếu khách đã rõ
@@ -1699,9 +1706,10 @@ THÔNG TIN SẢN PHẨM:
 {product_context}
 
 TRẢ LỜI MẪU:
-- Khi khách hỏi màu/size: "Dạ, sản phẩm còn hàng ạ! Anh/chị đặt tại đây: {order_link}"
-- Khi khách hỏi giá: "Dạ, giá sản phẩm: X.XXXđ. Còn hàng ạ!"
-- Khi khách muốn đặt: "Dạ, em gửi link đặt hàng ạ: {order_link}"
+- Khi khách hỏi màu/size: "Dạ, sản phẩm có các màu ABC, size XYZ. Anh/chị đặt tại đây: {order_link}"
+- Khi khách hỏi giá: "Dạ, giá sản phẩm: X.XXXđ. Anh/chị đặt tại đây: {order_link}"
+- Khi khách hỏi chất liệu: "Dạ, chất liệu cotton cao cấp. Anh/chị đặt tại đây: {order_link}"
+- Khi khách hỏi còn hàng không: "Dạ, sản phẩm còn hàng ạ. Đặt tại đây: {order_link}"
 
 Hãy trả lời NGẮN GỌN và tự nhiên."""
         else:
@@ -1912,7 +1920,7 @@ def send_product_info_debounced(uid: str, ms: str):
                 prices.append(gia_int)
                 mau = variant.get("mau", "Mặc định")
                 size = variant.get("size", "Mặc định")
-                tonkho = variant.get("tonkho", "Còn hàng")
+                tonkho = variant.get("tonkho", "Liên hệ shop")
                 
                 if mau or size:
                     variant_str = f"{mau}" if mau else ""
@@ -2251,6 +2259,9 @@ Anh/chị muốn xem sản phẩm nào cụ thể ạ?"""
             if PRODUCTS:
                 send_message(uid, "Dạ, em đang lấy danh sách sản phẩm cho anh/chị...")
                 
+                # SỬA LỖI VẤN ĐỀ 1: Định nghĩa biến domain
+                domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
+                
                 carousel_elements = []
                 for i, (ms, product) in enumerate(list(PRODUCTS.items())[:5]):
                     images_field = product.get("Images", "")
@@ -2491,7 +2502,7 @@ def save_order_to_local_csv(order_data: dict):
         file_exists = os.path.exists(file_path)
         
         # Chuẩn bị dữ liệu
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        timestamp = datetime.now().strftime("%Y-%m%d %H:%M:%S")
         order_id = f"ORD{int(time.time())}_{order_data.get('uid', '')[-4:]}"
         
         row_data = {
@@ -4211,9 +4222,9 @@ def health_check():
         "address_form": "Open API - provinces.open-api.vn (dropdown 3 cấp)",
         "address_validation": "enabled",
         "phone_validation": "regex validation",
-        "order_response_mode": "SHORT - Always in stock",
+        "order_response_mode": "SHORT - Chỉ báo còn hàng khi hỏi tồn kho",
         "max_gpt_tokens": 150,
-        "stock_assumption": "ALWAYS IN STOCK",
+        "stock_assumption": "Chỉ báo khi hỏi tồn kho",
         "order_keywords_priority": "HIGH",
         "context_tracking": "ENABLED (tracks last_ms and product_history)",
         "change_product_keywords": f"{len(CHANGE_PRODUCT_KEYWORDS)} từ khóa được định nghĩa",
@@ -4260,7 +4271,7 @@ if __name__ == "__main__":
     print(f"🟢 Context Tracking: BẬT (ghi nhớ last_ms và product_history)")
     print(f"🟢 Change Product Keywords: {len(CHANGE_PRODUCT_KEYWORDS)} từ khóa")
     print(f"🟢 Facebook Shop Guidance: BẬT (hướng dẫn vào gian hàng)")
-    print(f"🔴 QUAN TRỌNG: BOT LUÔN BÁO CÒN HÀNG (không kiểm tra tồn kho)")
+    print(f"🔴 QUAN TRỌNG: BOT CHỈ BÁO CÒN HÀNG KHI KHÁCH HỎI VỀ TỒN KHO")
     print(f"🔴 GPT Reply Mode: NGẮN GỌN (max 150 tokens)")
     print(f"🔴 Order Priority: ƯU TIÊN GỬI LINK KHI CÓ TỪ KHÓA ĐẶT HÀNG")
     
