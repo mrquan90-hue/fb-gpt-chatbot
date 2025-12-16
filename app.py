@@ -386,6 +386,39 @@ def is_bot_generated_echo(echo_text: str, app_id: str = "", attachments: list = 
     return False
 
 # ============================================
+# TRÍCH XUẤT MÀU VÀ SIZE ĐƠN GIẢN
+# ============================================
+
+def extract_color_size_simple(text: str):
+    """Trích xuất màu và size đơn giản từ tin nhắn"""
+    text_lower = text.lower()
+    
+    color = None
+    size = None
+    
+    # Tìm màu đơn giản
+    color_words = ["đỏ", "đen", "trắng", "xanh", "vàng", "hồng", "tím", "nâu", "xám", "be", "cam", "xanh lá", "xanh dương", "đỏ đô", "hồng pastel", "đen tuyền"]
+    for c in color_words:
+        if c in text_lower:
+            color = c
+            break
+    
+    # Tìm size đơn giản
+    if "size" in text_lower:
+        # Tìm XS, S, M, L, XL, XXL
+        size_match = re.search(r'size\s+([XSML0-9]+)', text_lower)
+        if size_match:
+            size = size_match.group(1).upper()
+        else:
+            # Tìm trực tiếp
+            for s in ["XS", "S", "M", "L", "XL", "XXL", "XXXL"]:
+                if s.lower() in text_lower:
+                    size = s
+                    break
+    
+    return color, size
+
+# ============================================
 # PHÂN TÍCH INTENT VỚI GPT
 # ============================================
 
@@ -1363,11 +1396,11 @@ def get_variant_image(ms: str, color: str, size: str) -> str:
     return urls[0] if urls else ""
 
 # ============================================
-# GPT INTEGRATION - XỬ LÝ MỌI CÂU HỎI
+# GPT INTEGRATION - XỬ LÝ MỌI CÂU HỎI (ĐÃ SỬA)
 # ============================================
 
 def build_comprehensive_product_context(ms: str) -> str:
-    """Xây dựng context đầy đủ về sản phẩm cho GPT"""
+    """Xây dựng context đầy đủ về sản phẩm cho GPT - LUÔN CÒN HÀNG"""
     if not ms or ms not in PRODUCTS:
         return "KHÔNG CÓ THÔNG TIN SẢN PHẨM"
     
@@ -1401,7 +1434,7 @@ def build_comprehensive_product_context(ms: str) -> str:
             gia = v.get("gia")
             tonkho = v.get("tonkho", "Còn hàng")
             if gia:
-                variants_text += f"{i}. {mau} - {size}: {gia:,.0f}đ (Tồn: {tonkho})\n"
+                variants_text += f"{i}. {mau} - {size}: {gia:,.0f}đ\n"
     
     # Thông tin về hình ảnh
     images_field = product.get("Images", "")
@@ -1416,7 +1449,7 @@ def build_comprehensive_product_context(ms: str) -> str:
 
 2. GIÁ BÁN: {product.get('Gia', '')}
 
-3. TỒN KHO: {product.get('Tồn kho', 'Chưa có thông tin')}
+3. TỒN KHO: Còn hàng - Sẵn sàng giao ngay
 
 4. THUỘC TÍNH:
    - Màu sắc: {product.get('màu (Thuộc tính)', 'Chưa có thông tin')}
@@ -1430,10 +1463,10 @@ def build_comprehensive_product_context(ms: str) -> str:
 {product.get('MoTa', 'Chưa có mô tả chi tiết')}
 
 7. THÔNG TIN CHÍNH SÁCH:
-   - Vận chuyển: {shipping_info if shipping_info else 'Chưa có thông tin cụ thể. Chính sách chung: Giao hàng toàn quốc, phí ship 20-50k. Miễn phí ship cho đơn từ 500k.'}
-   - Bảo hành: {warranty_info if warranty_info else 'Chưa có thông tin cụ thể. Chính sách chung: Bảo hành theo chính sách của nhà sản xuất.'}
-   - Đổi trả: {return_info if return_info else 'Chưa có thông tin cụ thể. Chính sách chung: Đổi/trả trong 3-7 ngày nếu sản phẩm lỗi, còn nguyên tem mác.'}
-   - Thanh toán: {payment_info if payment_info else 'Chưa có thông tin cụ thể. Chính sách chung: Thanh toán khi nhận hàng (COD) hoặc chuyển khoản ngân hàng.'}
+   - Vận chuyển: {shipping_info if shipping_info else 'Giao hàng toàn quốc, phí ship 20-50k. Miễn phí ship cho đơn từ 500k.'}
+   - Bảo hành: {warranty_info if warranty_info else 'Bảo hành theo chính sách của nhà sản xuất.'}
+   - Đổi trả: {return_info if return_info else 'Đổi/trả trong 3-7 ngày nếu sản phẩm lỗi, còn nguyên tem mác.'}
+   - Thanh toán: {payment_info if payment_info else 'Thanh toán khi nhận hàng (COD) hoặc chuyển khoản ngân hàng.'}
 """
     
     return context
@@ -1515,55 +1548,42 @@ def detect_ms_from_text(text: str):
     return None
 
 def generate_gpt_response(uid: str, user_message: str, ms: str = None):
-    """Gọi GPT để trả lời câu hỏi của khách"""
+    """Gọi GPT để trả lời câu hỏi của khách - TRẢ LỜI NGẮN GỌN"""
     if not client or not OPENAI_API_KEY:
         return "Hiện tại hệ thống trợ lý AI đang bảo trì, vui lòng thử lại sau ạ."
     
     try:
         if ms and ms in PRODUCTS:
             product_context = build_comprehensive_product_context(ms)
-            system_prompt = f"""Bạn là CHUYÊN GIA TƯ VẤN BÁN HÀNG của {FANPAGE_NAME}.
-Bạn đang tư vấn cho sản phẩm có mã: {ms}
+            # PROMPT NGẮN GỌN, KHÔNG DÀI DÒNG
+            system_prompt = f"""Bạn là NHÂN VIÊN TƯ VẤN BÁN HÀNG của {FANPAGE_NAME}.
+Bạn đang tư vấn sản phẩm mã: {ms}
 
-THÔNG TIN SẢN PHẨM (BẮT BUỘC CHỈ SỬ DỤNG THÔNG TIN NÀY):
+QUY TẮC TRẢ LỜI (BẮT BUỘC):
+1. TRẢ LỜI NGẮN GỌN - TỐI ĐA 2-3 DÒNG
+2. LUÔN XÁC NHẬN SẢN PHẨM CÒN HÀNG
+3. Nếu khách muốn đặt hàng: GỬI LINK NGAY
+4. Link đặt hàng: {DOMAIN}/order-form?ms={ms}&uid={uid}
+5. Không hỏi lại nếu khách đã rõ
+6. Xưng "em", gọi "anh/chị"
+
+THÔNG TIN SẢN PHẨM:
 {product_context}
 
-QUY TẮC TRẢ LỜI (TUYỆT ĐỐI TUÂN THỦ):
-1. CHỈ sử dụng thông tin có trong "THÔNG TIN SẢN PHẨM" ở trên
-2. KHÔNG ĐƯỢC bịa thêm bất kỳ thông tin nào không có trong dữ liệu
-3. Nếu không có thông tin, hãy trả lời: "Dạ, phần này trong hệ thống chưa có thông tin ạ, em sợ nói sai nên không dám khẳng định."
-4. Nếu khách hỏi về sản phẩm khác, hãy đề nghị khách cung cấp mã sản phẩm mới
-5. Giọng điệu: Thân thiện, chuyên nghiệp, xưng "em", gọi khách là "anh/chị"
-6. Luôn hướng đến chốt đơn: Cuối mỗi câu trả lời, nhẹ nhàng đề nghị đặt hàng
-7. LINK ĐẶT HÀNG: {DOMAIN}/order-form?ms={ms}&uid={uid}
+TRẢ LỜI MẪU:
+- Khi khách hỏi màu/size: "Dạ, sản phẩm còn hàng ạ! Anh/chị đặt tại: [link]"
+- Khi khách hỏi giá: "Dạ, giá sản phẩm: X.XXXđ. Còn hàng ạ!"
+- Khi khách muốn đặt: "Dạ, em gửi link đặt hàng ạ: [link]"
 
-XỬ LÝ YÊU CẦU ẢNH:
-- Nếu khách yêu cầu RÕ RÀNG xem ảnh sản phẩm (ví dụ: "gửi ảnh sản phẩm", "cho xem hình", "show ảnh"):
-  → Hãy trả lời ngắn gọn: "Dạ em gửi ảnh sản phẩm cho anh/chị nhé!"
-  → Hệ thống sẽ tự động gửi toàn bộ ảnh sản phẩm
-  → KHÔNG cần hỏi lại hoặc mô tả chi tiết
-
-- Nếu khách hỏi về ảnh cụ thể (màu sắc, đóng gói, kiểu dáng):
-  → Trả lời dựa trên thông tin có sẵn
-  → Nếu không có thông tin, hãy nói: "Dạ, phần này trong hệ thống chưa có thông tin ạ"
-
-Hãy trả lời bằng tiếng Việt, tự nhiên như đang chat Messenger."""
+Hãy trả lời NGẮN GỌN và tự nhiên."""
         else:
-            system_prompt = f"""Bạn là CHUYÊN GIA TƯ VẤN BÁN HÀNG của {FANPAGE_NAME}.
+            system_prompt = f"""Bạn là NHÂN VIÊN TƯ VẤN BÁN HÀNG của {FANPAGE_NAME}.
 
-HIỆN TẠI BẠN CHƯA BIẾT KHÁCH QUAN TÂM SẢN PHẨM NÀO.
+TRẢ LỜI NGẮN GỌN - TỐI ĐA 3 DÒNG
+Mục tiêu: Hỏi mã sản phẩm hoặc gợi ý "xem sản phẩm"
 
-NHIỆM VỤ CỦA BẠN:
-1. Hỏi khách về sản phẩm họ quan tâm
-2. Đề nghị khách cung cấp mã sản phẩm (ví dụ: [MS123456])
-3. Hoặc đề nghị khách gõ "xem sản phẩm" để xem danh sách
-
-QUY TẮC:
-1. KHÔNG tự ý giới thiệu chi tiết sản phẩm khi chưa biết mã
-2. Luôn hướng khách đến việc cung cấp mã sản phẩm
-3. Giọng điệu: Thân thiện, chuyên nghiệp, xưng "em", gọi khách là "anh/chị"
-
-Hãy bắt đầu bằng câu chào và hỏi khách về sản phẩm họ quan tâm."""
+Xưng "em", gọi "anh/chị"
+Hỏi mã sản phẩm nếu chưa biết."""
         
         ctx = USER_CONTEXT[uid]
         conversation = ctx.get("conversation_history", [])
@@ -1582,7 +1602,7 @@ Hãy bắt đầu bằng câu chào và hỏi khách về sản phẩm họ quan
             model="gpt-4o-mini",
             messages=messages,
             temperature=0.7,
-            max_tokens=500,
+            max_tokens=150,  # GIẢM XUỐNG CHỈ 150 tokens
             timeout=15.0,
         )
         
@@ -1596,7 +1616,7 @@ Hãy bắt đầu bằng câu chào và hỏi khách về sản phẩm họ quan
         
     except Exception as e:
         print(f"GPT Error: {e}")
-        return "Dạ em đang gặp chút trục trặc kỹ thuật. Anh/chị vui lòng thử lại sau ít phút ạ."
+        return "Dạ em đang gặp chút trục trặc kỹ thuật. Anh/chị vui lòng thử lại sau ạ."
 
 # ============================================
 # CẢI THIỆN NGỮ CẢNH - THÊM HỖ TRỢ CATALOG
@@ -1978,7 +1998,7 @@ def handle_order_form_step(uid: str, text: str):
     return False
 
 # ============================================
-# HANDLE TEXT - XỬ LÝ VỚI GPT VÀ PHÂN TÍCH INTENT
+# HANDLE TEXT - XỬ LÝ VỚI GPT VÀ PHÂN TÍCH INTENT (ĐÃ SỬA)
 # ============================================
 
 def handle_text(uid: str, text: str):
@@ -2023,6 +2043,33 @@ def handle_text(uid: str, text: str):
 
         lower = text.lower()
         
+        # ƯU TIÊN 1: Xử lý từ khóa đặt hàng TRƯỚC
+        if any(kw in lower for kw in ORDER_KEYWORDS):
+            detected_ms = detect_ms_from_text(text)
+            current_ms = None
+            
+            if detected_ms and detected_ms in PRODUCTS:
+                current_ms = detected_ms
+            else:
+                current_ms = get_relevant_product_for_question(uid, text)
+            
+            if current_ms and current_ms in PRODUCTS:
+                domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
+                order_link = f"{domain}/order-form?ms={current_ms}&uid={uid}"
+                
+                # Trích xuất màu/size đơn giản
+                color, size = extract_color_size_simple(text)
+                variant_info = ""
+                if color or size:
+                    variant_info = f" ({color if color else ''}{' - ' if color and size else ''}{size if size else ''})"
+                
+                # Reply cực ngắn - LUÔN BÁO CÒN HÀNG
+                reply = f"Dạ, sản phẩm{variant_info} còn hàng ạ!\nĐặt tại: {order_link}"
+                send_message(uid, reply)
+                
+                ctx["processing_lock"] = False
+                return
+        
         if any(kw in lower for kw in CAROUSEL_KEYWORDS):
             if PRODUCTS:
                 send_message(uid, "Dạ, em đang lấy danh sách sản phẩm cho anh/chị...")
@@ -2042,7 +2089,7 @@ def handle_text(uid: str, text: str):
                         "buttons": [
                             {
                                 "type": "web_url",
-                                "url": f"{DOMAIN}/order-form?ms={ms}&uid={uid}",
+                                "url": f"{domain}/order-form?ms={ms}&uid={uid}",
                                 "title": "🛒 Đặt ngay"
                             },
                             {
@@ -2133,12 +2180,6 @@ def handle_text(uid: str, text: str):
         print(f"[GPT CALL] User: {uid}, MS: {current_ms}, Text: {text}")
         gpt_response = generate_gpt_response(uid, text, current_ms)
         send_message(uid, gpt_response)
-        
-        # Gửi link đặt hàng nếu có từ khóa đặt hàng
-        if current_ms and current_ms in PRODUCTS and any(kw in lower for kw in ORDER_KEYWORDS):
-            domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
-            order_link = f"{domain}/order-form?ms={current_ms}&uid={uid}"
-            send_message(uid, f"📋 Anh/chị có thể đặt hàng ngay tại đây:\n{order_link}")
 
     except Exception as e:
         print(f"Error in handle_text for {uid}: {e}")
@@ -3996,7 +4037,11 @@ def health_check():
         "image_request_processing": "Enabled with confidence > 0.85",
         "address_form": "Open API - provinces.open-api.vn (dropdown 3 cấp)",
         "address_validation": "enabled",
-        "phone_validation": "regex validation"
+        "phone_validation": "regex validation",
+        "order_response_mode": "SHORT - Always in stock",
+        "max_gpt_tokens": 150,
+        "stock_assumption": "ALWAYS IN STOCK",
+        "order_keywords_priority": "HIGH"
     }, 200
 
 # ============================================
@@ -4036,5 +4081,8 @@ if __name__ == "__main__":
     print(f"🟢 Form Dynamic Images: BẬT (ảnh thay đổi theo màu/size)")
     print(f"🟢 Catalog Follow-up Processing: BẬT (30 giây sau khi xem catalog)")
     print(f"🟢 Order Backup System: Local CSV khi Google Sheet không kết nối được")
+    print(f"🔴 QUAN TRỌNG: BOT LUÔN BÁO CÒN HÀNG (không kiểm tra tồn kho)")
+    print(f"🔴 GPT Reply Mode: NGẮN GỌN (max 150 tokens)")
+    print(f"🔴 Order Priority: ƯU TIÊN GỬI LINK KHI CÓ TỪ KHÓA ĐẶT HÀNG")
     
     app.run(host="0.0.0.0", port=5000, debug=True)
