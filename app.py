@@ -1466,55 +1466,93 @@ def load_products(force=False):
 
 def get_variant_image(ms: str, color: str, size: str) -> str:
     """
-    Tìm ảnh của variant dựa trên màu và size
+    Tìm ảnh của variant dựa trên màu và size - IMPROVED
     """
     if ms not in PRODUCTS:
         return ""
     
     product = PRODUCTS[ms]
+    
+    # Chuẩn hóa đầu vào
+    input_color = color.strip().lower() if color else ""
+    input_size = size.strip().lower() if size else ""
+    
+    print(f"[GET VARIANT IMAGE] Tìm ảnh cho: MS={ms}, Color='{input_color}', Size='{input_size}'")
+    
+    # Tìm variant chính xác nhất
+    best_match = None
+    best_score = 0
+    
     variants = product.get("variants", [])
-    
-    # Tìm variant khớp chính xác
     for variant in variants:
-        variant_color = variant.get("mau", "").strip().lower()
-        variant_size = variant.get("size", "").strip().lower()
+        variant_color = (variant.get("mau", "").strip().lower() if variant.get("mau") else "")
+        variant_size = (variant.get("size", "").strip().lower() if variant.get("size") else "")
+        variant_image = variant.get("variant_image", "")
         
-        input_color = color.strip().lower()
-        input_size = size.strip().lower()
+        if not variant_image:
+            continue
         
-        # So sánh màu và size (bỏ qua case và khoảng trắng)
-        color_match = (not input_color) or (variant_color == input_color) or (input_color == "mặc định" and not variant_color)
-        size_match = (not input_size) or (variant_size == input_size) or (input_size == "mặc định" and not variant_size)
+        # Tính điểm phù hợp
+        score = 0
         
-        if color_match and size_match:
+        # So sánh màu
+        if input_color and variant_color:
+            if input_color == variant_color:
+                score += 3
+            elif input_color in variant_color or variant_color in input_color:
+                score += 2
+        
+        # So sánh size
+        if input_size and variant_size:
+            if input_size == variant_size:
+                score += 3
+            elif input_size in variant_size or variant_size in input_size:
+                score += 2
+        
+        # Nếu không có màu hoặc size trong variant
+        if not variant_color and input_color:
+            score -= 1
+        if not variant_size and input_size:
+            score -= 1
+        
+        # Cập nhật best match
+        if score > best_score:
+            best_score = score
+            best_match = variant_image
+    
+    # Nếu tìm thấy match
+    if best_match and best_score > 0:
+        print(f"[GET VARIANT IMAGE] Tìm thấy ảnh phù hợp nhất (điểm: {best_score}): {best_match[:100]}...")
+        return best_match
+    
+    # Fallback 1: Lấy ảnh đầu tiên của variant có màu tương ứng
+    if input_color:
+        for variant in variants:
+            variant_color = variant.get("mau", "").strip().lower()
             variant_image = variant.get("variant_image", "")
-            if variant_image:
+            
+            if variant_image and input_color == variant_color:
+                print(f"[GET VARIANT IMAGE] Fallback 1: Ảnh theo màu: {variant_image[:100]}...")
                 return variant_image
     
-    # Nếu không tìm thấy variant khớp, thử tìm variant với màu hoặc size khớp một phần
-    for variant in variants:
-        variant_color = variant.get("mau", "").strip().lower()
-        variant_size = variant.get("size", "").strip().lower()
-        
-        input_color = color.strip().lower()
-        input_size = size.strip().lower()
-        
-        # Nếu có màu và khớp màu, bất kể size
-        if input_color and input_color != "mặc định" and variant_color == input_color:
+    # Fallback 2: Lấy ảnh đầu tiên của variant có size tương ứng
+    if input_size:
+        for variant in variants:
+            variant_size = variant.get("size", "").strip().lower()
             variant_image = variant.get("variant_image", "")
-            if variant_image:
-                return variant_image
-        
-        # Nếu có size và khớp size, bất kể màu
-        if input_size and input_size != "mặc định" and variant_size == input_size:
-            variant_image = variant.get("variant_image", "")
-            if variant_image:
+            
+            if variant_image and input_size == variant_size:
+                print(f"[GET VARIANT IMAGE] Fallback 2: Ảnh theo size: {variant_image[:100]}...")
                 return variant_image
     
-    # Fallback: Lấy ảnh đầu tiên từ sản phẩm
+    # Fallback 3: Lấy ảnh đầu tiên từ sản phẩm
     images_field = product.get("Images", "")
     urls = parse_image_urls(images_field)
-    return urls[0] if urls else ""
+    if urls:
+        print(f"[GET VARIANT IMAGE] Fallback 3: Ảnh mặc định: {urls[0][:100]}...")
+        return urls[0]
+    
+    return ""
 
 # ============================================
 # GPT INTEGRATION - XỬ LÝ MỌI CÂU HỎI (ĐÃ SỬA)
@@ -1675,12 +1713,108 @@ def detect_ms_from_text(text: str):
     
     return None
 
+def send_detailed_price_table(uid: str, ms: str):
+    """
+    Gửi bảng giá chi tiết theo từng biến thể (màu/size)
+    """
+    if ms not in PRODUCTS:
+        send_message(uid, "Em không tìm thấy thông tin giá cho sản phẩm này ạ.")
+        return
+    
+    product = PRODUCTS[ms]
+    product_name = product.get('Ten', 'Sản phẩm')
+    
+    variants = product.get("variants", [])
+    
+    if not variants:
+        # Nếu không có biến thể, chỉ gửi giá chung
+        gia_raw = product.get("Gia", "")
+        gia_int = extract_price_int(gia_raw) or 0
+        send_message(uid, f"💰 **GIÁ SẢN PHẨM:**\n{product_name}\n\n💵 **Giá:** {gia_int:,.0f} đ\n\n_Chỉ có một mức giá duy nhất ạ._")
+        return
+    
+    # Nhóm biến thể theo màu
+    color_groups = {}
+    for variant in variants:
+        color = variant.get("mau", "Mặc định")
+        size = variant.get("size", "Mặc định")
+        gia_int = variant.get("gia")
+        
+        if gia_int is None:
+            gia_raw = variant.get("gia_raw", "")
+            gia_int = extract_price_int(gia_raw) or 0
+        
+        if color not in color_groups:
+            color_groups[color] = []
+        
+        color_groups[color].append({
+            "size": size,
+            "price": gia_int,
+            "price_display": f"{gia_int:,.0f} đ"
+        })
+    
+    # Tạo bảng giá
+    price_message = f"💰 **BẢNG GIÁ CHI TIẾT**\n📌 {product_name} [{ms}]\n\n"
+    
+    for color, size_prices in color_groups.items():
+        price_message += f"🎨 **Màu: {color}**\n"
+        
+        # Kiểm tra nếu tất cả size có cùng giá
+        unique_prices = set(item["price"] for item in size_prices)
+        
+        if len(unique_prices) == 1:
+            # Tất cả size cùng giá
+            single_price = next(iter(unique_prices))
+            sizes = ", ".join([item["size"] for item in size_prices])
+            price_message += f"   ├ Tất cả size ({sizes}): {single_price:,.0f} đ\n"
+        else:
+            # Giá khác nhau theo size
+            for item in size_prices:
+                price_message += f"   ├ Size {item['size']}: {item['price_display']}\n"
+        
+        price_message += "\n"
+    
+    # Thêm giá chung nếu có
+    gia_raw = product.get("Gia", "")
+    if gia_raw:
+        gia_int = extract_price_int(gia_raw) or 0
+        price_message += f"📊 **GIÁ CHUNG:** {gia_int:,.0f} đ\n\n"
+    
+    price_message += "💡 _Anh/chị có thể chọn màu/size cụ thể để xem giá chi tiết hơn ạ._"
+    
+    send_message(uid, price_message)
+
 def generate_gpt_response(uid: str, user_message: str, ms: str = None):
-    """Gọi GPT để trả lời câu hỏi của khách - TRẢ LỜI NGẮN GỌN"""
+    """Gọi GPT để trả lời câu hỏi của khách - CẢI THIỆN XỬ LÝ GIÁ"""
     if not client or not OPENAI_API_KEY:
         return "Hiện tại hệ thống trợ lý AI đang bảo trì, vui lòng thử lại sau ạ."
     
     try:
+        # KIỂM TRA NẾU LÀ CÂU HỎI VỀ GIÁ
+        lower_message = user_message.lower()
+        price_keywords = ["giá", "bao nhiêu tiền", "price", "cost", "đắt không", "rẻ không", "mắc không", "giá cả"]
+        
+        if any(keyword in lower_message for keyword in price_keywords) and ms and ms in PRODUCTS:
+            # Gửi bảng giá chi tiết trước
+            ctx = USER_CONTEXT[uid]
+            ctx["processing_lock"] = True
+            
+            try:
+                send_detailed_price_table(uid, ms)
+            finally:
+                ctx["processing_lock"] = False
+            
+            # Sau đó dùng GPT trả lời thêm nếu cần
+            time.sleep(1)
+            product = PRODUCTS[ms]
+            product_name = product.get('Ten', '')
+            
+            # Tạo link đặt hàng
+            domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
+            order_link = f"{domain}/order-form?ms={ms}&uid={uid}"
+            
+            return f"Dạ em đã gửi bảng giá chi tiết cho sản phẩm [{ms}] {product_name}.\n\nAnh/chị có thể đặt hàng ngay tại đây:\n{order_link}"
+        
         # Tạo link đặt hàng nếu có mã sản phẩm
         order_link = ""
         if ms and ms in PRODUCTS:
@@ -1689,27 +1823,33 @@ def generate_gpt_response(uid: str, user_message: str, ms: str = None):
         
         if ms and ms in PRODUCTS:
             product_context = build_comprehensive_product_context(ms)
-            # PROMPT NGẮN GỌN, KHÔNG DÀI DÒN
+            
+            # Thêm thông tin giá chi tiết vào context
+            variants = PRODUCTS[ms].get("variants", [])
+            if variants:
+                price_details = "\n\n=== BẢNG GIÁ CHI TIẾT ===\n"
+                for i, variant in enumerate(variants[:10], 1):  # Giới hạn 10 variant
+                    color = variant.get("mau", "Mặc định")
+                    size = variant.get("size", "Mặc định")
+                    gia_int = variant.get("gia") or extract_price_int(variant.get("gia_raw", "")) or 0
+                    price_details += f"{i}. {color} - {size}: {gia_int:,.0f} đ\n"
+                product_context += price_details
+            
             system_prompt = f"""Bạn là NHÂN VIÊN TƯ VẤN BÁN HÀNG của {FANPAGE_NAME}.
 Bạn đang tư vấn sản phẩm mã: {ms}
 
 QUY TẮC TRẢ LỜI (BẮT BUỘC):
-1. TRẢ LỜI NGẮN GỌN - TỐI ĐA 2-3 DÒNG
-2. Chỉ nói "còn hàng" khi khách hỏi về tồn kho/số lượng
-3. Nếu khách muốn đặt hàng: GỬI LINK NGAY
-4. Link đặt hàng: {order_link}
-5. Không hỏi lại nếu khách đã rõ
-6. Xưng "em", gọi "anh/chị"
-7. LUÔN GIỮ NGỮ CẢNH SẢN PHẨM HIỆN TẠI: [{ms}]
+1. Nếu khách hỏi về GIÁ: ĐÃ CÓ BẢNG GIÁ CHI TIẾT RIÊNG, bạn chỉ cần nói ngắn gọn và gợi ý đặt hàng
+2. Link đặt hàng: {order_link}
+3. Không cần nhắc lại toàn bộ bảng giá
+4. Xưng "em", gọi "anh/chị"
 
 THÔNG TIN SẢN PHẨM:
 {product_context}
 
-TRẢ LỜI MẪU:
-- Khi khách hỏi màu/size: "Dạ, sản phẩm có các màu ABC, size XYZ. Anh/chị đặt tại đây: {order_link}"
-- Khi khách hỏi giá: "Dạ, giá sản phẩm: X.XXXđ. Anh/chị đặt tại đây: {order_link}"
-- Khi khách hỏi chất liệu: "Dạ, chất liệu cotton cao cấp. Anh/chị đặt tại đây: {order_link}"
-- Khi khách hỏi còn hàng không: "Dạ, sản phẩm còn hàng ạ. Đặt tại đây: {order_link}"
+TRẢ LỜI MẪU KHI HỎI GIÁ:
+- "Dạ, em đã gửi bảng giá chi tiết theo từng phân loại ạ. Anh/chị đặt hàng tại đây: {order_link}"
+- "Dạ, sản phẩm có nhiều mức giá tùy màu và size. Em vừa gửi bảng giá chi tiết. Anh/chị đặt tại: {order_link}"
 
 Hãy trả lời NGẮN GỌN và tự nhiên."""
         else:
@@ -1738,13 +1878,12 @@ Hỏi mã sản phẩm nếu chưa biết."""
             model="gpt-4o-mini",
             messages=messages,
             temperature=0.7,
-            max_tokens=150,  # GIẢM XUỐNG CHỈ 150 tokens
+            max_tokens=150,
             timeout=15.0,
         )
         
         reply = response.choices[0].message.content.strip()
         
-        # **QUAN TRỌNG: Thay thế [link] bằng link thật nếu có**
         if order_link and "[link]" in reply:
             reply = reply.replace("[link]", order_link)
         
@@ -2211,6 +2350,17 @@ def handle_text(uid: str, text: str):
 
         lower = text.lower()
         
+        # **QUAN TRỌNG: Xử lý câu hỏi về giá**
+        price_keywords = ["giá", "bao nhiêu tiền", "price", "cost", "đắt không", "rẻ không", "mắc không", "giá cả", "bao nhiêu"]
+        
+        # Tìm sản phẩm hiện tại trong context
+        current_ms = get_relevant_product_for_question(uid, text)
+        
+        if any(keyword in lower for keyword in price_keywords) and current_ms and current_ms in PRODUCTS:
+            send_detailed_price_table(uid, current_ms)
+            ctx["processing_lock"] = False
+            return
+        
         # **QUAN TRỌNG: Xử lý từ khóa yêu cầu sản phẩm khác**
         if any(kw in lower for kw in CHANGE_PRODUCT_KEYWORDS):
             print(f"[CHANGE PRODUCT] User {uid} yêu cầu sản phẩm khác: {text}")
@@ -2244,8 +2394,12 @@ Anh/chị muốn xem sản phẩm nào cụ thể ạ?"""
                 if color or size:
                     variant_info = f" ({color if color else ''}{' - ' if color and size else ''}{size if size else ''})"
                 
-                # Reply cực ngắn - LUÔN BÁO CÒN HÀNG
-                reply = f"Dạ, sản phẩm{variant_info} còn hàng ạ!\nĐặt tại: {order_link}"
+                # Gửi bảng giá chi tiết trước
+                send_detailed_price_table(uid, current_ms)
+                time.sleep(1)
+                
+                # Sau đó gửi link đặt hàng
+                reply = f"Dạ, sản phẩm{variant_info} còn hàng ạ!\n\n📋 Đặt hàng ngay tại đây:\n{order_link}"
                 send_message(uid, reply)
                 
                 # Cập nhật context
@@ -2282,8 +2436,8 @@ Anh/chị muốn xem sản phẩm nào cụ thể ạ?"""
                             },
                             {
                                 "type": "postback",
-                                "title": "🔍 Xem chi tiết",
-                                "payload": f"ADVICE_{ms}"
+                                "title": "💰 Xem bảng giá",
+                                "payload": f"PRICE_{ms}"
                             }
                         ]
                     }
@@ -2292,7 +2446,7 @@ Anh/chị muốn xem sản phẩm nào cụ thể ạ?"""
                 if carousel_elements:
                     send_carousel_template(uid, carousel_elements)
                     send_message(uid, "📱 Anh/chị vuốt sang trái/phải để xem thêm sản phẩm nhé!")
-                    send_message(uid, "💬 Gõ mã sản phẩm (ví dụ: [MS123456]) hoặc bấm 'Xem chi tiết' để xem thông tin và chính sách cụ thể.")
+                    send_message(uid, "💰 Bấm 'Xem bảng giá' để xem giá chi tiết theo từng phân loại.")
                 else:
                     send_message(uid, "Hiện tại shop chưa có sản phẩm nào để hiển thị ạ.")
                 
@@ -2337,6 +2491,13 @@ Anh/chị muốn xem sản phẩm nào cụ thể ạ?"""
         
         # PHÂN TÍCH INTENT KHI CÓ SẢN PHẨM HIỆN TẠI
         if current_ms and current_ms in PRODUCTS:
+            # Kiểm tra lại từ khóa giá (trường hợp GPT miss)
+            price_keywords = ["giá", "bao nhiêu tiền", "price", "cost", "đắt không", "rẻ không"]
+            if any(kw in lower for kw in price_keywords):
+                send_detailed_price_table(uid, current_ms)
+                ctx["processing_lock"] = False
+                return
+            
             # Phân tích intent với GPT để xác định có phải yêu cầu xem ảnh không
             intent_result = analyze_intent_with_gpt(uid, text, current_ms)
             
@@ -2807,7 +2968,7 @@ Anh/chị quan tâm sản phẩm nào ạ?"""
                         continue
             
             # ============================================
-            # XỬ LÝ POSTBACK (GET_STARTED, ADVICE_, ORDER_)
+            # XỬ LÝ POSTBACK (GET_STARTED, ADVICE_, ORDER_, PRICE_)
             # ============================================
             if "postback" in m:
                 payload = m["postback"].get("payload")
@@ -2881,6 +3042,32 @@ Anh/chị quan tâm sản phẩm nào ạ?"""
                                 order_link = f"{domain}/order-form?ms={ms}&uid={sender_id}"
                                 product_name = PRODUCTS[ms].get('Ten', '')
                                 send_message(sender_id, f"🎯 Anh/chị chọn sản phẩm [{ms}] {product_name}!\n\n📋 Đặt hàng ngay tại đây:\n{order_link}")
+                            else:
+                                send_message(sender_id, "❌ Em không tìm thấy sản phẩm này. Anh/chị vui lòng kiểm tra lại mã sản phẩm ạ.")
+                        finally:
+                            ctx["processing_lock"] = False
+                    
+                    elif payload.startswith("PRICE_"):
+                        if ctx.get("processing_lock"):
+                            print(f"[POSTBACK LOCKED] User {sender_id} đang được xử lý, bỏ qua PRICE")
+                            continue
+                        
+                        ctx["processing_lock"] = True
+                        try:
+                            load_products()
+                            ms = payload.replace("PRICE_", "")
+                            if ms in PRODUCTS:
+                                ctx["last_ms"] = ms
+                                update_product_context(sender_id, ms)
+                                
+                                # Gửi bảng giá chi tiết
+                                send_detailed_price_table(sender_id, ms)
+                                
+                                # Gửi link đặt hàng sau 1 giây
+                                time.sleep(1)
+                                domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
+                                order_link = f"{domain}/order-form?ms={ms}&uid={sender_id}"
+                                send_message(sender_id, f"📋 Đặt hàng ngay tại đây:\n{order_link}")
                             else:
                                 send_message(sender_id, "❌ Em không tìm thấy sản phẩm này. Anh/chị vui lòng kiểm tra lại mã sản phẩm ạ.")
                         finally:
@@ -3357,7 +3544,7 @@ def order_form():
                     <!-- Color Selection -->
                     <div class="form-group">
                         <label for="color">Màu sắc:</label>
-                        <select id="color" class="form-control">
+                        <select id="color" class="form-control select2-variant">
                             {''.join(f"<option value='{c}'>{c}</option>" for c in colors)}
                         </select>
                     </div>
@@ -3365,7 +3552,7 @@ def order_form():
                     <!-- Size Selection -->
                     <div class="form-group">
                         <label for="size">Size:</label>
-                        <select id="size" class="form-control">
+                        <select id="size" class="form-control select2-variant">
                             {''.join(f"<option value='{s}'>{s}</option>" for s in sizes)}
                         </select>
                     </div>
@@ -3399,20 +3586,21 @@ def order_form():
                         
                         <div class="address-row">
                             <div class="address-col">
-                                <select id="province" class="form-control" 
-                                        onchange="loadDistricts(this.value)">
-                                    <option value="">Chọn Tỉnh/Thành phố</option>
+                                <select id="province" class="form-control select2-address" 
+                                        data-placeholder="Chọn Tỉnh/Thành phố">
+                                    <option value=""></option>
                                 </select>
                             </div>
                             <div class="address-col">
-                                <select id="district" class="form-control" disabled
-                                        onchange="loadWards(this.value)">
-                                    <option value="">Chọn Quận/Huyện</option>
+                                <select id="district" class="form-control select2-address" disabled
+                                        data-placeholder="Chọn Quận/Huyện">
+                                    <option value=""></option>
                                 </select>
                             </div>
                             <div class="address-col">
-                                <select id="ward" class="form-control" disabled>
-                                    <option value="">Chọn Phường/Xã</option>
+                                <select id="ward" class="form-control select2-address" disabled
+                                        data-placeholder="Chọn Phường/Xã">
+                                    <option value=""></option>
                                 </select>
                             </div>
                         </div>
@@ -3443,6 +3631,10 @@ def order_form():
             </div>
         </div>
 
+        <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/select2/4.0.13/js/select2.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/select2/4.0.13/js/i18n/vi.js"></script>
+        
         <script>
             // Global variables
             const PRODUCT_MS = "{ms}";
@@ -3450,450 +3642,9 @@ def order_form():
             const BASE_PRICE = {price_int};
             const DOMAIN = "{'https://' + DOMAIN if not DOMAIN.startswith('http') else DOMAIN}";
             const API_BASE_URL = "{('/api' if DOMAIN.startswith('http') else 'https://' + DOMAIN + '/api')}";
-            
-            // ============================================
-            // PRODUCT VARIANT HANDLING
-            // ============================================
-            
-            function formatPrice(n) {{
-                return n.toLocaleString('vi-VN') + ' đ';
-            }}
-            
-            async function updateImageByVariant() {{
-                const color = document.getElementById('color').value;
-                const size = document.getElementById('size').value;
-                const imageContainer = document.getElementById('image-container');
-                
-                // Show loading
-                const currentImg = imageContainer.querySelector('img');
-                if (currentImg) {{
-                    currentImg.classList.add('loading');
-                }}
-                
-                try {{
-                    const res = await fetch(`${{API_BASE_URL}}/get-variant-image?ms=${{PRODUCT_MS}}&color=${{encodeURIComponent(color)}}&size=${{encodeURIComponent(size)}}`);
-                    if (res.ok) {{
-                        const data = await res.json();
-                        if (data.image && data.image.trim() !== '') {{
-                            let imgElement = imageContainer.querySelector('img');
-                            if (!imgElement) {{
-                                imgElement = document.createElement('img');
-                                imgElement.className = 'product-image';
-                                imgElement.onerror = function() {{
-                                    this.onerror = null;
-                                    this.src = 'https://via.placeholder.com/120x120?text=No+Image';
-                                }};
-                                imageContainer.innerHTML = '';
-                                imageContainer.appendChild(imgElement);
-                            }}
-                            imgElement.src = data.image;
-                        }} else {{
-                            imageContainer.innerHTML = '<div class="placeholder-image">Chưa có ảnh cho thuộc tính này</div>';
-                        }}
-                    }}
-                }} catch (e) {{
-                    console.error('Error updating image:', e);
-                }} finally {{
-                    if (currentImg) {{
-                        setTimeout(() => currentImg.classList.remove('loading'), 300);
-                    }}
-                }}
-            }}
-            
-            async function updatePriceByVariant() {{
-                const color = document.getElementById('color').value;
-                const size = document.getElementById('size').value;
-                const quantity = parseInt(document.getElementById('quantity').value || '1');
-
-                try {{
-                    const res = await fetch(`${{API_BASE_URL}}/get-variant-price?ms=${{PRODUCT_MS}}&color=${{encodeURIComponent(color)}}&size=${{encodeURIComponent(size)}}`);
-                    if (res.ok) {{
-                        const data = await res.json();
-                        const price = data.price || BASE_PRICE;
-
-                        document.getElementById('price-display').innerText = formatPrice(price);
-                        document.getElementById('total-display').innerText = formatPrice(price * quantity);
-                    }}
-                }} catch (e) {{
-                    document.getElementById('price-display').innerText = formatPrice(BASE_PRICE);
-                    document.getElementById('total-display').innerText = formatPrice(BASE_PRICE * quantity);
-                }}
-            }}
-            
-            async function updateVariantInfo() {{
-                await Promise.all([
-                    updateImageByVariant(),
-                    updatePriceByVariant()
-                ]);
-            }}
-            
-            // ============================================
-            // VIETNAM ADDRESS API (Open API - provinces.open-api.vn)
-            // ============================================
-            
-            // Load provinces từ Open API
-            async function loadProvinces() {{
-                const provinceSelect = document.getElementById('province');
-                
-                try {{
-                    // Show loading
-                    provinceSelect.innerHTML = '<option value="">Đang tải tỉnh/thành...</option>';
-                    provinceSelect.disabled = true;
-                    
-                    const response = await fetch('https://provinces.open-api.vn/api/p/');
-                    const data = await response.json();
-                    
-                    // Sắp xếp provinces theo tên
-                    const provinces = data.sort((a, b) => 
-                        a.name.localeCompare(b.name, 'vi')
-                    );
-                    
-                    provinceSelect.innerHTML = '<option value="">Chọn Tỉnh/Thành phố</option>';
-                    provinces.forEach(province => {{
-                        const option = document.createElement('option');
-                        option.value = province.code;
-                        option.textContent = province.name;
-                        provinceSelect.appendChild(option);
-                    }});
-                    
-                    console.log(`✅ Đã tải ${{provinces.length}} tỉnh/thành phố từ Open API`);
-                    
-                    // Load preset address từ URL nếu có
-                    loadPresetAddress();
-                }} catch (error) {{
-                    console.error('❌ Lỗi khi load tỉnh/thành:', error);
-                    // Fallback to static list
-                    loadStaticProvinces();
-                }} finally {{
-                    provinceSelect.disabled = false;
-                }}
-            }}
-            
-            // Load districts dựa trên selected province
-            async function loadDistricts(provinceId) {{
-                const districtSelect = document.getElementById('district');
-                const wardSelect = document.getElementById('ward');
-                
-                if (!provinceId) {{
-                    districtSelect.innerHTML = '<option value="">Chọn Quận/Huyện</option>';
-                    wardSelect.innerHTML = '<option value="">Chọn Phường/Xã</option>';
-                    districtSelect.disabled = true;
-                    wardSelect.disabled = true;
-                    updateFullAddress();
-                    return;
-                }}
-                
-                try {{
-                    districtSelect.innerHTML = '<option value="">Đang tải quận/huyện...</option>';
-                    districtSelect.disabled = true;
-                    wardSelect.disabled = true;
-                    
-                    const response = await fetch(`https://provinces.open-api.vn/api/p/${{provinceId}}?depth=2`);
-                    const provinceData = await response.json();
-                    
-                    const districts = provinceData.districts || [];
-                    districts.sort((a, b) => a.name.localeCompare(b.name, 'vi'));
-                    
-                    districtSelect.innerHTML = '<option value="">Chọn Quận/Huyện</option>';
-                    districts.forEach(district => {{
-                        const option = document.createElement('option');
-                        option.value = district.code;
-                        option.textContent = district.name;
-                        districtSelect.appendChild(option);
-                    }});
-                    
-                    console.log(`✅ Đã tải ${{districts.length}} quận/huyện`);
-                    districtSelect.disabled = false;
-                    
-                    # Clear wards
-                    wardSelect.innerHTML = '<option value="">Chọn Phường/Xã</option>';
-                    wardSelect.disabled = true;
-                }} catch (error) {{
-                    console.error('❌ Lỗi khi load quận/huyện:', error);
-                    districtSelect.innerHTML = '<option value="">Lỗi tải dữ liệu</option>';
-                }} finally {{
-                    updateFullAddress();
-                }}
-            }}
-            
-            # Load wards dựa trên selected district
-            async function loadWards(districtId) {{
-                const wardSelect = document.getElementById('ward');
-                
-                if (!districtId) {{
-                    wardSelect.innerHTML = '<option value="">Chọn Phường/Xã</option>';
-                    wardSelect.disabled = true;
-                    updateFullAddress();
-                    return;
-                }}
-                
-                try {{
-                    wardSelect.innerHTML = '<option value="">Đang tải phường/xã...</option>';
-                    wardSelect.disabled = true;
-                    
-                    const response = await fetch(`https://provinces.open-api.vn/api/d/${{districtId}}?depth=2`);
-                    const districtData = await response.json();
-                    
-                    const wards = districtData.wards || [];
-                    wards.sort((a, b) => a.name.localeCompare(b.name, 'vi'));
-                    
-                    wardSelect.innerHTML = '<option value="">Chọn Phường/Xã</option>';
-                    wards.forEach(ward => {{
-                        const option = document.createElement('option');
-                        option.value = ward.code;
-                        option.textContent = ward.name;
-                        wardSelect.appendChild(option);
-                    }});
-                    
-                    console.log(`✅ Đã tải ${{wards.length}} phường/xã`);
-                    wardSelect.disabled = false;
-                }} catch (error) {{
-                    console.error('❌ Lỗi khi load phường/xã:', error);
-                    wardSelect.innerHTML = '<option value="">Lỗi tải dữ liệu</option>';
-                }} finally {{
-                    updateFullAddress();
-                }}
-            }}
-            
-            # Fallback: Static province list
-            function loadStaticProvinces() {{
-                const staticProvinces = [
-                    "An Giang", "Bà Rịa - Vũng Tàu", "Bắc Giang", "Bắc Kạn", "Bạc Liêu", 
-                    "Bắc Ninh", "Bến Tre", "Bình Định", "Bình Dương", "Bình Phước", 
-                    "Bình Thuận", "Cà Mau", "Cao Bằng", "Cần Thơ", "Đà Nẵng", 
-                    "Đắk Lắk", "Đắk Nông", "Điện Biên", "Đồng Nai", "Đồng Tháp", 
-                    "Gia Lai", "Hà Giang", "Hà Nam", "Hà Nội", "Hà Tĩnh", 
-                    "Hải Dương", "Hải Phòng", "Hậu Giang", "Hòa Bình", "Hưng Yên", 
-                    "Khánh Hòa", "Kiên Giang", "Kon Tum", "Lai Châu", "Lâm Đồng", 
-                    "Lạng Sơn", "Lào Cai", "Long An", "Nam Định", "Nghệ An", 
-                    "Ninh Bình", "Ninh Thuận", "Phú Thọ", "Phú Yên", "Quảng Bình", 
-                    "Quảng Nam", "Quảng Ngãi", "Quảng Ninh", "Quảng Trị", "Sóc Trăng", 
-                    "Sơn La", "Tây Ninh", "Thái Bình", "Thái Nguyên", "Thanh Hóa", 
-                    "Thừa Thiên Huế", "Tiền Giang", "TP Hồ Chí Minh", "Trà Vinh", 
-                    "Tuyên Quang", "Vĩnh Long", "Vĩnh Phúc", "Yên Bái"
-                ];
-                
-                const provinceSelect = document.getElementById('province');
-                provinceSelect.innerHTML = '<option value="">Chọn Tỉnh/Thành phố</option>';
-                
-                staticProvinces.forEach((province, index) => {{
-                    const option = document.createElement('option');
-                    option.value = index + 1;
-                    option.textContent = province;
-                    provinceSelect.appendChild(option);
-                }});
-                
-                provinceSelect.disabled = false;
-                console.log('⚠️ Đã tải danh sách tỉnh thành tĩnh (fallback)');
-            }}
-            
-            # Update full address từ tất cả các components
-            function updateFullAddress() {{
-                const provinceText = document.getElementById('province').options[document.getElementById('province').selectedIndex]?.text || '';
-                const districtText = document.getElementById('district').options[document.getElementById('district').selectedIndex]?.text || '';
-                const wardText = document.getElementById('ward').options[document.getElementById('ward').selectedIndex]?.text || '';
-                const detailText = document.getElementById('addressDetail').value || '';
-                
-                # Save to hidden fields
-                document.getElementById('provinceName').value = provinceText;
-                document.getElementById('districtName').value = districtText;
-                document.getElementById('wardName').value = wardText;
-                
-                # Build full address
-                const fullAddress = [detailText, wardText, districtText, provinceText]
-                    .filter(part => part.trim() !== '')
-                    .join(', ');
-                
-                document.getElementById('fullAddress').value = fullAddress;
-                
-                # Update preview
-                const previewElement = document.getElementById('addressPreview');
-                if (fullAddress.trim()) {{
-                    previewElement.innerHTML = `
-                        <div class="address-preview-content">
-                            <strong>Địa chỉ nhận hàng:</strong>
-                            <p>${{fullAddress}}</p>
-                        </div>
-                    `;
-                    previewElement.style.display = 'block';
-                }} else {{
-                    previewElement.style.display = 'none';
-                }}
-                
-                return fullAddress;
-            }}
-            
-            # Load preset address từ URL parameters
-            function loadPresetAddress() {{
-                const urlParams = new URLSearchParams(window.location.search);
-                const presetAddress = urlParams.get('address');
-                
-                if (presetAddress) {{
-                    document.getElementById('addressDetail').value = presetAddress;
-                    updateFullAddress();
-                }}
-            }}
-            
-            # ============================================
-            # FORM VALIDATION AND SUBMISSION
-            # ============================================
-            
-            async function submitOrder() {{
-                # Collect form data
-                const formData = {{
-                    ms: PRODUCT_MS,
-                    uid: PRODUCT_UID,
-                    color: document.getElementById('color').value,
-                    size: document.getElementById('size').value,
-                    quantity: parseInt(document.getElementById('quantity').value || '1'),
-                    customerName: document.getElementById('customerName').value.trim(),
-                    phone: document.getElementById('phone').value.trim(),
-                    address: updateFullAddress(),
-                    provinceId: document.getElementById('province').value,
-                    districtId: document.getElementById('district').value,
-                    wardId: document.getElementById('ward').value,
-                    provinceName: document.getElementById('provinceName').value,
-                    districtName: document.getElementById('districtName').value,
-                    wardName: document.getElementById('wardName').value,
-                    addressDetail: document.getElementById('addressDetail').value.trim()
-                }};
-                
-                # Validate required fields
-                if (!formData.customerName) {{
-                    alert('Vui lòng nhập họ và tên');
-                    document.getElementById('customerName').focus();
-                    return;
-                }}
-                
-                if (!formData.phone) {{
-                    alert('Vui lòng nhập số điện thoại');
-                    document.getElementById('phone').focus();
-                    return;
-                }}
-                
-                # Validate phone number
-                const phoneRegex = /^(0|\\+84)(\\d{{9,10}})$/;
-                if (!phoneRegex.test(formData.phone)) {{
-                    alert('Số điện thoại không hợp lệ. Vui lòng nhập số điện thoại 10-11 chữ số');
-                    document.getElementById('phone').focus();
-                    return;
-                }}
-                
-                # Validate address
-                if (!formData.provinceId) {{
-                    alert('Vui lòng chọn Tỉnh/Thành phố');
-                    document.getElementById('province').focus();
-                    return;
-                }}
-                
-                if (!formData.districtId) {{
-                    alert('Vui lòng chọn Quận/Huyện');
-                    document.getElementById('district').focus();
-                    return;
-                }}
-                
-                if (!formData.wardId) {{
-                    alert('Vui lòng chọn Phường/Xã');
-                    document.getElementById('ward').focus();
-                    return;
-                }}
-                
-                if (!formData.addressDetail) {{
-                    alert('Vui lòng nhập địa chỉ chi tiết (số nhà, tên đường)');
-                    document.getElementById('addressDetail').focus();
-                    return;
-                }}
-                
-                # Show loading
-                const submitBtn = document.getElementById('submitBtn');
-                const originalText = submitBtn.innerHTML;
-                submitBtn.innerHTML = '<span class="loading-spinner"></span> ĐANG XỬ LÝ...';
-                submitBtn.disabled = true;
-                
-                try {{
-                    const response = await fetch(`${{API_BASE_URL}}/submit-order`, {{
-                        method: 'POST',
-                        headers: {{
-                            'Content-Type': 'application/json'
-                        }},
-                        body: JSON.stringify(formData)
-                    }});
-                    
-                    const data = await response.json();
-                    
-                    if (response.ok) {{
-                        # Success
-                        alert('🎉 Đã gửi đơn hàng thành công!\\n\\nShop sẽ liên hệ xác nhận trong 5-10 phút.\\nCảm ơn anh/chị đã đặt hàng! ❤️');
-                        
-                        # Reset form (optional)
-                        document.getElementById('customerName').value = '';
-                        document.getElementById('phone').value = '';
-                        document.getElementById('addressDetail').value = '';
-                        document.getElementById('province').selectedIndex = 0;
-                        document.getElementById('district').innerHTML = '<option value="">Chọn Quận/Huyện</option>';
-                        document.getElementById('ward').innerHTML = '<option value="">Chọn Phường/Xã</option>';
-                        document.getElementById('district').disabled = true;
-                        document.getElementById('ward').disabled = true;
-                        updateFullAddress();
-                        
-                    }} else {{
-                        # Error
-                        alert(`❌ ${{data.message || 'Có lỗi xảy ra. Vui lòng thử lại sau'}}`);
-                    }}
-                }} catch (error) {{
-                    console.error('Lỗi khi gửi đơn hàng:', error);
-                    alert('❌ Lỗi kết nối. Vui lòng thử lại sau!');
-                }} finally {{
-                    # Restore button
-                    submitBtn.innerHTML = originalText;
-                    submitBtn.disabled = false;
-                }}
-            }}
-            
-            # ============================================
-            # INITIALIZATION
-            # ============================================
-            
-            document.addEventListener('DOMContentLoaded', function() {{
-                # Load provinces
-                loadProvinces();
-                
-                # Event listeners for product variant changes
-                document.getElementById('color').addEventListener('change', updateVariantInfo);
-                document.getElementById('size').addEventListener('change', updateVariantInfo);
-                document.getElementById('quantity').addEventListener('input', updatePriceByVariant);
-                
-                # Event listeners for address changes
-                document.getElementById('province').addEventListener('change', function() {{
-                    loadDistricts(this.value);
-                    updateFullAddress();
-                }});
-                
-                document.getElementById('district').addEventListener('change', function() {{
-                    loadWards(this.value);
-                    updateFullAddress();
-                }});
-                
-                document.getElementById('ward').addEventListener('change', updateFullAddress);
-                document.getElementById('addressDetail').addEventListener('input', updateFullAddress);
-                
-                # Initialize product variant info
-                updateVariantInfo();
-                
-                # Enter key to submit form
-                document.getElementById('orderForm').addEventListener('keypress', function(e) {{
-                    if (e.which === 13) {{
-                        e.preventDefault();
-                        submitOrder();
-                    }}
-                }});
-                
-                # Focus on first field
-                setTimeout(() => {{
-                    document.getElementById('customerName').focus();
-                }}, 500);
-            }});
         </script>
+        
+        <script src="/static/order-form.js"></script>
     </body>
     </html>
     """
@@ -4003,7 +3754,7 @@ def api_get_variant_price():
 
 @app.route("/api/get-variant-image")
 def api_get_variant_image():
-    """API trả về ảnh tương ứng với màu và size"""
+    """API trả về ảnh tương ứng với màu và size - IMPROVED"""
     ms = (request.args.get("ms") or "").upper()
     color = request.args.get("color", "").strip()
     size = request.args.get("size", "").strip()
@@ -4013,6 +3764,9 @@ def api_get_variant_image():
         return {"error": "not_found"}, 404
     
     variant_image = get_variant_image(ms, color, size)
+    
+    # Log để debug
+    print(f"[VARIANT IMAGE] MS: {ms}, Color: {color}, Size: {size}, Image: {variant_image[:100] if variant_image else 'None'}")
     
     return {
         "ms": ms,
@@ -4228,7 +3982,9 @@ def health_check():
         "order_keywords_priority": "HIGH",
         "context_tracking": "ENABLED (tracks last_ms and product_history)",
         "change_product_keywords": f"{len(CHANGE_PRODUCT_KEYWORDS)} từ khóa được định nghĩa",
-        "facebook_shop_guidance": "ENABLED (hướng dẫn vào gian hàng khi yêu cầu sản phẩm khác)"
+        "facebook_shop_guidance": "ENABLED (hướng dẫn vào gian hàng khi yêu cầu sản phẩm khác)",
+        "price_table_support": "ENABLED (gửi bảng giá chi tiết theo biến thể)",
+        "dynamic_variant_images": "ENABLED (ảnh thay đổi theo màu/size trên order form)"
     }, 200
 
 # ============================================
@@ -4271,8 +4027,11 @@ if __name__ == "__main__":
     print(f"🟢 Context Tracking: BẬT (ghi nhớ last_ms và product_history)")
     print(f"🟢 Change Product Keywords: {len(CHANGE_PRODUCT_KEYWORDS)} từ khóa")
     print(f"🟢 Facebook Shop Guidance: BẬT (hướng dẫn vào gian hàng)")
+    print(f"🟢 Price Table Support: BẬT (gửi bảng giá chi tiết theo biến thể)")
+    print(f"🟢 Dynamic Variant Images: BẬT (ảnh thay đổi theo màu/size trên order form)")
     print(f"🔴 QUAN TRỌNG: BOT CHỈ BÁO CÒN HÀNG KHI KHÁCH HỎI VỀ TỒN KHO")
     print(f"🔴 GPT Reply Mode: NGẮN GỌN (max 150 tokens)")
     print(f"🔴 Order Priority: ƯU TIÊN GỬI LINK KHI CÓ TỪ KHÓA ĐẶT HÀNG")
+    print(f"🔴 Price Keywords: ƯU TIÊN XỬ LÝ CÂU HỎI VỀ GIÁ")
     
     app.run(host="0.0.0.0", port=5000, debug=True)
