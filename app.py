@@ -89,7 +89,7 @@ VIETNAMESE_MAP = {
     'Â': 'A', 'Ầ': 'A', 'Ấ': 'A', 'Ẩ': 'A', 'Ẫ': 'A', 'Ậ': 'A',
     'Đ': 'D',
     'È': 'E', 'É': 'E', 'Ẻ': 'E', 'Ẽ': 'E', 'Ẹ': 'E',
-    'Ê': 'E', 'Ề': 'E', 'Ế': 'E', 'Ể': 'E", 'Ễ': 'E', 'Ệ': 'E',
+    'Ê': 'E', 'Ề': 'E', 'Ế': 'E', 'Ể': 'E', 'Ễ': 'E', 'Ệ': 'E',
     'Ì': 'I', 'Í': 'I', 'Ỉ': 'I', 'Ĩ': 'I', 'Ị': 'I',
     'Ò': 'O', 'Ó': 'O', 'Ỏ': 'O', 'Õ': 'O', 'Ọ': 'O',
     'Ô': 'O', 'Ồ': 'O', 'Ố': 'O', 'Ổ': 'O', 'Ỗ': 'O', 'Ộ': 'O',
@@ -530,57 +530,32 @@ def analyze_intent_with_gpt(uid: str, text: str, ms: str = None) -> dict:
             product_name = PRODUCTS[ms].get('Ten', '')
         
         system_prompt = f"""Bạn là trợ lý phân tích ý định trong trò chuyện mua sắm.
-        
-PHÂN TÍCH TIN NHẮN CỦA KHÁCH HÀNG và xác định ý định chính xác.
-
+    
 Sản phẩm hiện tại: {product_name} (Mã: {ms if ms else 'Chưa xác định'})
 
-HÃY PHÂN TÍCH KỸ: Người dùng có ĐANG YÊU CẦU XEM ẢNH sản phẩm không?
-
-CÁCH DIỄN ĐẠT THƯỜNG GẶP CHO "view_images":
-- "gửi ảnh sản phẩm này"
-- "cho xem ảnh đi"
-- "có ảnh không gửi mình xem"
-- "gửi hình sản phẩm"
-- "cho mình xem hình ảnh"
-- "show ảnh sản phẩm"
-- "gửi hình" (trong ngữ cảnh đang nói về sản phẩm)
-- "có hình ảnh không"
-- "cho em xem ảnh"
-- "cho tôi xem ảnh"
-- "gửi tôi ảnh"
-- "tôi muốn xem ảnh"
-- "có ảnh demo không"
-- "có ảnh thực tế không"
-- "gửi ảnh thật đi"
-- "cho xem hình thật"
-- "có ảnh mẫu không"
+PHÂN TÍCH TIN NHẮN CỦA KHÁCH HÀNG: "{text}"
 
 QUY TẮC PHÂN TÍCH:
-1. TRẢ VỀ "view_images" NẾU:
-   - Khách yêu cầu xem ảnh/bức hình/hình ảnh của sản phẩm
-   - Khách hỏi "có ảnh không?" (khi đang nói về sản phẩm cụ thể)
-   - Khách nói "gửi hình", "gửi ảnh", "xem ảnh", "cho xem ảnh"
-   - Khách muốn xem hình thực tế, ảnh mẫu, ảnh demo
+1. TRẢ VỀ "view_images" NẾU KHÁCH:
+   - Yêu cầu xem ảnh/hình ảnh/hình của sản phẩm
+   - Hỏi "có ảnh không?", "gửi ảnh đi", "cho xem ảnh"
+   - Dùng từ: "ảnh mẫu", "hình ảnh", "gửi hình", "xem hình"
+   - Ví dụ: "gửi cho tôi xem ảnh mẫu này", "cho xem ảnh sản phẩm", "có ảnh không?"
 
-2. TRẢ VỀ "general" NẾU:
-   - Khách hỏi về giá, size, màu sắc, thông tin khác
-   - Khách yêu cầu xem sản phẩm khác (xem hàng khác)
-   - Khách yêu cầu xem danh sách sản phẩm
-   - Khách hỏi chung chung không liên quan đến ảnh
+2. TRẢ VỀ "general" NẾU KHÁCH:
+   - Hỏi về giá, size, màu sắc, thông tin khác
+   - Hỏi chung chung không liên quan ảnh
 
-Trả về JSON theo định dạng:
+QUAN TRỌNG: "gửi cho tôi xem ảnh mẫu này ?" → LUÔN là "view_images" với confidence cao (0.9+)
+
+Trả về JSON:
 {{
     "intent": "view_images|general",
     "confidence": 0.0-1.0,
-    "reason": "Giải thích ngắn gọn lý do"
+    "reason": "Giải thích ngắn"
 }}"""
-
-        user_message = f"""Tin nhắn của khách hàng: "{text}"
         
-Ngữ cảnh: Đang nói về sản phẩm {product_name} (Mã: {ms})
-        
-Phân tích xem khách có YÊU CẦU XEM ẢNH sản phẩm này không."""
+        user_message = f"""Phân tích xem khách có YÊU CẦU XEM ẢNH sản phẩm này không."""
         
         response = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -594,7 +569,10 @@ Phân tích xem khách có YÊU CẦU XEM ẢNH sản phẩm này không."""
             timeout=5.0
         )
         
-        result = json.loads(response.choices[0].message.content)
+        result_text = response.choices[0].message.content
+        print(f"[GPT INTENT RAW] {result_text}")
+        
+        result = json.loads(result_text)
         ctx["last_intent_analysis"] = result
         
         print(f"[INTENT ANALYSIS] User: {uid}, Text: {text[:50]}..., Intent: {result.get('intent')}, Confidence: {result.get('confidence')}")
@@ -641,7 +619,7 @@ def handle_catalog_followup(uid: str, text: str) -> bool:
     
     # Nếu là yêu cầu xem ảnh
     if (intent_result.get('intent') == 'view_images' and 
-        intent_result.get('confidence', 0) > 0.65):  # GIẢM XUỐNG 0.65
+        intent_result.get('confidence', 0) > 0.3):  # GIẢM XUỐNG 0.3
         send_all_product_images(uid, ms)
         return True
     
@@ -683,7 +661,7 @@ def handle_ads_referral_product(uid: str, text: str) -> bool:
         
         # Nếu là yêu cầu xem ảnh
         if (intent_result.get('intent') == 'view_images' and 
-            intent_result.get('confidence', 0) > 0.65):  # GIẢM XUỐNG 0.65
+            intent_result.get('confidence', 0) > 0.3):  # GIẢM XUỐNG 0.3
             send_all_product_images(uid, last_ms)
             return True
         
@@ -1062,10 +1040,10 @@ def find_product_by_keywords(text: str) -> Optional[str]:
         "nàng mũm mĩm": "MS000004",
     }
     
-    # Kiểm tra ánh xạ trực tiếp
+    # Kiểm tra án xạ trực tiếp
     for keyword, ms in keyword_to_ms.items():
         if keyword in normalized_text and ms in PRODUCTS:
-            print(f"[KEYWORD MATCH] Tìm thấy qua ánh xạ: {keyword} -> {ms}")
+            print(f"[KEYWORD MATCH] Tìm thấy qua án xạ: {keyword} -> {ms}")
             return ms
     
     # Tìm kiếm động trong tên và mô tả sản phẩm
@@ -1160,7 +1138,7 @@ def calculate_text_similarity(text1: str, text2: str) -> float:
 def find_products_by_image_analysis_improved(uid: str, analysis: dict, limit: int = 5) -> List[Tuple[str, float]]:
     """
     Tìm sản phẩm phù hợp dựa trên phân tích ảnh
-    Trả về dan sách (mã sản phẩm, điểm số) sắp xếp theo điểm giảm dần
+    Trả về danh sách (mã sản phẩm, điểm số) sắp xếp theo điểm giảm dần
     """
     if not analysis or not PRODUCTS:
         return []
@@ -1653,7 +1631,7 @@ def build_comprehensive_product_context(ms: str) -> str:
 
 {variants_text}
 
-6. MÔ TẢ CHI TIẾT:
+6. MÔ TẬP CHI TIẾT:
 {product.get('MoTa', 'Chưa có mô tả chi tiết')}
 
 7. THÔNG TIN CHÍNH SÁCH:
@@ -2465,9 +2443,9 @@ Anh/chị muốn xem sản phẩm nào cụ thể ạ?"""
             # Phân tích intent với GPT để xác định có phải yêu cầu xem ảnh không
             intent_result = analyze_intent_with_gpt(uid, text, current_ms)
             
-            # Nếu intent là xem ảnh và confidence đủ cao (>0.65)
+            # Nếu intent là xem ảnh và confidence đủ cao (>0.3)
             if (intent_result.get('intent') == 'view_images' and 
-                intent_result.get('confidence', 0) > 0.65):  # GIẢM TỪ 0.85 XUỐNG 0.65
+                intent_result.get('confidence', 0) > 0.3):
                 
                 print(f"[IMAGE REQUEST DETECTED] User {uid} yêu cầu xem ảnh sản phẩm {current_ms}")
                 print(f"[INTENT DETAILS] Confidence: {intent_result.get('confidence')}, Reason: {intent_result.get('reason')}")
@@ -2485,7 +2463,7 @@ Anh/chị muốn xem sản phẩm nào cụ thể ạ?"""
             intent_result = analyze_intent_with_gpt(uid, text, None)
             
             if (intent_result.get('intent') == 'view_images' and 
-                intent_result.get('confidence', 0) > 0.7):
+                intent_result.get('confidence', 0) > 0.3):
                 
                 print(f"[IMAGE REQUEST NO PRODUCT] User {uid} yêu cầu xem ảnh nhưng chưa có sản phẩm")
                 send_message(uid, "Dạ, em chưa biết anh/chị muốn xem ảnh sản phẩm nào ạ. Vui lòng cho em biết mã sản phẩm hoặc mô tả sản phẩm nhé!")
@@ -2775,7 +2753,7 @@ def webhook():
                 attachments = msg.get("attachments", [])
                 app_id = msg.get("app_id", "")
                 
-                # **QUAN TRỢNG**: KIỂM TRA CÓ PHẢI ECHO TỪ BOT KHÔNG
+                # **QUAN TRỌNG**: KIỂM TRA CÓ PHẢI ECHO TỪ BOT KHÔNG
                 # Nếu là echo từ bot → BỎ QUA để tránh lặp
                 if is_bot_generated_echo(echo_text, app_id, attachments):
                     print(f"[ECHO BOT] Bỏ qua echo message từ bot: {echo_text[:50]}...")
@@ -2807,7 +2785,7 @@ def webhook():
                 # **GIỮ NGUYÊN LOGIC CŨ**: Xử lý echo từ bình luận người dùng
                 print(f"[ECHO USER] Đang xử lý echo từ bình luận người dùng")
                 
-                # QUAN TRỢNG: Load sản phẩm trước khi tìm mã
+                # QUAN TRỌNG: Load sản phẩm trước khi tìm mã
                 load_products()
                 
                 # **GIỮ NGUYÊN**: Tìm mã sản phẩm trong tin nhắn echo (hỗ trợ tất cả định dạng)
@@ -3494,7 +3472,7 @@ def health_check():
         "duplicate_protection": True,
         "intent_analysis": "GPT-based",
         "image_send_debounce": "5s",
-        "image_request_processing": "Enabled with confidence > 0.65",  # ĐÃ THAY ĐỔI
+        "image_request_processing": "Enabled with confidence > 0.3",  # ĐÃ THAY ĐỔI
         "address_form": "Open API - provinces.open-api.vn (dropdown 3 cấp)",
         "address_validation": "enabled",
         "phone_validation": "regex validation",
@@ -3508,7 +3486,7 @@ def health_check():
         "facebook_shop_guidance": "ENABLED (hướng dẫn vào gian hàng khi yêu cầu sản phẩm khác)",
         "ads_context_handling": "ENABLED (không reset context khi có sản phẩm từ ADS)",
         "image_request_detection": "GPT Intent Analysis Only (no keywords)",
-        "image_request_threshold": "0.65 confidence",
+        "image_request_threshold": "0.3 confidence",
         "no_keyword_dependency": True  # THÊM FLAG MỚI
     }, 200
 
@@ -3556,7 +3534,7 @@ if __name__ == "__main__":
     print(f"🟢 Duplicate Message Protection: BẬT")
     print(f"🟢 Intent Analysis: GPT-based (phát hiện yêu cầu xem ảnh)")
     print(f"🟢 Image Send Debounce: 5 giây")
-    print(f"🟢 Image Request Confidence Threshold: 0.65")  # ĐÃ THAY ĐỔI
+    print(f"🟢 Image Request Confidence Threshold: 0.3")  # ĐÃ THAY ĐỔI
     print(f"🟢 Max Images per Product: 20 ảnh")
     print(f"🟢 Catalog Context: Lưu retailer_id và tự động nhận diện sản phẩm")
     print(f"🟢 Fanpage Name Source: Facebook Graph API (cache 1h)")
