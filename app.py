@@ -445,4 +445,6 @@ def api_submit_order():
     return jsonify({"status": "ok"})
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    # Lấy cổng từ biến môi trường của Koyeb, nếu không có thì mặc định là 8000
+    port = int(os.environ.get("PORT", 8000))
+    app.run(host="0.0.0.0", port=port)
