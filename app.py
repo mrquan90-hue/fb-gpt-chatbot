@@ -89,7 +89,7 @@ VIETNAMESE_MAP = {
     'Â': 'A', 'Ầ': 'A', 'Ấ': 'A', 'Ẩ': 'A', 'Ẫ': 'A', 'Ậ': 'A',
     'Đ': 'D',
     'È': 'E', 'É': 'E', 'Ẻ': 'E', 'Ẽ': 'E', 'Ẹ': 'E',
-    'Ê': 'E', 'Ề': 'E', 'Ế': 'E', 'Ể': 'E', 'Ễ': 'E', 'Ệ': 'E',
+    'Ê': 'E', 'Ề': 'E', 'Ế': 'E', 'Ể': 'E", 'Ễ': 'E', 'Ệ': 'E',
     'Ì': 'I', 'Í': 'I', 'Ỉ': 'I', 'Ĩ': 'I', 'Ị': 'I',
     'Ò': 'O', 'Ó': 'O', 'Ỏ': 'O', 'Õ': 'O', 'Ọ': 'O',
     'Ô': 'O', 'Ồ': 'O', 'Ố': 'O', 'Ổ': 'O', 'Ỗ': 'O', 'Ộ': 'O',
@@ -501,7 +501,7 @@ def extract_color_size_simple(text: str):
     return color, size
 
 # ============================================
-# PHÂN TÍCH INTENT VỚI GPT
+# PHÂN TÍCH INTENT VỚI GPT - ĐÃ SỬA ĐỔI
 # ============================================
 
 def analyze_intent_with_gpt(uid: str, text: str, ms: str = None) -> dict:
@@ -531,26 +531,43 @@ def analyze_intent_with_gpt(uid: str, text: str, ms: str = None) -> dict:
         
         system_prompt = f"""Bạn là trợ lý phân tích ý định trong trò chuyện mua sắm.
         
-Phân tích tin nhắn của khách hàng và xác định xem họ có yêu cầu RÕ RÀNG xem ảnh sản phẩm hay không.
+PHÂN TÍCH TIN NHẮN CỦA KHÁCH HÀNG và xác định ý định chính xác.
 
 Sản phẩm hiện tại: {product_name} (Mã: {ms if ms else 'Chưa xác định'})
 
-QUY TẮC PHÂN TÍCH:
-- Chỉ trả về "view_images" nếu khách hàng RÕ RÀNG yêu cầu xem HÌNH ẢNH của sản phẩm HIỆN TẠI
-- KHÔNG trả về "view_images" nếu:
-  * Khách hỏi về ảnh của màu sắc cụ thể (ví dụ: "gửi ảnh màu đen")
-  * Khách hỏi về ảnh đóng gói, kiểu dáng cụ thể
-  * Khách hỏi chung chung "có ảnh không?" mà chưa chọn sản phẩm
-  * Khách hỏi về video, thông tin khác
-  * Khách nói "xem hàng", "xem sản phẩm" (đây là yêu cầu xem danh sách sản phẩm)
+HÃY PHÂN TÍCH KỸ: Người dùng có ĐANG YÊU CẦU XEM ẢNH sản phẩm không?
 
-Các mẫu câu nên nhận diện là "view_images":
-- "gửi ảnh sản phẩm này cho mình"
+CÁCH DIỄN ĐẠT THƯỜNG GẶP CHO "view_images":
+- "gửi ảnh sản phẩm này"
 - "cho xem ảnh đi"
 - "có ảnh không gửi mình xem"
 - "gửi hình sản phẩm"
 - "cho mình xem hình ảnh"
 - "show ảnh sản phẩm"
+- "gửi hình" (trong ngữ cảnh đang nói về sản phẩm)
+- "có hình ảnh không"
+- "cho em xem ảnh"
+- "cho tôi xem ảnh"
+- "gửi tôi ảnh"
+- "tôi muốn xem ảnh"
+- "có ảnh demo không"
+- "có ảnh thực tế không"
+- "gửi ảnh thật đi"
+- "cho xem hình thật"
+- "có ảnh mẫu không"
+
+QUY TẮC PHÂN TÍCH:
+1. TRẢ VỀ "view_images" NẾU:
+   - Khách yêu cầu xem ảnh/bức hình/hình ảnh của sản phẩm
+   - Khách hỏi "có ảnh không?" (khi đang nói về sản phẩm cụ thể)
+   - Khách nói "gửi hình", "gửi ảnh", "xem ảnh", "cho xem ảnh"
+   - Khách muốn xem hình thực tế, ảnh mẫu, ảnh demo
+
+2. TRẢ VỀ "general" NẾU:
+   - Khách hỏi về giá, size, màu sắc, thông tin khác
+   - Khách yêu cầu xem sản phẩm khác (xem hàng khác)
+   - Khách yêu cầu xem danh sách sản phẩm
+   - Khách hỏi chung chung không liên quan đến ảnh
 
 Trả về JSON theo định dạng:
 {{
@@ -561,7 +578,9 @@ Trả về JSON theo định dạng:
 
         user_message = f"""Tin nhắn của khách hàng: "{text}"
         
-Hãy phân tích xem khách có yêu cầu RÕ RÀNG xem ảnh sản phẩm HIỆN TẠI không."""
+Ngữ cảnh: Đang nói về sản phẩm {product_name} (Mã: {ms})
+        
+Phân tích xem khách có YÊU CẦU XEM ẢNH sản phẩm này không."""
         
         response = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -622,7 +641,7 @@ def handle_catalog_followup(uid: str, text: str) -> bool:
     
     # Nếu là yêu cầu xem ảnh
     if (intent_result.get('intent') == 'view_images' and 
-        intent_result.get('confidence', 0) > 0.85):
+        intent_result.get('confidence', 0) > 0.65):  # GIẢM XUỐNG 0.65
         send_all_product_images(uid, ms)
         return True
     
@@ -664,7 +683,7 @@ def handle_ads_referral_product(uid: str, text: str) -> bool:
         
         # Nếu là yêu cầu xem ảnh
         if (intent_result.get('intent') == 'view_images' and 
-            intent_result.get('confidence', 0) > 0.85):
+            intent_result.get('confidence', 0) > 0.65):  # GIẢM XUỐNG 0.65
             send_all_product_images(uid, last_ms)
             return True
         
@@ -684,17 +703,12 @@ def handle_ads_referral_product(uid: str, text: str) -> bool:
     return False
 
 # ============================================
-# GỬI TOÀN BỘ ẢNH SẢN PHẨM - ĐÃ SỬA LỖI DEADLOCK
+# GỬI TOÀN BỘ ẢNH SẢN PHẨM - ĐÃ SỬA LỖI DEADLOCK VÀ CẢI THIỆN
 # ============================================
 
 def send_all_product_images(uid: str, ms: str, max_images: int = 20):
     """
     Gửi toàn bộ ảnh của sản phẩm (loại trừ trùng)
-    
-    Args:
-        uid: ID người dùng
-        ms: Mã sản phẩm
-        max_images: Giới hạn số lượng ảnh tối đa (tránh spam)
     """
     if ms not in PRODUCTS:
         send_message(uid, "Em không tìm thấy sản phẩm này trong hệ thống ạ.")
@@ -708,6 +722,8 @@ def send_all_product_images(uid: str, ms: str, max_images: int = 20):
     
     if now - last_image_send_time < 5:
         print(f"[IMAGE SEND DEBOUNCE] Bỏ qua gửi ảnh cho {uid}, chưa đủ 5s")
+        # Vẫn thông báo cho khách biết
+        send_message(uid, "Em vừa gửi ảnh rồi ạ. Anh/chị vuốt lên xem lại nhé!")
         return
     
     ctx["last_all_images_time"] = now
@@ -727,51 +743,30 @@ def send_all_product_images(uid: str, ms: str, max_images: int = 20):
         for url in urls:
             if url and url.strip() and url not in seen_urls:
                 seen_urls.add(url)
-                
-                # Kiểm tra URL hợp lệ (có chứa domain ảnh)
-                url_lower = url.lower()
-                if any(domain in url_lower for domain in [
-                    'alicdn.com', 'taobao', '1688.com', 'http', 
-                    '.jpg', '.jpeg', '.png', '.webp', '.gif',
-                    'image', 'img', 'photo', 'static'
-                ]):
-                    unique_images.append(url)
+                unique_images.append(url)
         
         if not unique_images:
-            send_message(uid, f"Sản phẩm [{ms}] hiện chưa có hình ảnh trong hệ thống ạ.")
+            send_message(uid, f"Dạ, sản phẩm [{ms}] hiện chưa có hình ảnh trong hệ thống ạ.")
             return
         
         # Giới hạn số lượng ảnh để tránh spam
-        total_images = len(unique_images)
-        original_count = len(urls)
-        
-        if total_images > max_images:
+        if len(unique_images) > max_images:
             unique_images = unique_images[:max_images]
-            limit_msg = f" (hiển thị {max_images}/{total_images} ảnh đầu tiên)"
-        else:
-            limit_msg = ""
         
         # Thông báo cho khách
-        send_message(uid, f"Dạ em gửi ảnh sản phẩm [{ms}] - {product_name}{limit_msg}:")
-        time.sleep(0.8)
+        send_message(uid, f"Dạ, em gửi ảnh sản phẩm [{ms}] - {product_name} ạ:")
+        time.sleep(0.5)
         
         # Gửi từng ảnh một với debounce
         sent_count = 0
-        last_send_time = 0
         
         for i, image_url in enumerate(unique_images, 1):
             try:
-                # Debounce giữa các ảnh
-                current_time = time.time()
-                if current_time - last_send_time < 0.5:  # 0.5 giây giữa các ảnh
-                    time.sleep(0.5 - (current_time - last_send_time))
-                
-                print(f"🖼️ Gửi ảnh {i}/{len(unique_images)}: {image_url[:80]}...")
+                print(f"🖼️ Gửi ảnh {i}/{len(unique_images)}")
                 result = send_image(uid, image_url)
                 
                 if result:
                     sent_count += 1
-                    last_send_time = time.time()
                 
                 # Thêm delay giữa các ảnh để tránh bị rate limit
                 if i < len(unique_images):
@@ -779,33 +774,24 @@ def send_all_product_images(uid: str, ms: str, max_images: int = 20):
                     
             except Exception as e:
                 print(f"❌ Lỗi khi gửi ảnh {i}: {str(e)}")
-                # Vẫn tiếp tục gửi ảnh tiếp theo
-                time.sleep(1.0)  # Delay lâu hơn nếu có lỗi
+                time.sleep(1.0)
         
         # Thông báo kết quả
         if sent_count > 0:
-            time.sleep(1.0)
-            
-            # Nếu có ảnh trùng bị bỏ qua
-            if original_count > total_images:
-                duplicated_count = original_count - total_images
-                if duplicated_count > 0:
-                    send_message(uid, f"📝 Lưu ý: Đã tự động loại bỏ {duplicated_count} ảnh trùng lặp.")
-                    time.sleep(0.8)
+            time.sleep(0.5)
+            send_message(uid, f"✅ Đã gửi {sent_count} ảnh sản phẩm cho anh/chị!")
             
             # Hỏi khách có cần thêm thông tin không
-            send_message(uid, f"✅ Đã gửi {sent_count} ảnh sản phẩm cho anh/chị!")
-            time.sleep(0.8)
-            send_message(uid, "Anh/chị có muốn xem thông tin chi tiết hoặc đặt hàng sản phẩm này không ạ?")
+            time.sleep(0.5)
+            domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
+            order_link = f"{domain}/order-form?ms={ms}&uid={uid}"
+            send_message(uid, f"📋 Đặt hàng ngay tại: {order_link}")
         else:
             send_message(uid, "❌ Không thể gửi ảnh ngay lúc này. Anh/chị vui lòng thử lại sau ạ.")
     
     except Exception as e:
         print(f"❌ Lỗi trong send_all_product_images: {str(e)}")
-        try:
-            send_message(uid, "❌ Có lỗi khi tải ảnh sản phẩm. Anh/chị vui lòng thử lại sau ạ.")
-        except:
-            pass
+        send_message(uid, "❌ Có lỗi khi tải ảnh sản phẩm. Anh/chị vui lòng thử lại sau ạ.")
 
 # ============================================
 # HELPER: TẢI VÀ XỬ LÝ ẢNH
@@ -2479,9 +2465,9 @@ Anh/chị muốn xem sản phẩm nào cụ thể ạ?"""
             # Phân tích intent với GPT để xác định có phải yêu cầu xem ảnh không
             intent_result = analyze_intent_with_gpt(uid, text, current_ms)
             
-            # Nếu intent là xem ảnh và confidence cao (>0.85)
+            # Nếu intent là xem ảnh và confidence đủ cao (>0.65)
             if (intent_result.get('intent') == 'view_images' and 
-                intent_result.get('confidence', 0) > 0.85):
+                intent_result.get('confidence', 0) > 0.65):  # GIẢM TỪ 0.85 XUỐNG 0.65
                 
                 print(f"[IMAGE REQUEST DETECTED] User {uid} yêu cầu xem ảnh sản phẩm {current_ms}")
                 print(f"[INTENT DETAILS] Confidence: {intent_result.get('confidence')}, Reason: {intent_result.get('reason')}")
@@ -2492,6 +2478,19 @@ Anh/chị muốn xem sản phẩm nào cụ thể ạ?"""
                 return
             else:
                 print(f"[NO IMAGE REQUEST] Intent: {intent_result.get('intent')}, Confidence: {intent_result.get('confidence')}")
+        
+        # THÊM PHẦN NÀY: Nếu không có sản phẩm hiện tại nhưng vẫn yêu cầu xem ảnh
+        elif not current_ms:
+            # Vẫn phân tích intent để xem có phải yêu cầu xem ảnh không
+            intent_result = analyze_intent_with_gpt(uid, text, None)
+            
+            if (intent_result.get('intent') == 'view_images' and 
+                intent_result.get('confidence', 0) > 0.7):
+                
+                print(f"[IMAGE REQUEST NO PRODUCT] User {uid} yêu cầu xem ảnh nhưng chưa có sản phẩm")
+                send_message(uid, "Dạ, em chưa biết anh/chị muốn xem ảnh sản phẩm nào ạ. Vui lòng cho em biết mã sản phẩm hoặc mô tả sản phẩm nhé!")
+                ctx["processing_lock"] = False
+                return
         
         # Nếu không phải yêu cầu xem ảnh, hoặc không xác định được intent rõ ràng
         # thì gọi GPT như bình thường
@@ -3495,7 +3494,7 @@ def health_check():
         "duplicate_protection": True,
         "intent_analysis": "GPT-based",
         "image_send_debounce": "5s",
-        "image_request_processing": "Enabled with confidence > 0.85",
+        "image_request_processing": "Enabled with confidence > 0.65",  # ĐÃ THAY ĐỔI
         "address_form": "Open API - provinces.open-api.vn (dropdown 3 cấp)",
         "address_validation": "enabled",
         "phone_validation": "regex validation",
@@ -3507,7 +3506,10 @@ def health_check():
         "context_tracking": "ENABLED (tracks last_ms and product_history)",
         "change_product_keywords": f"{len(CHANGE_PRODUCT_KEYWORDS)} từ khóa được định nghĩa",
         "facebook_shop_guidance": "ENABLED (hướng dẫn vào gian hàng khi yêu cầu sản phẩm khác)",
-        "ads_context_handling": "ENABLED (không reset context khi có sản phẩm từ ADS)"
+        "ads_context_handling": "ENABLED (không reset context khi có sản phẩm từ ADS)",
+        "image_request_detection": "GPT Intent Analysis Only (no keywords)",
+        "image_request_threshold": "0.65 confidence",
+        "no_keyword_dependency": True  # THÊM FLAG MỚI
     }, 200
 
 # ============================================
@@ -3554,7 +3556,7 @@ if __name__ == "__main__":
     print(f"🟢 Duplicate Message Protection: BẬT")
     print(f"🟢 Intent Analysis: GPT-based (phát hiện yêu cầu xem ảnh)")
     print(f"🟢 Image Send Debounce: 5 giây")
-    print(f"🟢 Image Request Confidence Threshold: 0.85")
+    print(f"🟢 Image Request Confidence Threshold: 0.65")  # ĐÃ THAY ĐỔI
     print(f"🟢 Max Images per Product: 20 ảnh")
     print(f"🟢 Catalog Context: Lưu retailer_id và tự động nhận diện sản phẩm")
     print(f"🟢 Fanpage Name Source: Facebook Graph API (cache 1h)")
@@ -3572,5 +3574,6 @@ if __name__ == "__main__":
     print(f"🔴 GPT Reply Mode: NGẮN GỌN (max 150 tokens)")
     print(f"🔴 Order Priority: ƯU TIÊN GỬI LINK KHI CÓ TỪ KHÓA ĐẶT HÀNG")
     print(f"🔴 Price Priority: HIỂN THỊ CHI TIẾT KHI KHÁCH HỎI VỀ GIÁ")
+    print(f"🔴 Image Request Detection: KHÔNG DÙNG KEYWORD, CHỈ DÙNG GPT INTENT ANALYSIS")
     
     app.run(host="0.0.0.0", port=5000, debug=True)
