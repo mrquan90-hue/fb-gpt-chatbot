@@ -215,40 +215,72 @@ def execute_tool(uid, name, args):
     return "Hành động không xác định."
 
 # ============================================
-# VISION (NHẬN DIỆN ẢNH)
+# VISION (NHẬN DIỆN ẢNH - FIX LỖI 400 BẰNG BASE64)
 # ============================================
-def handle_image(uid, image_url):
-    send_fb_msg(uid, {"text": "🖼️ Em đang phân tích ảnh sản phẩm, đợi em xíu nhé..."})
+def get_image_base64(url):
+    """Tải ảnh từ FB và chuyển sang Base64 để OpenAI không bị chặn link"""
     try:
+        response = requests.get(url, timeout=15)
+        if response.status_code == 200:
+            return base64.b64encode(response.content).decode('utf-8')
+    except Exception as e:
+        print(f"Error downloading image: {e}")
+    return None
+
+def handle_image(uid, image_url):
+    send_fb_msg(uid, {"text": "🖼️ Em đang xem ảnh mẫu anh/chị gửi, đợi em xíu nhé..."})
+    
+    # 1. Chuyển đổi ảnh sang Base64
+    base64_img = get_image_base64(image_url)
+    if not base64_img:
+        send_fb_msg(uid, {"text": "Dạ em gặp chút lỗi khi tải ảnh, anh/chị gửi em xin mã sản phẩm nhé!"})
+        return
+
+    # 2. Chuẩn bị ngữ cảnh sản phẩm (Danh mục hiện tại của shop)
+    load_products()
+    catalog_context = "Danh sách sản phẩm hiện có:\n"
+    # Lấy 100 sản phẩm gần nhất để khớp
+    for ms, p in list(PRODUCTS.items())[:100]:
+        catalog_context += f"- {ms}: {p['Ten']}\n"
+
+    try:
+        # 3. Sử dụng GPT-4o Vision với ảnh Base64
         resp = client.chat.completions.create(
             model="gpt-4o",
             messages=[{
+                "role": "system",
+                "content": f"Bạn là nhân viên tư vấn của {FANPAGE_NAME}. Hãy nhìn ảnh và tìm mã sản phẩm (MS...) khớp nhất trong danh sách cửa hàng."
+            }, {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "Mô tả ngắn gọn loại sản phẩm, màu sắc và đặc điểm nổi bật trong ảnh này để tôi tìm trong kho hàng."},
-                    {"type": "image_url", "image_url": {"url": image_url}}
+                    {
+                        "type": "text", 
+                        "text": f"Dựa trên hình ảnh này, hãy cho tôi biết nó là mã sản phẩm nào trong danh sách sau?\n{catalog_context}\n\nNếu thấy khớp, hãy CHỈ TRẢ VỀ DUY NHẤT MÃ SẢN PHẨM (Ví dụ: MS123456). Nếu không thấy trong danh sách, hãy mô tả ngắn gọn đặc điểm sản phẩm."
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}
+                    }
                 ]
             }],
-            max_tokens=200
+            max_tokens=150
         )
-        desc = normalize_vietnamese(resp.choices[0].message.content)
-        # Tìm mã sản phẩm khớp với mô tả
-        best_ms = None
-        for ms, p in PRODUCTS.items():
-            blob = normalize_vietnamese(f"{p['Ten']} {p['MoTa']}")
-            if any(word in blob for word in desc.split() if len(word) > 3):
-                best_ms = ms
-                break
         
-        if best_ms:
-            USER_CONTEXT[uid]["last_ms"] = best_ms
-            send_fb_msg(uid, {"text": f"🎯 Em thấy sản phẩm này giống mã [{best_ms}] của shop nhất ạ!"})
-            handle_text(uid, f"Tư vấn cho tôi mã {best_ms}")
+        ai_vision_res = resp.choices[0].message.content.strip()
+        detected_ms = detect_ms_from_text(ai_vision_res)
+        
+        if detected_ms:
+            USER_CONTEXT[uid]["last_ms"] = detected_ms
+            p = PRODUCTS[detected_ms]
+            send_fb_msg(uid, {"text": f"🎯 Em thấy mẫu này giống mã [{detected_ms}] bên em:\n📌 {p['Ten']}\n💰 Giá: {p['Gia']}"})
+            # Gọi thêm tư vấn chi tiết sau khi nhận diện
+            handle_text(uid, f"Tư vấn chi tiết mã {detected_ms}")
         else:
-            send_fb_msg(uid, {"text": "Dạ mẫu này hiện em chưa tìm thấy mã chính xác. Anh/chị có mã sản phẩm (MS...) không ạ?"})
+            send_fb_msg(uid, {"text": f"Dạ mẫu này nhìn giống: {ai_vision_res}. Anh/chị cho em xin mã MS để em check kho chính xác nhé!"})
+
     except Exception as e:
         print(f"Vision Error: {e}")
-        send_fb_msg(uid, {"text": "Dạ em gặp chút lỗi khi đọc ảnh, anh/chị gửi mã sản phẩm giúp em nhé!"})
+        send_fb_msg(uid, {"text": "Dạ em hơi khó nhìn mẫu này qua ảnh, anh/chị nhắn giúp em mã sản phẩm (MS...) nhé!"})
 
 # ============================================
 # AI CORE: CHAT & ACTIONS
@@ -262,11 +294,11 @@ def handle_text(uid, text):
     if quick_ms: ctx["last_ms"] = quick_ms
 
     system_prompt = f"""Bạn là nhân viên bán hàng của {FANPAGE_NAME}.
-    CHỈ trả lời dựa trên dữ liệu thật. KHÔNG bịa đặt thông tin.
+    CHỈ trả lời dựa trên dữ liệu thật từ kho hàng. KHÔNG được bịa đặt thông tin.
     Nếu khách hỏi tồn kho, luôn khẳng định CÒN HÀNG.
-    Xưng em, gọi anh/chị. Trả lời cực ngắn gọn (dưới 3 dòng).
+    Xưng em, gọi anh/chị. Trả lời cực ngắn gọn, thân thiện (dưới 3 dòng).
     Sản phẩm khách đang quan tâm: {ctx.get('last_ms', 'Chưa xác định')}.
-    Khi khách muốn mua hoặc chốt, dùng công cụ provide_order_link."""
+    Khi khách muốn mua hoặc chốt đơn, bắt buộc dùng công cụ provide_order_link."""
 
     messages = [{"role": "system", "content": system_prompt}]
     for h in ctx["conversation_history"][-6:]: messages.append(h)
@@ -312,7 +344,7 @@ def send_fb_msg(uid, message_payload):
     except: pass
 
 # ============================================
-# WEBHOOK HANDLER (MAIN ENTRANCE)
+# WEBHOOK HANDLER
 # ============================================
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
@@ -343,12 +375,11 @@ def webhook():
             msg = m.get("message", {})
             if msg.get("is_echo"):
                 if not is_bot_echo(msg.get("text"), msg.get("app_id"), msg.get("attachments")):
-                    # Nếu nhân viên thật tư vấn, Bot cập nhật MS vào ngữ cảnh
                     agent_ms = detect_ms_from_text(msg.get("text"))
                     if agent_ms: ctx["last_ms"] = agent_ms
                 continue
 
-            # 3. CHỐNG LẶP TIN NHẮN (DUPLICATE MID)
+            # 3. CHỐNG LẶP TIN NHẮN
             mid = msg.get("mid")
             if mid and mid in ctx["processed_message_mids"]: continue
             if mid: ctx["processed_message_mids"][mid] = time.time()
@@ -364,7 +395,6 @@ def webhook():
                         if att["type"] == "image": handle_image(uid, att["payload"]["url"])
             finally:
                 ctx["processing_lock"] = False
-                # Dọn cache MID cũ (> 1 tiếng)
                 now = time.time()
                 ctx["processed_message_mids"] = {k: v for k, v in ctx["processed_message_mids"].items() if now - v < 3600}
 
@@ -396,7 +426,7 @@ def write_to_sheet(order):
         return False
 
 # ============================================
-# ROUTES (ORDER FORM & API)
+# ROUTES
 # ============================================
 @app.route("/")
 def home(): return "Bot is live", 200
