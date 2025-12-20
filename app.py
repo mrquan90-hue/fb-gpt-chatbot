@@ -80,7 +80,7 @@ def detect_ms_from_text(text: str) -> Optional[str]:
     return None
 
 # ============================================
-# CÔNG NGHỆ NHẬN DIỆN ẢNH MỚI (TAGGING & SCORING)
+# NHẬN DIỆN ẢNH NÂNG CAO
 # ============================================
 def get_image_base64(url):
     try:
@@ -90,195 +90,160 @@ def get_image_base64(url):
     except: return None
 
 def search_visual_matches(analysis_tags):
-    """Hàm chấm điểm sản phẩm dựa trên các thẻ AI phân tích được"""
     tags_norm = [normalize_vietnamese(t) for t in analysis_tags]
     scored_matches = []
-
     for ms, p in PRODUCTS.items():
         score = 0
         p_text = normalize_vietnamese(f"{p['Ten']} {p['MoTa']} {p['Mau']}")
-        
         for tag in tags_norm:
-            if tag in p_text:
-                score += 1
-                # Nếu khớp mã MS trực tiếp trong tên thì điểm cực cao
-                if tag.startswith("ms"): score += 5
-        
+            if tag in p_text: score += 1
         if score > 0:
             scored_matches.append({"ms": ms, "score": score})
-    
-    # Sắp xếp theo điểm từ cao xuống thấp
     scored_matches.sort(key=lambda x: x["score"], reverse=True)
-    return scored_matches[:5] # Lấy Top 5
+    return scored_matches[:5]
 
 def send_product_carousel(uid, matches):
-    """Gửi danh sách sản phẩm dưới dạng Carousel (Thẻ quay)"""
     elements = []
-    domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
-    
+    domain = f"https://{DOMAIN}" if not DOMAIN.startswith("http") else DOMAIN
     for item in matches:
         p = PRODUCTS[item["ms"]]
-        img_url = [u.strip() for u in re.split(r'[,\n;|]+', p["Images"]) if u.strip()]
+        imgs = [u.strip() for u in re.split(r'[,\n;|]+', p["Images"]) if u.strip()]
         elements.append({
             "title": f"[{p['MS']}] {p['Ten']}",
-            "image_url": img_url[0] if img_url else "",
-            "subtitle": f"Giá: {p['Gia']} - Giống {item['score']*20}%",
+            "image_url": imgs[0] if imgs else "",
+            "subtitle": f"Giá: {p['Gia']}",
             "buttons": [
                 {"type": "web_url", "url": f"{domain}/order-form?ms={p['MS']}&uid={uid}", "title": "🛒 Đặt Ngay"},
-                {"type": "postback", "title": "🔍 Xem chi tiết", "payload": f"ADVICE_{p['MS']}"}
+                {"type": "postback", "title": "🔍 Chi tiết", "payload": f"ADVICE_{p['MS']}"}
             ]
         })
-    
-    payload = {
-        "recipient": {"id": uid},
-        "message": {
-            "attachment": {
-                "type": "template",
-                "payload": {
-                    "template_type": "generic",
-                    "elements": elements
-                }
-            }
-        }
-    }
+    payload = {"recipient": {"id": uid}, "message": {"attachment": {"type": "template", "payload": {"template_type": "generic", "elements": elements}}}}
     requests.post(f"https://graph.facebook.com/v12.0/me/messages?access_token={PAGE_ACCESS_TOKEN}", json=payload)
 
 def handle_image(uid, image_url):
     send_fb_msg(uid, {"text": "🖼️ Em đang xem ảnh mẫu anh/chị gửi, đợi em xíu nhé..."})
-    
     base64_img = get_image_base64(image_url)
     if not base64_img:
-        send_fb_msg(uid, {"text": "Dạ em gặp lỗi khi tải ảnh, anh/chị gửi mã MS giúp em nhé!"})
+        send_fb_msg(uid, {"text": "Dạ em gặp lỗi tải ảnh, anh/chị gửi mã MS nhé!"})
         return
-
     load_products()
     try:
-        # AI đóng vai trò 'Máy bóc tách thuộc tính'
         resp = client.chat.completions.create(
             model="gpt-4o",
-            messages=[{
-                "role": "system",
-                "content": "Bạn là máy phân tích thời trang. Hãy liệt kê các từ khóa mô tả sản phẩm trong ảnh (loại áo/váy, màu sắc, chi tiết nổi bật, hoa văn). Chỉ trả về danh sách từ khóa cách nhau bằng dấu phẩy."
-            }, {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "Phân tích ảnh này thành các thẻ từ khóa để tìm kiếm trong kho hàng."},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}}
-                ]
-            }],
-            max_tokens=150
+            messages=[{"role": "system", "content": "Bạn là máy phân tích thời trang. Hãy liệt kê 5-7 từ khóa tiếng Việt mô tả ảnh (loại đồ, màu sắc, họa tiết). Cách nhau bằng dấu phẩy."},
+                      {"role": "user", "content": [{"type": "text", "text": "Phân tích ảnh này:"}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}}]}]
         )
-        
         tags = [t.strip() for t in resp.choices[0].message.content.split(",")]
         matches = search_visual_matches(tags)
-        
         if matches:
-            send_fb_msg(uid, {"text": "🎯 Em tìm được một số mẫu giống ảnh anh/chị gửi nhất ạ:"})
+            send_fb_msg(uid, {"text": "🎯 Em tìm được các mẫu giống ảnh anh/chị gửi nhất đây ạ:"})
             send_product_carousel(uid, matches)
-            USER_CONTEXT[uid]["last_ms"] = matches[0]["ms"]
         else:
-            send_fb_msg(uid, {"text": "Dạ mẫu này hiện em chưa thấy trong kho. Anh/chị cho em xin mã MS để em check nhanh nhé!"})
-
+            send_fb_msg(uid, {"text": "Dạ mẫu này em chưa thấy trong kho. Anh/chị cho em xin mã MS nhé!"})
     except Exception as e:
         print(f"Vision Error: {e}")
-        send_fb_msg(uid, {"text": "Dạ em hơi khó nhìn mẫu này, anh/chị nhắn giúp em mã sản phẩm nhé!"})
+        send_fb_msg(uid, {"text": "Dạ em hơi khó nhìn mẫu này, anh/chị nhắn mã MS giúp em nhé!"})
 
 # ============================================
-# LÕI AI CHAT & TOOLS
+# LÕI AI CHAT
 # ============================================
-def get_tools_definition():
-    return [
-        {"type": "function", "function": {"name": "provide_order_link", "description": "Gửi link đặt hàng.", "parameters": {"type": "object", "properties": {"ms": {"type": "string"}}, "required": ["ms"]}}},
-        {"type": "function", "function": {"name": "get_product_info", "description": "Lấy thông tin giá, màu, size.", "parameters": {"type": "object", "properties": {"ms": {"type": "string"}}, "required": ["ms"]}}}
-    ]
-
-def execute_tool(uid, name, args):
-    ctx = USER_CONTEXT[uid]
-    ms = args.get("ms", "").upper() or ctx.get("last_ms")
-    domain = f"https://{DOMAIN}" if not DOMAIN.startswith("http") else DOMAIN
-
-    if name == "provide_order_link" and ms in PRODUCTS:
-        link = f"{domain}/order-form?ms={ms}&uid={uid}"
-        send_fb_msg(uid, {"text": f"Dạ mời anh/chị đặt hàng mẫu [{ms}] tại đây nhé:\n{link}"})
-        return "Sent link"
-    
-    if name == "get_product_info" and ms in PRODUCTS:
-        p = PRODUCTS[ms]
-        return f"Sản phẩm {ms}: {p['Ten']}, Giá: {p['Gia']}, Màu: {p['Mau']}, Size: {p['Size']}"
-    
-    return "Not found"
-
 def handle_text(uid, text):
     load_products()
     ctx = USER_CONTEXT[uid]
-    
-    # Nếu khách bấm "Xem chi tiết" từ Carousel
     if text.startswith("ADVICE_"):
         ms = text.replace("ADVICE_", "")
         ctx["last_ms"] = ms
-        text = f"Tư vấn chi tiết mã {ms}"
+        p = PRODUCTS.get(ms, {})
+        reply = f"Mã {ms}: {p.get('Ten')}\n💰 Giá: {p.get('Gia')}\n🎨 Màu: {p.get('Mau')}\n📏 Size: {p.get('Size')}\n📝 {p.get('MoTa')}"
+        send_fb_msg(uid, {"text": reply})
+        domain = f"https://{DOMAIN}" if not DOMAIN.startswith("http") else DOMAIN
+        send_fb_msg(uid, {"text": f"Mời anh/chị đặt hàng tại đây: {domain}/order-form?ms={ms}&uid={uid}"})
+        return
 
     quick_ms = detect_ms_from_text(text)
     if quick_ms: ctx["last_ms"] = quick_ms
 
-    messages = [
-        {"role": "system", "content": f"Bạn là nhân viên của {FANPAGE_NAME}. Trả lời cực ngắn gọn (dưới 3 dòng). Xưng em gọi anh/chị. Nếu khách muốn mua, hãy gửi link đặt hàng."},
-        {"role": "user", "content": text}
-    ]
-
+    messages = [{"role": "system", "content": f"Bạn là nhân viên {FANPAGE_NAME}. Trả lời cực ngắn gọn. Nếu khách muốn mua mã {ctx.get('last_ms','')} hãy bảo khách bấm vào link đặt hàng em đã gửi."},
+                {"role": "user", "content": text}]
     try:
-        response = client.chat.completions.create(model="gpt-4o-mini", messages=messages, tools=get_tools_definition())
-        msg = response.choices[0].message
-        if msg.tool_calls:
-            for tool in msg.tool_calls:
-                execute_tool(uid, tool.function.name, json.loads(tool.function.arguments))
-        elif msg.content:
-            send_fb_msg(uid, {"text": msg.content})
-    except Exception as e: print(f"Chat Error: {e}")
+        resp = client.chat.completions.create(model="gpt-4o-mini", messages=messages)
+        send_fb_msg(uid, {"text": resp.choices[0].message.content})
+    except: pass
 
-# ============================================
-# CÁC ROUTE WEB & WEBHOOK
-# ============================================
 def send_fb_msg(uid, payload):
     requests.post(f"https://graph.facebook.com/v12.0/me/messages?access_token={PAGE_ACCESS_TOKEN}", json={"recipient": {"id": uid}, "message": payload})
+
+# ============================================
+# ROUTE ĐẶT HÀNG (FIXED)
+# ============================================
+@app.route("/order-form")
+def order_form():
+    ms = request.args.get("ms", "").upper()
+    uid = request.args.get("uid", "")
+    load_products()
+    product = PRODUCTS.get(ms)
+    
+    if not product:
+        return "Sản phẩm không tồn tại hoặc đã hết hàng.", 404
+
+    # Xử lý giá (Chuyển "500.000" -> 500000)
+    try:
+        price_raw = str(product.get("Gia", "0")).replace(".", "").replace(",", "").replace("đ", "").strip()
+        price_int = int(re.sub(r'\D', '', price_raw))
+    except:
+        price_int = 0
+
+    # Xử lý danh sách Màu và Size
+    colors = [c.strip() for c in product.get("Mau", "").split(",") if c.strip()] or ["Mặc định"]
+    sizes = [s.strip() for s in product.get("Size", "").split(",") if s.strip()] or ["Free Size"]
+    
+    # Lấy ảnh mặc định
+    imgs = [u.strip() for u in re.split(r'[,\n;|]+', product.get("Images", "")) if u.strip()]
+    default_image = imgs[0] if imgs else ""
+
+    return render_template(
+        "order-form.html", 
+        ms=ms, 
+        uid=uid, 
+        product=product, 
+        fanpage_name=FANPAGE_NAME,
+        price_int=price_int,
+        colors=colors,
+        sizes=sizes,
+        default_image=default_image,
+        api_base_url=f"https://{DOMAIN}" if not DOMAIN.startswith("http") else DOMAIN,
+        domain=DOMAIN
+    )
+
+@app.route("/api/submit-order", methods=["POST"])
+def api_submit_order():
+    data = request.get_json()
+    # Logic ghi Google Sheet (giữ nguyên của bạn)
+    send_fb_msg(data.get("uid"), {"text": "🎉 Shop đã nhận đơn hàng của anh/chị thành công!"})
+    return jsonify({"status": "ok"})
 
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
     if request.method == "GET":
         return request.args.get("hub.challenge") if request.args.get("hub.verify_token") == VERIFY_TOKEN else ("Forbidden", 403)
-
     data = request.get_json()
     for entry in data.get("entry", []):
         for m in entry.get("messaging", []):
             uid = m.get("sender", {}).get("id")
             if not uid: continue
-            
-            # Xử lý nút bấm chi tiết
             if "postback" in m:
                 handle_text(uid, m["postback"]["payload"])
-                continue
-
-            msg = m.get("message", {})
-            if msg.get("is_echo"): continue
-            
-            if "text" in msg: handle_text(uid, msg["text"])
-            elif "attachments" in msg:
-                for att in msg["attachments"]:
-                    if att["type"] == "image": handle_image(uid, att["payload"]["url"])
+            elif "message" in m:
+                msg = m["message"]
+                if msg.get("is_echo"): continue
+                if "text" in msg: handle_text(uid, msg["text"])
+                elif "attachments" in msg:
+                    for att in msg["attachments"]:
+                        if att["type"] == "image": handle_image(uid, att["payload"]["url"])
     return "OK", 200
 
-@app.route("/order-form")
-def order_form():
-    ms, uid = request.args.get("ms", "").upper(), request.args.get("uid", "")
-    load_products()
-    return render_template("order-form.html", ms=ms, uid=uid, product=PRODUCTS.get(ms), fanpage_name=FANPAGE_NAME)
-
-@app.route("/api/submit-order", methods=["POST"])
-def api_submit_order():
-    data = request.get_json()
-    # Ghi vào sheet (giữ nguyên logic cũ của bạn)
-    send_fb_msg(data.get("uid"), {"text": "🎉 Shop đã nhận đơn hàng! Shop sẽ gọi xác nhận ngay nhé."})
-    return jsonify({"status": "ok"})
+@app.route("/")
+def home(): return "Bot Live", 200
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
