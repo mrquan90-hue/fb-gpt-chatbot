@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Optional, List, Dict
 
 import requests
-from flask import Flask, request, render_template, jsonify
+from flask import Flask, request, render_template_string, jsonify
 from openai import OpenAI
 
 # ============================================
@@ -22,15 +22,14 @@ VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "").strip()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 GOOGLE_SHEET_CSV_URL = os.getenv("SHEET_CSV_URL", "").strip()
 DOMAIN = os.getenv("DOMAIN", "").strip() or "fb-gpt-chatbot.koyeb.app"
-FANPAGE_NAME = os.getenv("FANPAGE_NAME", "Shop của bạn")
-GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "").strip()
-GOOGLE_SHEETS_CREDENTIALS_JSON = os.getenv("GOOGLE_SHEETS_CREDENTIALS_JSON", "").strip()
+FANPAGE_NAME = os.getenv("FANPAGE_NAME", "Shop Thời Trang")
 BOT_APP_IDS = {"645956568292435"}
 
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 USER_CONTEXT = defaultdict(lambda: {
     "last_ms": None,
+    "product_history": [],
     "processing_lock": False,
     "processed_message_mids": {},
     "conversation_history": [],
@@ -41,7 +40,7 @@ PRODUCTS_BY_NUMBER = {}
 LAST_LOAD = 0
 
 # ============================================
-# XỬ LÝ DỮ LIỆU KHO HÀNG
+# XỬ LÝ DỮ LIỆU & NHẬN DIỆN MÃ (MS) - TỪ FILE (17)
 # ============================================
 def normalize_vietnamese(text):
     if not text: return ""
@@ -49,6 +48,11 @@ def normalize_vietnamese(text):
     res = text.lower()
     for k, v in v_map.items(): res = res.replace(k, v)
     return res
+
+def parse_image_urls(raw: str):
+    if not raw: return []
+    parts = re.split(r'[,\n;|]+', raw)
+    return [p.strip() for p in parts if p.strip() and (p.startswith('http') or 'alicdn' in p)]
 
 def load_products():
     global PRODUCTS, LAST_LOAD, PRODUCTS_BY_NUMBER
@@ -61,11 +65,24 @@ def load_products():
         for row in reader:
             ms = (row.get("Mã sản phẩm") or "").strip()
             if not ms: continue
-            new_p[ms] = {
-                "MS": ms, "Ten": row.get("Tên sản phẩm", ""), "Gia": row.get("Giá bán", ""),
-                "MoTa": row.get("Mô tả", ""), "Images": row.get("Images", ""),
-                "Mau": row.get("màu (Thuộc tính)", ""), "Size": row.get("size (Thuộc tính)", "")
+            
+            # Xử lý biến thể cho giá và ảnh
+            variant = {
+                "mau": row.get("màu (Thuộc tính)", ""),
+                "size": row.get("size (Thuộc tính)", ""),
+                "gia": row.get("Giá bán", ""),
+                "images": parse_image_urls(row.get("Images", ""))
             }
+            
+            if ms not in new_p:
+                new_p[ms] = {
+                    "MS": ms, "Ten": row.get("Tên sản phẩm", ""), "Gia": row.get("Giá bán", ""),
+                    "MoTa": row.get("Mô tả", ""), "Images": row.get("Images", ""),
+                    "Mau": row.get("màu (Thuộc tính)", ""), "Size": row.get("size (Thuộc tính)", ""),
+                    "variants": []
+                }
+            new_p[ms]["variants"].append(variant)
+            
             num = ms.replace("MS", "").lstrip("0")
             if num: new_n[num] = ms
         PRODUCTS, PRODUCTS_BY_NUMBER, LAST_LOAD = new_p, new_n, time.time()
@@ -73,167 +90,104 @@ def load_products():
 
 def detect_ms_from_text(text: str) -> Optional[str]:
     if not text: return None
-    m = re.search(r"MS(\d{2,6})", text.upper())
-    if m: 
-        full_ms = "MS" + m.group(1).zfill(6)
-        return full_ms if full_ms in PRODUCTS else None
+    text_up = text.upper()
+    # Thử tìm các định dạng [MS123456], MS123456, #MS123456
+    m = re.search(r"(?:MS|#MS|\[MS)\s*(\d{1,6})", text_up)
+    if m:
+        num_str = m.group(1).lstrip("0")
+        if num_str in PRODUCTS_BY_NUMBER: return PRODUCTS_BY_NUMBER[num_str]
+    # Tìm số đơn thuần
     nums = re.findall(r"\b(\d{2,6})\b", text)
     for n in nums:
         clean_n = n.lstrip("0")
         if clean_n in PRODUCTS_BY_NUMBER: return PRODUCTS_BY_NUMBER[clean_n]
     return None
 
-def extract_ms_from_ad_title(title: str) -> Optional[str]:
-    if not title: return None
-    m = re.search(r"(?:mã|ms)\s*(\d{1,6})", title.lower())
-    if m: return "MS" + m.group(1).zfill(6)
-    return None
+def update_product_context(uid, ms):
+    ctx = USER_CONTEXT[uid]
+    ctx["last_ms"] = ms
+    if ms not in ctx["product_history"]:
+        ctx["product_history"].insert(0, ms)
+    ctx["product_history"] = ctx["product_history"][:5]
 
 def is_bot_echo(text, app_id, attachments):
     if app_id in BOT_APP_IDS: return True
     if not text: return False
-    patterns = ["📌 [MS", "💰 GIÁ", "📋 Đặt hàng", "🎯 Em tìm được"]
+    # Các mẫu tin nhắn đặc trưng của bot từ file (17)
+    patterns = ["📌 [MS", "💰 GIÁ", "📋 Đặt hàng", "🎯 Em tìm được", "Dạ em gửi ảnh", "Chào anh/chị! 👋"]
     return any(p in text for p in patterns)
 
-# ============================================
-# NHẬN DIỆN ẢNH NÂNG CAO (SCORING & CAROUSEL)
-# ============================================
-def get_image_base64(url):
-    try:
-        response = requests.get(url, timeout=15)
-        return base64.b64encode(response.content).decode('utf-8') if response.status_code == 200 else None
-    except: return None
-
-def search_visual_matches(analysis_tags):
-    tags_norm = [normalize_vietnamese(t) for t in analysis_tags]
-    scored = []
-    for ms, p in PRODUCTS.items():
-        score = sum(1 for tag in tags_norm if tag in normalize_vietnamese(f"{p['Ten']} {p['MoTa']} {p['Mau']}"))
-        if score > 0: scored.append({"ms": ms, "score": score})
-    scored.sort(key=lambda x: x["score"], reverse=True)
-    return scored[:5]
-
-def handle_image(uid, image_url):
-    send_fb_msg(uid, {"text": "🖼️ Em đang xem ảnh mẫu anh/chị gửi, đợi em xíu nhé..."})
-    base64_img = get_image_base64(image_url)
-    if not base64_img:
-        send_fb_msg(uid, {"text": "Dạ em gặp lỗi tải ảnh, anh/chị nhắn mã MS giúp em nhé!"})
-        return
-    load_products()
-    try:
-        resp = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[{"role": "system", "content": "Bạn là máy phân tích thời trang. Hãy liệt kê các từ khóa mô tả sản phẩm (màu sắc, kiểu dáng, họa tiết). Cách nhau bằng dấu phẩy."},
-                      {"role": "user", "content": [{"type": "text", "text": "Phân tích ảnh này:"}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}}]}]
-        )
-        tags = [t.strip() for t in resp.choices[0].message.content.split(",")]
-        matches = search_visual_matches(tags)
-        if matches:
-            send_fb_msg(uid, {"text": "🎯 Em tìm được một số mẫu giống ảnh anh/chị gửi nhất ạ:"})
-            send_featured_carousel(uid, [m["ms"] for m in matches])
-            USER_CONTEXT[uid]["last_ms"] = matches[0]["ms"]
-        else:
-            send_fb_msg(uid, {"text": "Dạ mẫu này hiện em chưa thấy trong kho. Anh/chị cho em xin mã MS nhé!"})
-    except Exception as e:
-        print(f"Vision Error: {e}")
-        send_fb_msg(uid, {"text": "Dạ em hơi khó nhìn ảnh, anh/chị nhắn mã MS giúp em nhé!"})
+def extract_ms_from_retailer_id(retailer_id: str) -> Optional[str]:
+    if not retailer_id: return None
+    parts = retailer_id.split('_')
+    base_id = parts[0].upper()
+    match = re.search(r'MS(\d+)', base_id)
+    if match: return "MS" + match.group(1).zfill(6)
+    return None
 
 # ============================================
-# OPENAI TOOLS (FUNCTION CALLING) - BỔ SUNG ĐỦ 4 TOOLS
+# FUNCTION CALLING TOOLS
 # ============================================
 def get_tools_definition():
     return [
-        {
-            "type": "function",
-            "function": {
-                "name": "get_product_info",
-                "description": "Lấy thông tin giá, mô tả, màu sắc khi khách hỏi hoặc cần tư vấn.",
-                "parameters": {"type": "object", "properties": {"ms": {"type": "string"}}, "required": ["ms"]}
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "send_product_images",
-                "description": "Gửi các ảnh thật, ảnh mẫu của sản phẩm.",
-                "parameters": {"type": "object", "properties": {"ms": {"type": "string"}}, "required": ["ms"]}
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "provide_order_link",
-                "description": "Cung cấp link form đặt hàng khi khách muốn mua hoặc chốt đơn.",
-                "parameters": {"type": "object", "properties": {"ms": {"type": "string"}}, "required": ["ms"]}
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "show_featured_carousel",
-                "description": "Hiển thị danh sách sản phẩm mới hoặc nổi bật dưới dạng thẻ quay.",
-                "parameters": {"type": "object", "properties": {}}
-            }
-        }
+        {"type": "function", "function": {"name": "get_product_info", "description": "Lấy giá, mô tả, màu sắc khi khách hỏi.", "parameters": {"type": "object", "properties": {"ms": {"type": "string"}}, "required": ["ms"]}}},
+        {"type": "function", "function": {"name": "send_product_images", "description": "Gửi ảnh thật của sản phẩm.", "parameters": {"type": "object", "properties": {"ms": {"type": "string"}}, "required": ["ms"]}}},
+        {"type": "function", "function": {"name": "provide_order_link", "description": "Gửi link đặt hàng.", "parameters": {"type": "object", "properties": {"ms": {"type": "string"}}, "required": ["ms"]}}},
+        {"type": "function", "function": {"name": "show_featured_carousel", "description": "Hiển thị danh sách sản phẩm nổi bật.", "parameters": {"type": "object", "properties": {}}}}
     ]
-
-def send_featured_carousel(uid, ms_list=None):
-    """Hỗ trợ hiển thị Carousel cho cả Tool và Image Match"""
-    if not ms_list:
-        ms_list = list(PRODUCTS.keys())[:5]
-    
-    elements = []
-    domain = f"https://{DOMAIN}" if not DOMAIN.startswith("http") else DOMAIN
-    for ms in ms_list:
-        if ms not in PRODUCTS: continue
-        p = PRODUCTS[ms]
-        imgs = [u.strip() for u in re.split(r'[,\n;|]+', p["Images"]) if u.strip()]
-        elements.append({
-            "title": f"[{ms}] {p['Ten']}",
-            "image_url": imgs[0] if imgs else "",
-            "subtitle": f"Giá: {p['Gia']}\nBấm chi tiết để xem thêm ảnh.",
-            "buttons": [
-                {"type": "web_url", "url": f"{domain}/order-form?ms={ms}&uid={uid}", "title": "🛒 Đặt ngay"},
-                {"type": "postback", "title": "🔍 Chi tiết", "payload": f"ADVICE_{ms}"}
-            ]
-        })
-    
-    payload = {"recipient": {"id": uid}, "message": {"attachment": {"type": "template", "payload": {"template_type": "generic", "elements": elements}}}}
-    requests.post(f"https://graph.facebook.com/v12.0/me/messages?access_token={PAGE_ACCESS_TOKEN}", json=payload)
-    return "Carousel sent"
 
 def execute_tool(uid, name, args):
     ctx = USER_CONTEXT[uid]
-    ms = args.get("ms", "").upper() or ctx.get("last_ms")
-    domain = f"https://{DOMAIN}" if not DOMAIN.startswith("http") else DOMAIN
-
+    ms = (args.get("ms") or "").upper().strip() or ctx.get("last_ms")
+    if ms and not ms.startswith("MS") and ms.isdigit(): ms = "MS" + ms.zfill(6)
+    
     if name == "get_product_info" and ms in PRODUCTS:
         p = PRODUCTS[ms]
-        ctx["last_ms"] = ms
-        return f"Mã: {ms}\nTên: {p['Ten']}\nGiá: {p['Gia']}\nMàu: {p['Mau']}\nSize: {p['Size']}\nMô tả: {p['MoTa']}"
+        update_product_context(uid, ms)
+        return f"Sản phẩm [{ms}]: {p['Ten']}. Giá: {p['Gia']}. Màu: {p['Mau']}. Size: {p['Size']}. Mô tả: {p['MoTa']}"
 
     if name == "send_product_images" and ms in PRODUCTS:
-        urls = [u.strip() for u in re.split(r'[,\n;|]+', PRODUCTS[ms]["Images"]) if u.strip()]
+        urls = parse_image_urls(PRODUCTS[ms]["Images"])
         if urls:
             send_fb_msg(uid, {"text": f"Dạ em gửi ảnh mẫu [{ms}] ạ:"})
             for u in urls[:3]: send_fb_msg(uid, {"attachment": {"type": "image", "payload": {"url": u}}})
-        return "Images sent successfully."
+        return "Đã gửi ảnh."
 
     if name == "provide_order_link" and ms in PRODUCTS:
+        domain = f"https://{DOMAIN}" if not DOMAIN.startswith("http") else DOMAIN
         link = f"{domain}/order-form?ms={ms}&uid={uid}"
-        send_fb_msg(uid, {"text": f"Dạ mời anh/chị đặt hàng sản phẩm [{ms}] tại đây nhé:\n{link}"})
-        return "Order link sent."
+        send_fb_msg(uid, {"text": f"Dạ mời anh/chị đặt hàng sản phẩm [{ms}] tại đây:\n{link}"})
+        return "Đã gửi link đặt hàng."
 
     if name == "show_featured_carousel":
-        return send_featured_carousel(uid)
+        ms_list = list(PRODUCTS.keys())[:5]
+        elements = []
+        domain = f"https://{DOMAIN}" if not DOMAIN.startswith("http") else DOMAIN
+        for m in ms_list:
+            p = PRODUCTS[m]
+            imgs = parse_image_urls(p["Images"])
+            elements.append({
+                "title": f"[{m}] {p['Ten']}",
+                "image_url": imgs[0] if imgs else "",
+                "subtitle": f"Giá: {p['Gia']}",
+                "buttons": [
+                    {"type": "web_url", "url": f"{domain}/order-form?ms={m}&uid={uid}", "title": "🛒 Đặt ngay"},
+                    {"type": "postback", "title": "🔍 Chi tiết", "payload": f"ADVICE_{m}"}
+                ]
+            })
+        payload = {"recipient": {"id": uid}, "message": {"attachment": {"type": "template", "payload": {"template_type": "generic", "elements": elements}}}}
+        requests.post(f"https://graph.facebook.com/v12.0/me/messages?access_token={PAGE_ACCESS_TOKEN}", json=payload)
+        return "Đã hiển thị danh sách sản phẩm."
     
-    return "Sản phẩm không tồn tại hoặc em chưa rõ mã."
+    return "Dạ hiện tại em không tìm thấy mã sản phẩm này."
 
+# ============================================
+# XỬ LÝ TIN NHẮN & WEBHOOK
+# ============================================
 def handle_text(uid, text):
     load_products()
     ctx = USER_CONTEXT[uid]
     
-    # Xử lý Postback từ Carousel
     if text.startswith("ADVICE_"):
         ms = text.replace("ADVICE_", "")
         info = execute_tool(uid, "get_product_info", {"ms": ms})
@@ -241,55 +195,36 @@ def handle_text(uid, text):
         execute_tool(uid, "provide_order_link", {"ms": ms})
         return
 
-    quick_ms = detect_ms_from_text(text)
-    if quick_ms: ctx["last_ms"] = quick_ms
+    # Nhận diện MS ngay trong tin nhắn
+    found_ms = detect_ms_from_text(text)
+    if found_ms: update_product_context(uid, found_ms)
 
-    system_prompt = f"""Bạn là nhân viên bán hàng của {FANPAGE_NAME}.
-    Trả lời cực ngắn gọn (dưới 3 dòng), thân thiện. Xưng em gọi anh/chị.
-    Mã khách đang quan tâm: {ctx.get('last_ms', 'Chưa rõ')}.
-    Sử dụng công cụ để gửi ảnh, báo giá hoặc link đặt hàng khi khách yêu cầu."""
-
-    messages = [{"role": "system", "content": system_prompt}]
+    messages = [{"role": "system", "content": f"Bạn là nhân viên tư vấn của {FANPAGE_NAME}. Trả lời ngắn gọn, thân thiện. Mã đang quan tâm: {ctx.get('last_ms')}. Khi khách hỏi giá hoặc mua, hãy dùng tool."}]
     for h in ctx["conversation_history"][-5:]: messages.append(h)
     messages.append({"role": "user", "content": text})
 
     try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=messages,
-            tools=get_tools_definition(),
-            tool_choice="auto"
-        )
+        response = client.chat.completions.create(model="gpt-4o-mini", messages=messages, tools=get_tools_definition(), tool_choice="auto")
         msg = response.choices[0].message
-        
         if msg.tool_calls:
             messages.append(msg)
             for tool in msg.tool_calls:
-                result = execute_tool(uid, tool.function.name, json.loads(tool.function.arguments))
-                messages.append({"role": "tool", "tool_call_id": tool.id, "name": tool.function.name, "content": result})
-            
-            # AI phản hồi sau khi gọi tool
-            final_res = client.chat.completions.create(model="gpt-4o-mini", messages=messages)
-            reply = final_res.choices[0].message.content
+                res = execute_tool(uid, tool.function.name, json.loads(tool.function.arguments))
+                messages.append({"role": "tool", "tool_call_id": tool.id, "name": tool.function.name, "content": res})
+            final = client.chat.completions.create(model="gpt-4o-mini", messages=messages)
+            reply = final.choices[0].message.content
         else:
             reply = msg.content
-
+        
         if reply:
             send_fb_msg(uid, {"text": reply})
             ctx["conversation_history"].append({"role": "user", "content": text})
             ctx["conversation_history"].append({"role": "assistant", "content": reply})
-            ctx["conversation_history"] = ctx["conversation_history"][-10:]
-
-    except Exception as e:
-        print(f"Chat Error: {e}")
+    except Exception as e: print(f"Chat Error: {e}")
 
 def send_fb_msg(uid, payload):
-    url = f"https://graph.facebook.com/v12.0/me/messages?access_token={PAGE_ACCESS_TOKEN}"
-    requests.post(url, json={"recipient": {"id": uid}, "message": payload})
+    requests.post(f"https://graph.facebook.com/v12.0/me/messages?access_token={PAGE_ACCESS_TOKEN}", json={"recipient": {"id": uid}, "message": payload})
 
-# ============================================
-# WEBHOOK HANDLER (REFERRAL & ECHO)
-# ============================================
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
     if request.method == "GET":
@@ -300,70 +235,140 @@ def webhook():
         for m in entry.get("messaging", []):
             uid = m.get("sender", {}).get("id")
             if not uid: continue
-            ctx = USER_CONTEXT[uid]
-
-            # Xử lý Referral Ads
+            
+            # Xử lý Referral (Ads & Catalog)
             if "referral" in m:
                 ref = m["referral"]
                 ad_title = ref.get("ads_context_data", {}).get("ad_title", "")
-                ms_ad = extract_ms_from_ad_title(ad_title) or detect_ms_from_text(ref.get("ref", ""))
-                if ms_ad:
-                    ctx["last_ms"] = ms_ad
-                    load_products()
-                    info = execute_tool(uid, "get_product_info", {"ms": ms_ad})
-                    send_fb_msg(uid, {"text": info})
+                ms = detect_ms_from_text(ad_title) or detect_ms_from_text(ref.get("ref", ""))
+                if ms: update_product_context(uid, ms)
+                handle_text(uid, "Tư vấn cho mình mã này")
                 continue
 
-            if "postback" in m:
-                handle_text(uid, m["postback"]["payload"])
-                continue
+            # Xử lý Catalog Product Tag
+            if "message" in m and "attachments" in m["message"]:
+                for att in m["message"]["attachments"]:
+                    if att.get("type") == "template" and "product" in att.get("payload", {}):
+                        rid = att["payload"]["product"]["elements"][0].get("retailer_id")
+                        ms = extract_ms_from_retailer_id(rid)
+                        if ms: update_product_context(uid, ms)
 
             msg = m.get("message", {})
             if msg.get("is_echo"):
                 if not is_bot_echo(msg.get("text"), msg.get("app_id"), None):
-                    agent_ms = detect_ms_from_text(msg.get("text"))
-                    if agent_ms: ctx["last_ms"] = agent_ms
+                    ms = detect_ms_from_text(msg.get("text"))
+                    if ms: update_product_context(uid, ms)
                 continue
 
-            mid = msg.get("mid")
-            if mid and mid in ctx["processed_message_mids"]: continue
-            if mid: ctx["processed_message_mids"][mid] = time.time()
-
             if "text" in msg: handle_text(uid, msg["text"])
-            elif "attachments" in msg:
-                for att in msg["attachments"]:
-                    if att["type"] == "image": handle_image(uid, att["payload"]["url"])
+            elif "postback" in m: handle_text(uid, m["postback"]["payload"])
+            
     return "OK", 200
 
 # ============================================
-# ORDER FORM (FIXED FOR KOYEB)
+# ORDER FORM & VARIANT API
 # ============================================
+@app.route("/api/get-variant-price")
+def api_get_price():
+    ms, color, size = request.args.get("ms"), request.args.get("color"), request.args.get("size")
+    load_products()
+    p = PRODUCTS.get(ms)
+    if not p: return jsonify({"price": 0})
+    for v in p["variants"]:
+        if (not color or v["mau"] == color) and (not size or v["size"] == size):
+            return jsonify({"price": v["gia"]})
+    return jsonify({"price": p["Gia"]})
+
+@app.route("/api/get-variant-image")
+def api_get_image():
+    ms, color = request.args.get("ms"), request.args.get("color")
+    load_products()
+    p = PRODUCTS.get(ms)
+    if not p: return jsonify({"image": ""})
+    for v in p["variants"]:
+        if v["mau"] == color and v["images"]:
+            return jsonify({"image": v["images"][0]})
+    return jsonify({"image": parse_image_urls(p["Images"])[0] if p["Images"] else ""})
+
 @app.route("/order-form")
 def order_form():
     ms, uid = request.args.get("ms", "").upper(), request.args.get("uid", "")
     load_products()
-    product = PRODUCTS.get(ms)
-    if not product: return "Sản phẩm không tồn tại.", 404
+    p = PRODUCTS.get(ms)
+    if not p: return "Sản phẩm không tồn tại.", 404
     
-    price_raw = str(product.get("Gia", "0")).replace(".", "").replace(",", "").replace("đ", "").strip()
-    price_int = int(re.sub(r'\D', '', price_raw)) if re.sub(r'\D', '', price_raw) else 0
-    colors = [c.strip() for c in product.get("Mau", "").split(",") if c.strip()] or ["Mặc định"]
-    sizes = [s.strip() for s in product.get("Size", "").split(",") if s.strip()] or ["Free Size"]
-    imgs = [u.strip() for u in re.split(r'[,\n;|]+', product.get("Images", "")) if u.strip()]
-    
-    return render_template("order-form.html", ms=ms, uid=uid, product=product, fanpage_name=FANPAGE_NAME,
-                           price_int=price_int, colors=colors, sizes=sizes, default_image=imgs[0] if imgs else "",
-                           api_base_url=f"https://{DOMAIN}" if not DOMAIN.startswith("http") else DOMAIN, domain=DOMAIN)
+    colors = sorted(list(set([v["mau"] for v in p["variants"] if v["mau"]]))) or ["Mặc định"]
+    sizes = sorted(list(set([v["size"] for v in p["variants"] if v["size"]]))) or ["Free Size"]
+    imgs = parse_image_urls(p["Images"])
+
+    return render_template_string("""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Đặt hàng</title>
+        <style>
+            body { font-family: sans-serif; padding: 20px; background: #f4f4f4; }
+            .card { background: white; padding: 20px; border-radius: 10px; max-width: 400px; margin: auto; }
+            img { width: 100%; border-radius: 10px; }
+            select, input { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ddd; border-radius: 5px; }
+            button { width: 100%; padding: 15px; background: #28a745; color: white; border: none; border-radius: 5px; font-weight: bold; }
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <img id="main-img" src="{{img}}">
+            <h3>{{p.Ten}}</h3>
+            <p id="price-txt" style="color: red; font-weight: bold; font-size: 1.2em;">{{p.Gia}}</p>
+            <form id="orderForm">
+                <label>Màu sắc:</label>
+                <select id="color" onchange="updateVariant()">{% for c in colors %}<option value="{{c}}">{{c}}</option>{% endfor %}</select>
+                <label>Size:</label>
+                <select id="size" onchange="updateVariant()">{% for s in sizes %}<option value="{{s}}">{{s}}</option>{% endfor %}</select>
+                <input type="text" id="name" placeholder="Họ tên" required>
+                <input type="tel" id="phone" placeholder="Số điện thoại" required>
+                <input type="text" id="addr" placeholder="Địa chỉ nhận hàng" required>
+                <button type="button" onclick="submitOrder()">XÁC NHẬN ĐẶT HÀNG</button>
+            </form>
+        </div>
+        <script>
+            async function updateVariant() {
+                const c = document.getElementById('color').value;
+                const s = document.getElementById('size').value;
+                const resP = await fetch(`/api/get-variant-price?ms={{ms}}&color=${c}&size=${s}`);
+                const dataP = await resP.json();
+                document.getElementById('price-txt').innerText = dataP.price;
+                
+                const resI = await fetch(`/api/get-variant-image?ms={{ms}}&color=${c}`);
+                const dataI = await resI.json();
+                if(dataI.image) document.getElementById('main-img').src = dataI.image;
+            }
+            async function submitOrder() {
+                const body = {
+                    uid: "{{uid}}", ms: "{{ms}}",
+                    color: document.getElementById('color').value,
+                    size: document.getElementById('size').value,
+                    name: document.getElementById('name').value,
+                    phone: document.getElementById('phone').value,
+                    addr: document.getElementById('addr').value
+                };
+                await fetch('/api/submit-order', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+                alert('Đặt hàng thành công!');
+            }
+        </script>
+    </body>
+    </html>
+    """, p=p, ms=ms, uid=uid, colors=colors, sizes=sizes, img=imgs[0] if imgs else "")
 
 @app.route("/api/submit-order", methods=["POST"])
 def api_submit_order():
     data = request.get_json()
-    send_fb_msg(data.get("uid"), {"text": "🎉 Shop đã nhận đơn hàng thành công! Shop sẽ gọi xác nhận ngay nhé."})
+    msg = f"🎉 ĐƠN HÀNG MỚI\nSản phẩm: {data['ms']}\nPhân loại: {data['color']} - {data['size']}\nKhách: {data['name']}\nSĐT: {data['phone']}\nĐC: {data['addr']}"
+    send_fb_msg(data["uid"], {"text": msg})
     return jsonify({"status": "ok"})
 
 @app.route("/")
-def home(): return "Bot Live", 200
+def home(): return "Bot is running", 200
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
