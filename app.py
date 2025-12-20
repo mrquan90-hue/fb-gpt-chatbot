@@ -1381,6 +1381,76 @@ def get_variant_image(ms: str, color: str, size: str) -> str:
     return urls[0] if urls else ""
 
 # ============================================
+# XỬ LÝ TRỰC TIẾP CÂU HỎI VỀ SẢN PHẨM (FIX LỖI)
+# ============================================
+
+def handle_product_query_directly(uid: str, text: str) -> bool:
+    """
+    Xử lý trực tiếp các câu hỏi về sản phẩm khi đã biết mã.
+    Trả về True nếu đã xử lý, False nếu để GPT xử lý.
+    """
+    ctx = USER_CONTEXT[uid]
+    last_ms = ctx.get("last_ms")
+    
+    if not last_ms or last_ms not in PRODUCTS:
+        return False
+    
+    text_lower = text.lower().strip()
+    
+    print(f"[DIRECT HANDLER] Kiểm tra: uid={uid}, last_ms={last_ms}, text={text}")
+    
+    # 1. Câu hỏi về giá
+    price_queries = ["giá", "bao nhiêu", "giá bao nhiêu", "giá cả", "giá tiền", "bao nhiêu tiền", "cost", "price"]
+    if any(query in text_lower for query in price_queries):
+        print(f"[DIRECT HANDLER] User {uid} hỏi giá {last_ms}: {text}")
+        send_product_info_debounced(uid, last_ms)
+        return True
+    
+    # 2. Câu hỏi về thông tin sản phẩm
+    info_queries = ["thông tin", "mô tả", "tính năng", "chức năng", "có gì", "như thế nào", "chi tiết", "giới thiệu"]
+    if any(query in text_lower for query in info_queries):
+        print(f"[DIRECT HANDLER] User {uid} hỏi thông tin {last_ms}: {text}")
+        send_product_info_debounced(uid, last_ms)
+        return True
+    
+    # 3. Câu hỏi về ảnh
+    image_queries = ["ảnh", "hình", "xem ảnh", "gửi ảnh", "cho xem hình", "hình ảnh", "photo", "picture", "image"]
+    if any(query in text_lower for query in image_queries):
+        print(f"[DIRECT HANDLER] User {uid} hỏi ảnh {last_ms}: {text}")
+        send_all_product_images(uid, last_ms)
+        return True
+    
+    # 4. Câu hỏi về mua hàng
+    order_queries = ["mua", "đặt", "chốt", "lấy", "lấy hàng", "đặt hàng", "order", "purchase", "buy"]
+    if any(query in text_lower for query in order_queries):
+        print(f"[DIRECT HANDLER] User {uid} muốn mua {last_ms}: {text}")
+        domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
+        order_link = f"{domain}/order-form?ms={last_ms}&uid={uid}"
+        send_message(uid, f"Dạ mời anh/chị đặt hàng sản phẩm [{last_ms}] tại đây nhé:\n{order_link}")
+        return True
+    
+    # 5. Câu hỏi về tồn kho, còn hàng
+    stock_queries = ["còn hàng", "còn không", "tồn kho", "hết hàng", "có hàng", "stock", "available"]
+    if any(query in text_lower for query in stock_queries):
+        print(f"[DIRECT HANDLER] User {uid} hỏi tồn kho {last_ms}: {text}")
+        if last_ms in PRODUCTS:
+            product = PRODUCTS[last_ms]
+            product_name = product.get('Ten', '')
+            send_message(uid, f"Dạ sản phẩm [{last_ms}] {product_name} vẫn còn hàng anh/chị ạ! Em sẽ gửi thông tin chi tiết:")
+            time.sleep(0.5)
+            send_product_info_debounced(uid, last_ms)
+        return True
+    
+    # 6. Câu hỏi về màu sắc, size
+    attribute_queries = ["màu", "color", "size", "kích thước", "mẫu", "model"]
+    if any(query in text_lower for query in attribute_queries):
+        print(f"[DIRECT HANDLER] User {uid} hỏi thuộc tính {last_ms}: {text}")
+        send_product_info_debounced(uid, last_ms)
+        return True
+    
+    return False
+
+# ============================================
 # OPENAI FUNCTION CALLING (TÍCH HỢP TỪ AI_STUDIO_CODE)
 # ============================================
 
@@ -1482,10 +1552,20 @@ def handle_text_with_function_calling(uid: str, text: str):
     load_products()
     ctx = USER_CONTEXT[uid]
     
+    # DEBUG: In thông tin context
+    print(f"[DEBUG FUNCTION CALLING] User {uid}:")
+    print(f"  - text: {text}")
+    print(f"  - ctx['last_ms']: {ctx.get('last_ms')}")
+    print(f"  - PRODUCTS keys sample: {list(PRODUCTS.keys())[:5]}")
+    
     # Logic nhận diện mã nhanh
     quick_ms = detect_ms_from_text(text)
     if quick_ms: 
         ctx["last_ms"] = quick_ms
+    
+    # ========== FIX: XỬ LÝ TRỰC TIẾP CÂU HỎI VỀ SẢN PHẨM ==========
+    if handle_product_query_directly(uid, text):
+        return  # Đã xử lý xong, không cần gọi GPT
 
     fanpage_name = get_fanpage_name_from_api()
     
@@ -2358,9 +2438,7 @@ def webhook():
                 # **GIỮ NGUYÊN**: Tìm mã sản phẩm trong tin nhắn echo
                 detected_ms = detect_ms_from_text(echo_text)
                 
-                if detected_ms and detected_ms in PRODUCTS:
-                    print(f"[ECHO FCHAT] Phát hiện mã sản phẩm: {detected_ms} cho user: {recipient_id}")
-                    
+                if detected_ms:
                     # KIỂM TRA LOCK để tránh xử lý song song
                     ctx = USER_CONTEXT[recipient_id]
                     if ctx.get("processing_lock"):
@@ -3385,7 +3463,7 @@ def order_form():
                 
                 document.getElementById('fullAddress').value = fullAddress;
                 
-                # Update preview
+                // Update preview
                 const previewElement = document.getElementById('addressPreview');
                 if (fullAddress.trim()) {{
                     previewElement.innerHTML = `
@@ -3414,11 +3492,11 @@ def order_form():
             }}
             
             // ============================================
-            # FORM VALIDATION AND SUBMISSION
-            # ============================================
+            // FORM VALIDATION AND SUBMISSION
+            // ============================================
             
             async function submitOrder() {{
-                # Collect form data
+                // Collect form data
                 const formData = {{
                     ms: PRODUCT_MS,
                     uid: PRODUCT_UID,
@@ -3437,7 +3515,7 @@ def order_form():
                     addressDetail: document.getElementById('addressDetail').value.trim()
                 }};
                 
-                # Validate required fields
+                // Validate required fields
                 if (!formData.customerName) {{
                     alert('Vui lòng nhập họ và tên');
                     document.getElementById('customerName').focus();
@@ -3450,7 +3528,7 @@ def order_form():
                     return;
                 }}
                 
-                # Validate phone number
+                // Validate phone number
                 const phoneRegex = /^(0|\\+84)(\\d{{9,10}})$/;
                 if (!phoneRegex.test(formData.phone)) {{
                     alert('Số điện thoại không hợp lệ. Vui lòng nhập số điện thoại 10-11 chữ số');
@@ -3458,7 +3536,7 @@ def order_form():
                     return;
                 }}
                 
-                # Validate address
+                // Validate address
                 if (!formData.provinceId) {{
                     alert('Vui lòng chọn Tỉnh/Thành phố');
                     document.getElementById('province').focus();
@@ -3483,7 +3561,7 @@ def order_form():
                     return;
                 }}
                 
-                # Show loading
+                // Show loading
                 const submitBtn = document.getElementById('submitBtn');
                 const originalText = submitBtn.innerHTML;
                 submitBtn.innerHTML = '<span class="loading-spinner"></span> ĐANG XỬ LÝ...';
@@ -3501,10 +3579,10 @@ def order_form():
                     const data = await response.json();
                     
                     if (response.ok) {{
-                        # Success
+                        // Success
                         alert('🎉 Đã gửi đơn hàng thành công!\\n\\nShop sẽ liên hệ xác nhận trong 5-10 phút.\\nCảm ơn anh/chị đã đặt hàng! ❤️');
                         
-                        # Reset form (optional)
+                        // Reset form (optional)
                         document.getElementById('customerName').value = '';
                         document.getElementById('phone').value = '';
                         document.getElementById('addressDetail').value = '';
@@ -3516,33 +3594,33 @@ def order_form():
                         updateFullAddress();
                         
                     }} else {{
-                        # Error
+                        // Error
                         alert(`❌ ${{data.message || 'Có lỗi xảy ra. Vui lòng thử lại sau'}}`);
                     }}
                 }} catch (error) {{
                     console.error('Lỗi khi gửi đơn hàng:', error);
                     alert('❌ Lỗi kết nối. Vui lòng thử lại sau!');
                 }} finally {{
-                    # Restore button
+                    // Restore button
                     submitBtn.innerHTML = originalText;
                     submitBtn.disabled = false;
                 }}
             }}
             
-            # ============================================
-            # INITIALIZATION
-            # ============================================
+            // ============================================
+            // INITIALIZATION
+            // ============================================
             
             document.addEventListener('DOMContentLoaded', function() {{
-                # Load provinces
+                // Load provinces
                 loadProvinces();
                 
-                # Event listeners for product variant changes
+                // Event listeners for product variant changes
                 document.getElementById('color').addEventListener('change', updateVariantInfo);
                 document.getElementById('size').addEventListener('change', updateVariantInfo);
                 document.getElementById('quantity').addEventListener('input', updatePriceByVariant);
                 
-                # Event listeners for address changes
+                // Event listeners for address changes
                 document.getElementById('province').addEventListener('change', function() {{
                     loadDistricts(this.value);
                     updateFullAddress();
@@ -3556,10 +3634,10 @@ def order_form():
                 document.getElementById('ward').addEventListener('change', updateFullAddress);
                 document.getElementById('addressDetail').addEventListener('input', updateFullAddress);
                 
-                # Initialize product variant info
+                // Initialize product variant info
                 updateVariantInfo();
                 
-                # Enter key to submit form
+                // Enter key to submit form
                 document.getElementById('orderForm').addEventListener('keypress', function(e) {{
                     if (e.which === 13) {{
                         e.preventDefault();
@@ -3567,7 +3645,7 @@ def order_form():
                     }}
                 }});
                 
-                # Focus on first field
+                // Focus on first field
                 setTimeout(() => {{
                     document.getElementById('customerName').focus();
                 }}, 500);
@@ -3968,5 +4046,8 @@ if __name__ == "__main__":
     print(f"🔴 Order Priority: Function Calling quyết định")
     print(f"🔴 Price Priority: Function Calling quyết định")
     print(f"🔴 Function Calling Integration: HOÀN THÀNH - ĐÃ TÍCH HỢP TỪ AI_STUDIO_CODE.PY")
+    
+    print(f"\n🔧 QUAN TRỌNG: ĐÃ THÊM HÀM handle_product_query_directly()")
+    print(f"🔧 FIX: Bot sẽ tự động gửi thông tin sản phẩm khi đã biết mã và khách hỏi về giá/thông tin/ảnh")
     
     app.run(host="0.0.0.0", port=5000, debug=True)
