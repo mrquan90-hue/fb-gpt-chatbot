@@ -83,7 +83,7 @@ else:
 # ============================================
 # APP ID CỦA BOT
 # ============================================
-BOT_APP_IDS = {"645956568292435"}
+BOT_APP_IDS = {"645956568292435", "1784956665094089"}
 
 # ============================================
 # OPENAI CLIENT
@@ -157,6 +157,9 @@ USER_CONTEXT = defaultdict(lambda: {
     "conversation_history": [],
     "referral_source": None,
     "referral_payload": None,
+    "last_any_message_time": 0,
+    "last_echo_triggered_time": 0,
+    "last_processed_text": "",
 })
 
 PRODUCTS = {}
@@ -325,8 +328,8 @@ def is_bot_generated_echo(echo_text: str, app_id: str = "") -> bool:
 # FACEBOOK API FUNCTIONS
 # ============================================
 
-def call_facebook_send_api(payload: dict, retry_count=2):
-    """Gửi tin nhắn qua Facebook API"""
+def call_facebook_send_api(payload: dict, retry_count=2, timeout=15):
+    """Gửi tin nhắn qua Facebook API với timeout và retry"""
     if not PAGE_ACCESS_TOKEN or not REQUESTS_AVAILABLE:
         print("[WARN] Không có PAGE_ACCESS_TOKEN hoặc requests")
         return {}
@@ -335,7 +338,8 @@ def call_facebook_send_api(payload: dict, retry_count=2):
     
     for attempt in range(retry_count):
         try:
-            resp = requests.post(url, json=payload, timeout=10)
+            # Sử dụng connection timeout và read timeout riêng biệt
+            resp = requests.post(url, json=payload, timeout=(5, timeout))
             
             if resp.status_code == 200:
                 return resp.json()
@@ -348,15 +352,20 @@ def call_facebook_send_api(payload: dict, retry_count=2):
                     print(f"[ERROR] Người dùng đã chặn/hủy kết nối")
                     return {}
                 
-                print(f"Facebook Send API error (attempt {attempt+1}):", resp.text)
+                print(f"Facebook Send API error (attempt {attempt+1}): {resp.text[:200]}")
                 
                 if attempt < retry_count - 1:
-                    time.sleep(0.5)
+                    time.sleep(1)  # Tăng thời gian chờ giữa các lần retry
                     
-        except Exception as e:
-            print(f"Facebook Send API exception (attempt {attempt+1}):", e)
+        except requests.exceptions.Timeout:
+            print(f"[TIMEOUT] Facebook API timeout (attempt {attempt+1})")
             if attempt < retry_count - 1:
-                time.sleep(0.5)
+                time.sleep(2)
+            continue
+        except Exception as e:
+            print(f"Facebook Send API exception (attempt {attempt+1}): {e}")
+            if attempt < retry_count - 1:
+                time.sleep(1)
     
     return {}
 
@@ -460,7 +469,7 @@ def extract_price_int(price_str: str):
         return None
 
 def load_products(force=False):
-    """Đọc dữ liệu từ Google Sheet CSV"""
+    """Đọc dữ liệu từ Google Sheet CSV với retry"""
     global PRODUCTS, LAST_LOAD, PRODUCTS_BY_NUMBER
     now = time.time()
     if not force and PRODUCTS and (now - LAST_LOAD) < LOAD_TTL:
@@ -470,64 +479,89 @@ def load_products(force=False):
         print("❌ Không thể load sản phẩm")
         return
 
-    try:
-        print(f"🟦 Loading sheet từ CSV: {GOOGLE_SHEET_CSV_URL}")
-        r = requests.get(GOOGLE_SHEET_CSV_URL, timeout=30)
-        r.raise_for_status()
-        r.encoding = "utf-8"
-        content = r.text
+    max_retries = 3
+    for retry in range(max_retries):
+        try:
+            print(f"🟦 Loading sheet từ CSV (lần {retry+1}): {GOOGLE_SHEET_CSV_URL}")
+            
+            # Tăng timeout và thêm headers
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (compatible; FacebookBot/1.0)',
+                'Accept': 'text/csv'
+            }
+            
+            r = requests.get(GOOGLE_SHEET_CSV_URL, timeout=60, headers=headers)
+            r.raise_for_status()
+            r.encoding = "utf-8"
+            content = r.text
 
-        reader = csv.DictReader(content.splitlines())
-        products = {}
-        products_by_number = {}
+            if not content or len(content) < 10:
+                print("❌ Nội dung CSV trống")
+                if retry < max_retries - 1:
+                    time.sleep(2)
+                    continue
+                return
 
-        for raw_row in reader:
-            row = dict(raw_row)
+            reader = csv.DictReader(content.splitlines())
+            products = {}
+            products_by_number = {}
 
-            ms = (row.get("Mã sản phẩm") or "").strip()
-            if not ms:
-                continue
+            for raw_row in reader:
+                row = dict(raw_row)
 
-            ten = (row.get("Tên sản phẩm") or "").strip()
-            if not ten:
-                continue
+                ms = (row.get("Mã sản phẩm") or "").strip()
+                if not ms:
+                    continue
 
-            gia_raw = (row.get("Giá bán") or "").strip()
-            images = (row.get("Images") or "").strip()
-            mota = (row.get("Mô tả") or "").strip()
-            mau = (row.get("màu (Thuộc tính)") or "").strip()
-            size = (row.get("size (Thuộc tính)") or "").strip()
+                ten = (row.get("Tên sản phẩm") or "").strip()
+                if not ten:
+                    continue
 
-            gia_int = extract_price_int(gia_raw)
+                gia_raw = (row.get("Giá bán") or "").strip()
+                images = (row.get("Images") or "").strip()
+                mota = (row.get("Mô tả") or "").strip()
+                mau = (row.get("màu (Thuộc tính)") or "").strip()
+                size = (row.get("size (Thuộc tính)") or "").strip()
 
-            if ms not in products:
-                products[ms] = {
-                    "MS": ms,
-                    "Ten": ten,
-                    "Gia": gia_raw,
-                    "MoTa": mota,
-                    "Images": images,
-                    "màu (Thuộc tính)": mau,
-                    "size (Thuộc tính)": size,
-                    "ShortDesc": short_description(mota),
-                    "RawRow": row
-                }
+                gia_int = extract_price_int(gia_raw)
 
-            if ms.startswith("MS"):
-                num_part = ms[2:]
-                num_without_leading_zeros = num_part.lstrip('0')
-                if num_without_leading_zeros:
-                    products_by_number[num_without_leading_zeros] = ms
+                if ms not in products:
+                    products[ms] = {
+                        "MS": ms,
+                        "Ten": ten,
+                        "Gia": gia_raw,
+                        "MoTa": mota,
+                        "Images": images,
+                        "màu (Thuộc tính)": mau,
+                        "size (Thuộc tính)": size,
+                        "ShortDesc": short_description(mota),
+                        "RawRow": row
+                    }
 
-        PRODUCTS = products
-        PRODUCTS_BY_NUMBER = products_by_number
-        LAST_LOAD = now
-        
-        print(f"📦 Đã load {len(PRODUCTS)} sản phẩm")
-        print(f"🔢 Đã tạo mapping cho {len(PRODUCTS_BY_NUMBER)} mã số sản phẩm")
-        
-    except Exception as e:
-        print("❌ Lỗi load_products:", e)
+                if ms.startswith("MS"):
+                    num_part = ms[2:]
+                    num_without_leading_zeros = num_part.lstrip('0')
+                    if num_without_leading_zeros:
+                        products_by_number[num_without_leading_zeros] = ms
+
+            PRODUCTS = products
+            PRODUCTS_BY_NUMBER = products_by_number
+            LAST_LOAD = now
+            
+            print(f"📦 Đã load {len(PRODUCTS)} sản phẩm")
+            print(f"🔢 Đã tạo mapping cho {len(PRODUCTS_BY_NUMBER)} mã số sản phẩm")
+            break
+            
+        except requests.exceptions.Timeout:
+            print(f"❌ Timeout khi load CSV (lần {retry+1})")
+            if retry < max_retries - 1:
+                time.sleep(3)
+            continue
+        except Exception as e:
+            print(f"❌ Lỗi load_products (lần {retry+1}): {e}")
+            if retry < max_retries - 1:
+                time.sleep(3)
+            continue
 
 def detect_ms_from_text(text: str):
     """Tìm mã sản phẩm trong tin nhắn"""
@@ -753,19 +787,28 @@ Hỏi mã sản phẩm nếu chưa biết."""
 # ============================================
 
 def send_product_info(uid: str, ms: str):
-    """Gửi thông tin sản phẩm"""
+    """Gửi thông tin sản phẩm với cơ chế debounce mạnh"""
     ctx = USER_CONTEXT[uid]
     now = time.time()
 
+    # Kiểm tra debounce nghiêm ngặt hơn
     last_ms = ctx.get("product_info_sent_ms")
     last_time = ctx.get("last_product_info_time", 0)
-
-    if last_ms == ms and (now - last_time) < 5:
-        print(f"[DEBOUNCE] Bỏ qua gửi lại thông tin sản phẩm {ms}")
+    
+    # Nếu cùng mã sản phẩm và trong vòng 30 giây -> bỏ qua
+    if last_ms == ms and (now - last_time) < 30:
+        print(f"[DEBOUNCE STRICT] Bỏ qua gửi lại {ms} cho user {uid} trong 30s")
         return
+    
+    # Nếu có bất kỳ tin nhắn nào trong 5 giây -> chờ
+    last_any_msg = ctx.get("last_any_message_time", 0)
+    if (now - last_any_msg) < 5:
+        print(f"[DEBOUNCE] Đang chờ giữa các tin nhắn cho user {uid}")
+        time.sleep(1)
 
     ctx["product_info_sent_ms"] = ms
     ctx["last_product_info_time"] = now
+    ctx["last_any_message_time"] = now
     ctx["processing_lock"] = True
     ctx["last_ms"] = ms
 
@@ -778,41 +821,32 @@ def send_product_info(uid: str, ms: str):
             return
 
         product_name = product.get('Ten', 'Sản phẩm')
+        
+        # Gửi tin nhắn với khoảng cách thời gian
         send_message(uid, f"📌 {product_name}")
-        time.sleep(0.5)
+        time.sleep(1)  # Tăng thời gian chờ giữa các tin nhắn
 
-        # Gửi ảnh
+        # Gửi ảnh với timeout ngắn hơn
         images_field = product.get("Images", "")
         urls = parse_image_urls(images_field)
         
         if urls:
-            # Ưu tiên ảnh từ freeimage.host nếu có API key
-            if FREEIMAGE_API_KEY:
-                for url in urls[:3]:  # Gửi tối đa 3 ảnh
-                    if 'freeimage.host' in url:
-                        send_image(uid, url)
-                        time.sleep(0.7)
-                    else:
-                        # Có thể upload ảnh lên freeimage.host nếu cần
-                        send_image(uid, url)
-                        time.sleep(0.7)
-            else:
-                send_image(uid, urls[0])
-                time.sleep(0.7)
+            # Chỉ gửi 1 ảnh đầu tiên để tránh timeout
+            send_image(uid, urls[0])
+            time.sleep(2)  # Chờ lâu hơn sau khi gửi ảnh
         else:
             send_message(uid, "📷 Sản phẩm chưa có hình ảnh ạ.")
+            time.sleep(1)
         
-        time.sleep(0.5)
-
         # Gửi mô tả
         mo_ta = product.get("MoTa", "")
         if mo_ta:
-            short_desc = short_description(mo_ta, 200)
+            short_desc = short_description(mo_ta, 150)  # Giảm độ dài
             send_message(uid, f"📝 {short_desc}")
         else:
             send_message(uid, "📝 Sản phẩm hiện chưa có thông tin chi tiết ạ.")
         
-        time.sleep(0.5)
+        time.sleep(1)
 
         # Gửi giá
         gia_raw = product.get("Gia", "")
@@ -824,7 +858,7 @@ def send_product_info(uid: str, ms: str):
         
         send_message(uid, price_msg)
         
-        time.sleep(0.5)
+        time.sleep(1)
 
         # Gửi link đặt hàng
         order_link = f"https://{DOMAIN}/order-form?ms={ms}&uid={uid}"
@@ -833,11 +867,12 @@ def send_product_info(uid: str, ms: str):
     except Exception as e:
         print(f"Lỗi khi gửi thông tin sản phẩm: {str(e)}")
         try:
-            send_message(uid, "Có lỗi khi tải thông tin sản phẩm.")
+            send_message(uid, "Có lỗi khi tải thông tin sản phẩm, vui lòng thử lại sau ạ.")
         except:
             pass
     finally:
         ctx["processing_lock"] = False
+        ctx["last_any_message_time"] = time.time()
 
 # ============================================
 # TEXT MESSAGE HANDLING
@@ -979,7 +1014,11 @@ def webhook():
             return "Verification token mismatch", 403
 
     data = request.get_json() or {}
-    print("Webhook received:", json.dumps(data, ensure_ascii=False)[:500])
+    
+    # Log ngắn gọn hơn
+    if "entry" in data:
+        entry_count = len(data.get("entry", []))
+        print(f"📨 Webhook nhận {entry_count} entry")
 
     entry = data.get("entry", [])
     for e in entry:
@@ -989,13 +1028,19 @@ def webhook():
             if not sender_id:
                 continue
 
-            # Xử lý echo message
+            # Xử lý echo message - CẢI THIỆN
             if m.get("message", {}).get("is_echo"):
                 msg = m["message"]
                 echo_text = msg.get("text", "")
                 app_id = msg.get("app_id", "")
                 
                 if is_bot_generated_echo(echo_text, app_id):
+                    print(f"[ECHO IGNORE] Bỏ qua echo từ bot app_id: {app_id}")
+                    continue
+                
+                # Kiểm tra nếu echo có chứa link đặt hàng của chúng ta -> bỏ qua
+                if DOMAIN and DOMAIN in echo_text:
+                    print(f"[ECHO IGNORE] Bỏ qua echo chứa domain của bot")
                     continue
                 
                 # Tìm mã sản phẩm trong echo
@@ -1003,30 +1048,28 @@ def webhook():
                 detected_ms = detect_ms_from_text(echo_text)
                 
                 if detected_ms and detected_ms in PRODUCTS:
-                    # QUAN TRỌNG: Lấy recipient_id (user thực) thay vì sender_id (page)
                     recipient_id = m.get("recipient", {}).get("id")
                     
                     if recipient_id:
                         ctx = USER_CONTEXT[recipient_id]
-                        ctx["last_ms"] = detected_ms
-                        print(f"[ECHO FCHAT] Phát hiện mã {detected_ms} cho user {recipient_id}")
                         
-                        # Gửi thông tin sản phẩm ngay lập tức cho user
-                        welcome_msg = f"""Chào anh/chị! 👋 
-Em là trợ lý AI của {FANPAGE_NAME}.
-
-Em thấy anh/chị quan tâm đến sản phẩm **[{detected_ms}]**.
-Em sẽ gửi thông tin chi tiết sản phẩm ngay ạ!"""
+                        # Kiểm tra xem đã gửi thông tin sản phẩm này chưa
+                        now = time.time()
+                        last_sent_time = ctx.get("last_echo_triggered_time", 0)
                         
-                        send_message(recipient_id, welcome_msg)
-                        send_product_info(recipient_id, detected_ms)
+                        # Chỉ xử lý echo nếu chưa từng xử lý hoặc đã quá 60 giây
+                        if (now - last_sent_time) > 60:
+                            ctx["last_ms"] = detected_ms
+                            ctx["last_echo_triggered_time"] = now
+                            print(f"[ECHO ACTION] Phát hiện mã {detected_ms} cho user {recipient_id}")
+                            
+                            # Không gửi welcome message nữa, chỉ gửi thông tin sản phẩm
+                            # Tránh gửi quá nhiều tin nhắn
+                            send_product_info(recipient_id, detected_ms)
+                        else:
+                            print(f"[ECHO DEBOUNCE] Bỏ qua echo trigger trong vòng 60s")
                     else:
-                        # Fallback: nếu không có recipient_id, sử dụng sender_id
-                        print(f"[ECHO FCHAT] Không có recipient_id, sử dụng sender_id: {sender_id}")
-                        ctx = USER_CONTEXT[sender_id]
-                        ctx["last_ms"] = detected_ms
-                else:
-                    print(f"[ECHO FCHAT] Không tìm thấy mã sản phẩm trong echo: {echo_text}")
+                        print(f"[ECHO WARN] Không có recipient_id trong echo")
                 
                 continue
             
