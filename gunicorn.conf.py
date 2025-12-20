@@ -1,8 +1,8 @@
 # gunicorn.conf.py
-import multiprocessing
+import os
 
-# Số worker
-workers = multiprocessing.cpu_count() * 2 + 1
+# Số worker - Trên Koyeb Free chỉ có 1 CPU, nên dùng 2-3 workers
+workers = int(os.environ.get("GUNICORN_WORKERS", 2))  # Mặc định 2 workers
 worker_class = "sync"
 
 # Timeout settings
