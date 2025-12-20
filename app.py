@@ -5,6 +5,7 @@ import time
 import csv
 import hashlib
 import base64
+import threading
 from collections import defaultdict
 from urllib.parse import quote
 from datetime import datetime
@@ -66,6 +67,41 @@ BOT_APP_IDS = {"645956568292435"}  # App ID của bot từ log
 # OPENAI CLIENT
 # ============================================
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+
+# ============================================
+# CONTEXT MANAGER FOR THREAD-SAFE OPERATIONS
+# ============================================
+
+# Global lock for user context operations
+USER_CONTEXT_LOCKS = defaultdict(threading.RLock)
+
+from contextlib import contextmanager
+
+@contextmanager
+def user_context_lock(uid: str, operation: str = ""):
+    """
+    Context manager để đảm bảo thread-safe khi thao tác với user context
+    """
+    lock = USER_CONTEXT_LOCKS[uid]
+    lock.acquire()
+    
+    try:
+        start_time = time.time()
+        ctx = USER_CONTEXT[uid]
+        
+        # Ghi log khi vào lock
+        if operation:
+            print(f"[CONTEXT LOCK] User {uid} - {operation} - Time: {time.time()}")
+        
+        yield ctx
+        
+    finally:
+        lock.release()
+        
+        # Ghi log khi release lock
+        if operation:
+            duration = time.time() - start_time
+            print(f"[CONTEXT UNLOCK] User {uid} - {operation} - Duration: {duration:.3f}s")
 
 # ============================================
 # MAP TIẾNG VIỆT CÓ DẤU SANG KHÔNG DẤU
@@ -149,6 +185,10 @@ USER_CONTEXT = defaultdict(lambda: {
     "last_catalog_product": None,
     # Thêm dict để lưu nhiều sản phẩm từ catalog
     "catalog_products": {},
+    # Thêm trường mới cho context management
+    "last_advice_time": 0,
+    "last_advised_ms": None,
+    "pending_product_switch": None,
 })
 
 PRODUCTS = {}
@@ -156,6 +196,130 @@ PRODUCTS_BY_NUMBER = {}
 PRODUCT_TEXT_EMBEDDINGS = {}
 LAST_LOAD = 0
 LOAD_TTL = 300
+
+# Các từ khóa liên quan đến đặt hàng
+ORDER_KEYWORDS = [
+    "đặt hàng nha",
+    "ok đặt",
+    "ok mua",
+    "ok em",
+    "ok e",
+    "mua 1 cái",
+    "mua cái này",
+    "mua luôn",
+    "chốt",
+    "lấy mã",
+    "lấy mẫu",
+    "lấy luôn",
+    "lấy em này",
+    "lấy e này",
+    "gửi cho",
+    "ship cho",
+    "ship 1 cái",
+    "chốt 1 cái",
+    "cho tôi mua",
+    "tôi lấy nhé",
+    "cho mình đặt",
+    "tôi cần mua",
+    "xác nhận đơn hàng giúp tôi",
+    "tôi đồng ý mua",
+    "làm đơn cho tôi đi",
+    "tôi chốt đơn nhé",
+    "cho xin 1 cái",
+    "cho đặt 1 chiếc",
+    "bên shop tạo đơn giúp em",
+    "okela",
+    "ok bạn",
+    "đồng ý",
+    "được đó",
+    "vậy cũng được",
+    "được vậy đi",
+    "chốt như bạn nói",
+    "ok giá đó đi",
+    "lấy mẫu đó đi",
+    "tư vấn giúp mình đặt hàng",
+    "hướng dẫn mình mua với",
+    "bạn giúp mình đặt nhé",
+    "muốn có nó quá",
+    "muốn mua quá",
+    "ưng quá, làm sao để mua",
+    "chốt đơn",
+    "bán cho em",
+    "bán cho em vé",
+    "xuống đơn giúp em",
+    "đơm hàng",
+    "lấy nha",
+    "lấy nhé",
+    "mua nha",
+    "mình lấy đây",
+    "shop ơi, của em",
+    "vậy lấy cái",
+    "thôi lấy cái",
+    "order nhé",
+]
+
+# Từ khóa kích hoạt carousel
+CAROUSEL_KEYWORDS = [
+    "xem sản phẩm",
+    "show sản phẩm",
+    "có gì hot",
+    "sản phẩm mới",
+    "danh sách sản phẩm",
+    "giới thiệu sản phẩm",
+    "tất cả sản phẩm",
+    "cho xem sản phẩm",
+    "có mẫu nào",
+    "mẫu mới",
+    "hàng mới",
+    "xem hàng",
+    "show hàng",
+]
+
+# Các từ khóa liên quan đến yêu cầu sản phẩm khác
+CHANGE_PRODUCT_KEYWORDS = [
+    "còn hàng nào khác",
+    "có cái nào đẹp hơn",
+    "có loại nào rẻ hơn",
+    "có loại nào đắt hơn",
+    "có loại nào dài hơn",
+    "có loại nào ấm hơn",
+    "có loại nào mát hơn",
+    "có loại nào mỏng hơn",
+    "có mẫu nào khác",
+    "có sản phẩm nào khác",
+    "shop còn gì khác",
+    "có loại nào khác",
+    "có model nào khác",
+    "cho xem cái khác",
+    "xem hàng khác",
+    "hàng khác",
+    "mẫu khác",
+    "sản phẩm khác",
+    "sản phẩm mới",
+    "mẫu mới",
+    "còn mẫu nào nữa",
+    "có đa dạng không",
+    "còn kiểu nào",
+    "còn loại nào",
+    "xem thêm sản phẩm",
+    "cho em xem thêm",
+    "còn cái nào",
+    "còn cái gì",
+    "còn gì nữa",
+    "có nhiều mẫu không",
+    "có đa dạng mẫu không",
+    "còn mẫu gì",
+    "có nhiều loại không",
+    "còn loại gì",
+    "có mẫu nào hot",
+    "có sản phẩm nào hot",
+    "có sản phẩm nào bán chạy",
+    "có sản phẩm nào mới nhất",
+    "có sản phẩm mới không",
+    "có hàng mới không",
+    "cập nhật mẫu mới",
+    "hàng mới về",
+]
 
 # ============================================
 # CACHE CHO TÊN FANPAGE
@@ -464,6 +628,98 @@ Hãy phân tích xem khách có yêu cầu RÕ RÀNG xem ảnh sản phẩm HI�
         return {"intent": "general", "confidence": 0.3, "reason": f"Error: {str(e)}"}
 
 # ============================================
+# QUYẾT ĐỊNH MS THÔNG MINH
+# ============================================
+
+def decide_which_ms_to_use(uid: str, current_ms: str, potential_ms: str, text: str) -> str:
+    """
+    Quyết định thông minh nên dùng MS nào
+    Trả về MS nên sử dụng, hoặc "GUIDE_TO_SHOP" nếu là hướng dẫn vào gian hàng
+    """
+    ctx = USER_CONTEXT[uid]
+    text_lower = text.lower()
+    
+    # 1. Xử lý từ khóa yêu cầu sản phẩm khác - KHÔNG thay đổi MS
+    if any(kw in text_lower for kw in CHANGE_PRODUCT_KEYWORDS):
+        return "GUIDE_TO_SHOP"  # Special value để xử lý riêng
+    
+    # 2. Nếu có MS tiềm năng trong tin nhắn
+    if potential_ms and potential_ms in PRODUCTS:
+        # Kiểm tra có phải yêu cầu chuyển sản phẩm không
+        if is_explicit_product_switch_request(text, current_ms, potential_ms):
+            return potential_ms
+        else:
+            # Không phải yêu cầu chuyển, giữ nguyên current_ms hoặc dùng potential_ms nếu không có current_ms
+            return current_ms or potential_ms
+    
+    # 3. Nếu có current_ms và tin nhắn liên quan đến sản phẩm hiện tại
+    if current_ms and current_ms in PRODUCTS:
+        if is_about_current_product(text, current_ms):
+            return current_ms
+    
+    # 4. Nếu có referral từ ADS với MS
+    if ctx.get("referral_source") == "ADS" and ctx.get("last_ms"):
+        return ctx["last_ms"]
+    
+    # 5. Nếu có catalog follow-up
+    last_catalog_time = ctx.get("catalog_view_time", 0)
+    if time.time() - last_catalog_time < 30 and ctx.get("last_catalog_product"):
+        return ctx["last_catalog_product"]
+    
+    # 6. Trả về current_ms nếu có, hoặc None
+    return current_ms
+
+def is_explicit_product_switch_request(text: str, current_ms: str, new_ms: str) -> bool:
+    """Kiểm tra có phải yêu cầu chuyển sản phẩm rõ ràng không"""
+    text_lower = text.lower()
+    text_upper = text.upper()
+    
+    # 1. Tin nhắn chỉ chứa mã sản phẩm mới
+    if re.match(r'^\s*MS\d+\s*$', text, re.IGNORECASE):
+        return True
+    
+    # 2. Có từ khóa "mã", "sản phẩm" kèm theo mã mới
+    if any(keyword in text_lower for keyword in ["mã", "sản phẩm", "sp", "product"]):
+        # Tìm mã trong tin nhắn
+        ms_in_text = detect_ms_from_text(text)
+        if ms_in_text == new_ms:
+            return True
+    
+    # 3. Có từ "xem", "cho xem", "gửi" kèm mã
+    if any(verb in text_lower for verb in ["xem", "cho xem", "gửi", "show"]):
+        # Và có mã trong tin nhắn
+        if new_ms in text_upper:
+            return True
+    
+    # 4. Không phải yêu cầu chuyển
+    return False
+
+def is_about_current_product(text: str, current_ms: str) -> bool:
+    """Kiểm tra tin nhắn có liên quan đến sản phẩm hiện tại không"""
+    text_lower = text.lower()
+    
+    # Từ khóa hỏi về thuộc tính sản phẩm
+    product_attribute_keywords = [
+        "giá", "bao nhiêu tiền", "màu", "màu sắc", "size", "kích thước",
+        "ảnh", "hình", "hình ảnh", "mô tả", "thông tin", "chi tiết",
+        "còn hàng", "tồn kho", "có sẵn", "vận chuyển", "ship",
+        "đặt hàng", "mua", "order", "chốt", "thanh toán"
+    ]
+    
+    # Nếu có từ khóa thuộc tính, coi như hỏi về sản phẩm hiện tại
+    for keyword in product_attribute_keywords:
+        if keyword in text_lower:
+            return True
+    
+    # Các từ khóa trung lập (không ảnh hưởng đến context)
+    neutral_keywords = ["ok", "ừ", "được", "vâng", "dạ", "cảm ơn", "thanks", "thank you"]
+    
+    if any(keyword in text_lower for keyword in neutral_keywords):
+        return True
+    
+    return False
+
+# ============================================
 # XỬ LÝ CATALOG FOLLOWUP
 # ============================================
 
@@ -504,7 +760,7 @@ def handle_catalog_followup(uid: str, text: str) -> bool:
         return True
     
     # Nếu không phải xem ảnh, để Function Calling xử lý
-    handle_text_with_function_calling(uid, text)
+    handle_text_with_function_calling_enhanced(uid, text)
     return True
 
 # ============================================
@@ -537,7 +793,7 @@ def handle_ads_referral_product(uid: str, text: str) -> bool:
             return True
         
         # Để Function Calling xử lý
-        handle_text_with_function_calling(uid, text)
+        handle_text_with_function_calling_enhanced(uid, text)
         return True
     
     return False
@@ -908,6 +1164,81 @@ def create_search_text_from_analysis(analysis: dict) -> str:
         search_text_normalized = search_text_normalized.replace(f" {word} ", " ")
     
     return search_text_normalized
+
+# ============================================
+# TÌM SẢN PHẨM THEO TỪ KHÓA
+# ============================================
+
+def find_product_by_keywords(text: str) -> Optional[str]:
+    """Tìm sản phẩm dựa trên từ khóa trong tin nhắn"""
+    if not text or not PRODUCTS:
+        return None
+    
+    text_lower = text.lower()
+    normalized_text = normalize_vietnamese(text_lower)
+    
+    print(f"[KEYWORD SEARCH] Tìm sản phẩm cho: {text_lower}")
+    
+    # Ánh xạ từ khóa -> mã sản phẩm (có thể mở rộng)
+    keyword_to_ms = {
+        "váy và áo đỏ": "MS000004",
+        "bộ váy và áo đỏ": "MS000004", 
+        "áo đỏ": "MS000004",
+        "set len": "MS000004",
+        "váy liền": "MS000004",
+        "len dáng dài": "MS000004",
+        "che khuyết điểm": "MS000004",
+        "nàng mũm mĩm": "MS000004",
+    }
+    
+    # Kiểm tra ánh xạ trực tiếp
+    for keyword, ms in keyword_to_ms.items():
+        if keyword in normalized_text and ms in PRODUCTS:
+            print(f"[KEYWORD MATCH] Tìm thấy qua ánh xạ: {keyword} -> {ms}")
+            return ms
+    
+    # Tìm kiếm động trong tên và mô tả sản phẩm
+    best_match = None
+    best_score = 0
+    
+    for ms, product in PRODUCTS.items():
+        score = 0
+        
+        # Tên sản phẩm
+        product_name = product.get('Ten', '').lower()
+        product_name_norm = normalize_vietnamese(product_name)
+        
+        # Mô tả
+        product_desc = product.get('MoTa', '').lower()
+        product_desc_norm = normalize_vietnamese(product_desc)
+        
+        # Màu sắc
+        product_colors = product.get('màu (Thuộc tính)', '').lower()
+        product_colors_norm = normalize_vietnamese(product_colors)
+        
+        # Tách các từ trong tin nhắn
+        text_words = set(normalized_text.split())
+        
+        # Tính điểm cho tên sản phẩm
+        for word in text_words:
+            if len(word) > 2:  # Bỏ qua từ quá ngắn
+                if word in product_name_norm:
+                    score += 3
+                if word in product_desc_norm:
+                    score += 2
+                if word in product_colors_norm:
+                    score += 2
+        
+        # Ưu tiên sản phẩm có điểm cao nhất
+        if score > best_score:
+            best_score = score
+            best_match = ms
+    
+    if best_match and best_score >= 2:  # Ngưỡng tối thiểu
+        print(f"[KEYWORD SEARCH] Tìm thấy tốt nhất: {best_match} (điểm: {best_score})")
+        return best_match
+    
+    return None
 
 # ============================================
 # TÌM SẢN PHẨM VỚI ĐỘ CHÍNH XÁC CAO
@@ -1381,76 +1712,6 @@ def get_variant_image(ms: str, color: str, size: str) -> str:
     return urls[0] if urls else ""
 
 # ============================================
-# XỬ LÝ TRỰC TIẾP CÂU HỎI VỀ SẢN PHẨM (FIX LỖI)
-# ============================================
-
-def handle_product_query_directly(uid: str, text: str) -> bool:
-    """
-    Xử lý trực tiếp các câu hỏi về sản phẩm khi đã biết mã.
-    Trả về True nếu đã xử lý, False nếu để GPT xử lý.
-    """
-    ctx = USER_CONTEXT[uid]
-    last_ms = ctx.get("last_ms")
-    
-    if not last_ms or last_ms not in PRODUCTS:
-        return False
-    
-    text_lower = text.lower().strip()
-    
-    print(f"[DIRECT HANDLER] Kiểm tra: uid={uid}, last_ms={last_ms}, text={text}")
-    
-    # 1. Câu hỏi về giá
-    price_queries = ["giá", "bao nhiêu", "giá bao nhiêu", "giá cả", "giá tiền", "bao nhiêu tiền", "cost", "price"]
-    if any(query in text_lower for query in price_queries):
-        print(f"[DIRECT HANDLER] User {uid} hỏi giá {last_ms}: {text}")
-        send_product_info_debounced(uid, last_ms)
-        return True
-    
-    # 2. Câu hỏi về thông tin sản phẩm
-    info_queries = ["thông tin", "mô tả", "tính năng", "chức năng", "có gì", "như thế nào", "chi tiết", "giới thiệu"]
-    if any(query in text_lower for query in info_queries):
-        print(f"[DIRECT HANDLER] User {uid} hỏi thông tin {last_ms}: {text}")
-        send_product_info_debounced(uid, last_ms)
-        return True
-    
-    # 3. Câu hỏi về ảnh
-    image_queries = ["ảnh", "hình", "xem ảnh", "gửi ảnh", "cho xem hình", "hình ảnh", "photo", "picture", "image"]
-    if any(query in text_lower for query in image_queries):
-        print(f"[DIRECT HANDLER] User {uid} hỏi ảnh {last_ms}: {text}")
-        send_all_product_images(uid, last_ms)
-        return True
-    
-    # 4. Câu hỏi về mua hàng
-    order_queries = ["mua", "đặt", "chốt", "lấy", "lấy hàng", "đặt hàng", "order", "purchase", "buy"]
-    if any(query in text_lower for query in order_queries):
-        print(f"[DIRECT HANDLER] User {uid} muốn mua {last_ms}: {text}")
-        domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
-        order_link = f"{domain}/order-form?ms={last_ms}&uid={uid}"
-        send_message(uid, f"Dạ mời anh/chị đặt hàng sản phẩm [{last_ms}] tại đây nhé:\n{order_link}")
-        return True
-    
-    # 5. Câu hỏi về tồn kho, còn hàng
-    stock_queries = ["còn hàng", "còn không", "tồn kho", "hết hàng", "có hàng", "stock", "available"]
-    if any(query in text_lower for query in stock_queries):
-        print(f"[DIRECT HANDLER] User {uid} hỏi tồn kho {last_ms}: {text}")
-        if last_ms in PRODUCTS:
-            product = PRODUCTS[last_ms]
-            product_name = product.get('Ten', '')
-            send_message(uid, f"Dạ sản phẩm [{last_ms}] {product_name} vẫn còn hàng anh/chị ạ! Em sẽ gửi thông tin chi tiết:")
-            time.sleep(0.5)
-            send_product_info_debounced(uid, last_ms)
-        return True
-    
-    # 6. Câu hỏi về màu sắc, size
-    attribute_queries = ["màu", "color", "size", "kích thước", "mẫu", "model"]
-    if any(query in text_lower for query in attribute_queries):
-        print(f"[DIRECT HANDLER] User {uid} hỏi thuộc tính {last_ms}: {text}")
-        send_product_info_debounced(uid, last_ms)
-        return True
-    
-    return False
-
-# ============================================
 # OPENAI FUNCTION CALLING (TÍCH HỢP TỪ AI_STUDIO_CODE)
 # ============================================
 
@@ -1464,7 +1725,10 @@ def get_tools_definition():
                 "description": "Lấy thông tin chi tiết sản phẩm (giá, mô tả, màu sắc) khi khách hỏi hoặc khi cần tư vấn.",
                 "parameters": {
                     "type": "object",
-                    "properties": {"ms": {"type": "string", "description": "Mã sản phẩm MSxxxxxx"}},
+                    "properties": {
+                        "ms": {"type": "string", "description": "Mã sản phẩm MSxxxxxx"},
+                        "force_new": {"type": "boolean", "description": "Bắt buộc tư vấn sản phẩm mới, bỏ qua sản phẩm hiện tại"}
+                    },
                     "required": ["ms"]
                 }
             }
@@ -1476,7 +1740,10 @@ def get_tools_definition():
                 "description": "Gửi ảnh thật của sản phẩm cho khách xem.",
                 "parameters": {
                     "type": "object",
-                    "properties": {"ms": {"type": "string", "description": "Mã sản phẩm"}},
+                    "properties": {
+                        "ms": {"type": "string", "description": "Mã sản phẩm"},
+                        "reason": {"type": "string", "description": "Lý do gửi ảnh (theo yêu cầu, tự động, etc.)"}
+                    },
                     "required": ["ms"]
                 }
             }
@@ -1488,7 +1755,11 @@ def get_tools_definition():
                 "description": "Cung cấp link form đặt hàng khi khách muốn mua, chốt đơn hoặc đặt hàng.",
                 "parameters": {
                     "type": "object",
-                    "properties": {"ms": {"type": "string", "description": "Mã sản phẩm"}},
+                    "properties": {
+                        "ms": {"type": "string", "description": "Mã sản phẩm"},
+                        "color": {"type": "string", "description": "Màu sắc (nếu có)"},
+                        "size": {"type": "string", "description": "Size (nếu có)"}
+                    },
                     "required": ["ms"]
                 }
             }
@@ -1500,33 +1771,112 @@ def get_tools_definition():
                 "description": "Hiển thị danh sách các sản phẩm mới hoặc nổi bật dưới dạng thẻ quay.",
                 "parameters": {"type": "object", "properties": {}}
             }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "check_product_availability",
+                "description": "Kiểm tra và thông báo tình trạng tồn kho của sản phẩm.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "ms": {"type": "string", "description": "Mã sản phẩm"}
+                    },
+                    "required": ["ms"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "handle_general_inquiry",
+                "description": "Xử lý các câu hỏi chung, chào hỏi, hỏi đáp thông tin shop.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "inquiry_type": {"type": "string", "description": "Loại câu hỏi: greeting, question, other"}
+                    },
+                    "required": ["inquiry_type"]
+                }
+            }
         }
     ]
 
-def execute_tool(uid, name, args):
-    """Thực thi công cụ được gọi bởi OpenAI"""
+def execute_tool_enhanced(uid, name, args):
+    """Thực thi công cụ với quản lý context"""
     ctx = USER_CONTEXT[uid]
     ms = args.get("ms", "").upper() or ctx.get("last_ms")
     domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
+    
+    # Xử lý giá trị đặc biệt
+    if ms == "GUIDE_TO_SHOP":
+        guide_message = """Dạ, hiện tại shop có nhiều mẫu mã đa dạng ạ!
+
+Để xem thêm nhiều sản phẩm khác, anh/chị có thể:
+1. Bấm vào biểu tượng 🛒 rổ hàng trên Messenger để vào gian hàng
+2. Xem danh mục sản phẩm đầy đủ tại Facebook Shop của shop
+3. Hoặc gõ "xem sản phẩm" để em gửi danh sách một số sản phẩm nổi bật
+
+Anh/chị muốn xem sản phẩm nào cụ thể ạ?"""
+        send_message(uid, guide_message)
+        return "Đã hướng dẫn vào gian hàng"
 
     if name == "get_product_info":
+        force_new = args.get("force_new", False)
+        
         if ms in PRODUCTS:
-            ctx["last_ms"] = ms
+            # Cập nhật context nếu đây là sản phẩm mới
+            if ms != ctx.get("last_ms"):
+                ctx["last_ms"] = ms
+                update_product_context(uid, ms)
+            
+            # Gửi thông tin sản phẩm
             send_product_info_debounced(uid, ms)
-            return "Đã gửi thông tin sản phẩm."
+            
+            # Nếu force_new, thêm thông báo
+            if force_new:
+                send_message(uid, f"✅ Đã chuyển sang tư vấn sản phẩm [{ms}] ạ!")
+            
+            return f"Đã gửi thông tin sản phẩm {ms}"
+        
         return "Sản phẩm không tồn tại."
 
     elif name == "send_product_images":
         if ms in PRODUCTS:
+            reason = args.get("reason", "theo yêu cầu")
+            print(f"[SEND IMAGES] Gửi ảnh {ms} - Lý do: {reason}")
             send_all_product_images(uid, ms)
             return "Đã gửi ảnh thành công."
+        
         return "Sản phẩm này hiện chưa có ảnh mẫu."
 
     elif name == "provide_order_link":
         if ms in PRODUCTS:
-            link = f"{domain}/order-form?ms={ms}&uid={uid}"
-            send_message(uid, f"Dạ mời anh/chị đặt hàng sản phẩm [{ms}] tại đây nhé:\n{link}")
+            color = args.get("color", "")
+            size = args.get("size", "")
+            
+            # Thêm thông tin màu/size vào link nếu có
+            params = f"ms={ms}&uid={uid}"
+            if color:
+                params += f"&color={quote(color)}"
+            if size:
+                params += f"&size={quote(size)}"
+            
+            link = f"{domain}/order-form?{params}"
+            
+            # Tin nhắn động dựa trên màu/size
+            if color and size:
+                order_msg = f"Dạ, sản phẩm màu {color} size {size} còn hàng ạ! ✅\nĐặt hàng ngay tại đây:\n{link}"
+            elif color:
+                order_msg = f"Dạ, sản phẩm màu {color} còn hàng ạ! ✅\nĐặt hàng ngay tại đây:\n{link}"
+            elif size:
+                order_msg = f"Dạ, sản phẩm size {size} còn hàng ạ! ✅\nĐặt hàng ngay tại đây:\n{link}"
+            else:
+                order_msg = f"Dạ, sản phẩm còn hàng ạ! ✅\nĐặt hàng ngay tại đây:\n{link}"
+            
+            send_message(uid, order_msg)
             return "Đã gửi link đặt hàng."
+        
         return "Em chưa rõ mã sản phẩm khách muốn đặt."
 
     elif name == "show_featured_carousel":
@@ -1545,43 +1895,117 @@ def execute_tool(uid, name, args):
         send_carousel_template(uid, elements)
         return "Đã hiển thị danh sách sản phẩm."
     
+    elif name == "check_product_availability":
+        if ms in PRODUCTS:
+            # LUÔN báo còn hàng
+            product = PRODUCTS[ms]
+            product_name = product.get('Ten', '')
+            
+            # Lấy thông tin màu/size có sẵn
+            colors = product.get("màu (Thuộc tính)", "Mặc định")
+            sizes = product.get("size (Thuộc tính)", "Mặc định")
+            
+            availability_msg = f"Dạ, sản phẩm [{ms}] {product_name} CÒN HÀNG ạ! ✅\n\n"
+            availability_msg += f"🎨 Màu sắc có sẵn: {colors}\n"
+            availability_msg += f"📏 Size có sẵn: {sizes}\n\n"
+            availability_msg += "Anh/chị muốn đặt hàng ngay không ạ?"
+            
+            send_message(uid, availability_msg)
+            return "Đã kiểm tra tồn kho"
+        
+        return "Không tìm thấy sản phẩm"
+    
+    elif name == "handle_general_inquiry":
+        inquiry_type = args.get("inquiry_type", "greeting")
+        fanpage_name = get_fanpage_name_from_api()
+        
+        if inquiry_type == "greeting":
+            current_ms = ctx.get("last_ms")
+            
+            if current_ms and current_ms in PRODUCTS:
+                product = PRODUCTS[current_ms]
+                greeting_msg = f"""Chào anh/chị! 👋 
+Em là trợ lý AI của {fanpage_name}.
+
+Em thấy anh/chị đang quan tâm đến sản phẩm **[{current_ms}] {product.get('Ten', '')}**.
+
+Anh/chị muốn em tư vấn thông tin gì về sản phẩm này ạ?"""
+            else:
+                greeting_msg = f"""Chào anh/chị! 👋 
+Em là trợ lý AI của {fanpage_name}.
+
+Để em tư vấn chính xác, anh/chị vui lòng:
+1. Gửi mã sản phẩm (ví dụ: MS123456)
+2. Hoặc gõ "xem sản phẩm" để xem danh sách
+3. Hoặc mô tả sản phẩm bạn đang tìm
+
+Anh/chị quan tâm sản phẩm nào ạ?"""
+            
+            send_message(uid, greeting_msg)
+            return "Đã xử lý lời chào"
+        
+        return "Đã xử lý câu hỏi chung"
+    
     return "Hành động không xác định."
 
-def handle_text_with_function_calling(uid: str, text: str):
-    """Xử lý tin nhắn bằng OpenAI Function Calling"""
+def handle_text_with_function_calling_enhanced(uid: str, text: str):
+    """Xử lý tin nhắn bằng OpenAI Function Calling với quản lý context thông minh"""
     load_products()
     ctx = USER_CONTEXT[uid]
     
-    # DEBUG: In thông tin context
-    print(f"[DEBUG FUNCTION CALLING] User {uid}:")
-    print(f"  - text: {text}")
-    print(f"  - ctx['last_ms']: {ctx.get('last_ms')}")
-    print(f"  - PRODUCTS keys sample: {list(PRODUCTS.keys())[:5]}")
+    # 1. Xác định MS từ context và tin nhắn
+    current_ms = ctx.get("last_ms")
+    potential_ms = detect_ms_from_text(text)
     
-    # Logic nhận diện mã nhanh
-    quick_ms = detect_ms_from_text(text)
-    if quick_ms: 
-        ctx["last_ms"] = quick_ms
+    # 2. Quyết định MS nào sẽ sử dụng
+    final_ms = decide_which_ms_to_use(uid, current_ms, potential_ms, text)
     
-    # ========== FIX: XỬ LÝ TRỰC TIẾP CÂU HỎI VỀ SẢN PHẨM ==========
-    if handle_product_query_directly(uid, text):
-        return  # Đã xử lý xong, không cần gọi GPT
-
+    # 3. Cập nhật context nếu cần
+    if final_ms and final_ms != current_ms and final_ms != "GUIDE_TO_SHOP":
+        print(f"[CONTEXT UPDATE] Chuyển MS: {current_ms} -> {final_ms}")
+        ctx["last_ms"] = final_ms
+        update_product_context(uid, final_ms)
+    
+    # 4. Chuẩn bị system prompt với context đầy đủ
     fanpage_name = get_fanpage_name_from_api()
+    current_product = PRODUCTS.get(final_ms, {}) if final_ms and final_ms != "GUIDE_TO_SHOP" else {}
     
     system_prompt = f"""Bạn là nhân viên bán hàng của {fanpage_name}.
-    CHỈ trả lời dựa trên dữ liệu thật. KHÔNG bịa đặt thông tin.
-    Nếu khách hỏi tồn kho, luôn khẳng định CÒN HÀNG.
-    Xưng em, gọi anh/chị. Trả lời cực ngắn gọn (dưới 3 dòng).
-    Sản phẩm khách đang quan tâm: {ctx.get('last_ms', 'Chưa xác định')}.
-    Khi khách muốn mua hoặc chốt, dùng công cụ provide_order_link."""
     
+# THÔNG TIN NGỮ CẢNH HIỆN TẠI:
+- Sản phẩm khách đang quan tâm: {"Chưa xác định" if not final_ms or final_ms == "GUIDE_TO_SHOP" else f"[{final_ms}] {current_product.get('Ten', '')}"}
+- Lịch sử sản phẩm đã xem: {', '.join(ctx.get('product_history', [])[:3]) if ctx.get('product_history') else 'Chưa có'}
+- Nguồn đến: {ctx.get('referral_source', 'trực tiếp')}
+
+# QUY TẮC ỨNG XỬ:
+1. LUÔN TRUNG THỰC: Chỉ trả lời dựa trên dữ liệu thật. KHÔNG bịa đặt thông tin.
+2. LUÔN BÁO CÒN HÀNG: Nếu khách hỏi tồn kho, luôn khẳng định CÒN HÀNG.
+3. XƯNG HÔ: Xưng em, gọi anh/chị.
+4. ĐỘ DÀI: Trả lời cực ngắn gọn (dưới 3 dòng), trừ khi khách yêu cầu chi tiết.
+5. ƯU TIÊN: Khi khách muốn mua hoặc chốt, LUÔN dùng công cụ provide_order_link.
+6. CONTEXT AWARE:
+   - Nếu khách hỏi về sản phẩm HIỆN TẠI: Tư vấn về sản phẩm đó
+   - Nếu khách hỏi chung chung: Gợi ý sản phẩm đang quan tâm
+   - Nếu khách hỏi về sản phẩm KHÁC: Chỉ chuyển khi có yêu cầu RÕ RÀNG
+
+# XỬ LÝ TÌNH HUỐNG ĐẶC BIỆT:
+1. Khách nói "xin chào", "hello": Chào lại và giới thiệu sản phẩm đang quan tâm (nếu có)
+2. Khách nói "ok", "ừ", "được": Tiếp tục cuộc trò chuyện hiện tại
+3. Khách hỏi "có sản phẩm nào khác": Hướng dẫn vào gian hàng Facebook Shop
+4. Khách hỏi về màu/size/giá: Cung cấp thông tin từ sản phẩm hiện tại
+
+# CÔNG CỤ SẴN CÓ:
+{json.dumps([tool['function']['name'] for tool in get_tools_definition()], indent=2)}
+
+Hãy phân tích tin nhắn và sử dụng công cụ phù hợp."""
+
     messages = [{"role": "system", "content": system_prompt}]
     
     # Thêm lịch sử hội thoại
     for h in ctx["conversation_history"][-6:]: 
         messages.append(h)
     
+    # Thêm tin nhắn hiện tại
     messages.append({"role": "user", "content": text})
 
     try:
@@ -1590,22 +2014,46 @@ def handle_text_with_function_calling(uid: str, text: str):
             messages=messages,
             tools=get_tools_definition(),
             tool_choice="auto",
-            temperature=0.1
+            temperature=0.1,
+            max_tokens=500
         )
         
         msg = response.choices[0].message
         
         if msg.tool_calls:
             messages.append(msg)
-            for tool in msg.tool_calls:
-                res = execute_tool(uid, tool.function.name, json.loads(tool.function.arguments))
-                messages.append({"role": "tool", "tool_call_id": tool.id, "name": tool.function.name, "content": res})
             
-            # Lấy phản hồi cuối cùng từ GPT
+            for tool in msg.tool_calls:
+                func_name = tool.function.name
+                func_args = json.loads(tool.function.arguments)
+                
+                print(f"[FUNCTION CALLING] Gọi công cụ: {func_name} với args: {func_args}")
+                
+                # Xử lý trước khi gọi công cụ
+                if func_name == "get_product_info":
+                    ms_arg = func_args.get("ms", "").upper()
+                    force_new = func_args.get("force_new", False)
+                    
+                    # Nếu không có MS trong args, dùng MS hiện tại
+                    if not ms_arg and final_ms and final_ms != "GUIDE_TO_SHOP":
+                        func_args["ms"] = final_ms
+                    elif ms_arg and ms_arg != final_ms and not force_new:
+                        # Hỏi xác nhận trước khi chuyển sản phẩm
+                        ctx["pending_product_switch"] = ms_arg
+                        confirmation_msg = f"Anh/chị muốn chuyển sang xem sản phẩm [{ms_arg}] thay vì sản phẩm hiện tại [{final_ms}] không ạ?"
+                        send_message(uid, confirmation_msg)
+                        ctx["conversation_history"].append({"role": "assistant", "content": confirmation_msg})
+                        return
+                
+                res = execute_tool_enhanced(uid, func_name, func_args)
+                messages.append({"role": "tool", "tool_call_id": tool.id, "name": func_name, "content": res})
+            
+            # Lấy phản hồi cuối từ GPT
             final_res = client.chat.completions.create(
                 model="gpt-4o-mini", 
                 messages=messages,
-                temperature=0.1
+                temperature=0.1,
+                max_tokens=300
             )
             reply = final_res.choices[0].message.content
         else:
@@ -1613,12 +2061,9 @@ def handle_text_with_function_calling(uid: str, text: str):
 
         if reply:
             send_message(uid, reply)
-            # Lưu lịch sử hội thoại
             ctx["conversation_history"].append({"role": "user", "content": text})
             ctx["conversation_history"].append({"role": "assistant", "content": reply})
-            # Giới hạn lịch sử
-            if len(ctx["conversation_history"]) > 10:
-                ctx["conversation_history"] = ctx["conversation_history"][-10:]
+            ctx["conversation_history"] = ctx["conversation_history"][-10:]
 
     except Exception as e:
         print(f"Chat Error: {e}")
@@ -1655,8 +2100,14 @@ def update_product_context(uid: str, ms: str):
     print(f"[CONTEXT UPDATE] User {uid}: last_ms={ms}, history={ctx['product_history']}")
 
 def get_relevant_product_for_question(uid: str, text: str) -> str | None:
-    """Tìm sản phẩm phù hợp nhất cho câu hỏi dựa trên ngữ cảnh"""
+    """Tìm sản phẩm phù hợp nhất cho câu hỏi dựa trên ngữ cảnh và xử lý từ khóa chuyển đổi sản phẩm"""
     ctx = USER_CONTEXT[uid]
+    lower = text.lower()
+    
+    # **QUAN TRỌNG: Kiểm tra từ khóa yêu cầu sản phẩm khác trước**
+    if any(kw in lower for kw in CHANGE_PRODUCT_KEYWORDS):
+        # Hướng dẫn vào gian hàng Facebook Shop
+        return "GUIDE_TO_FACEBOOK_SHOP"
     
     # 1. Tìm mã sản phẩm trong tin nhắn
     ms_from_text = detect_ms_from_text(text)
@@ -1684,6 +2135,12 @@ def get_relevant_product_for_question(uid: str, text: str) -> str | None:
         if ms in PRODUCTS:
             print(f"[CONTEXT] Sử dụng từ product history: {ms}")
             return ms
+    
+    # 5. Tìm theo từ khóa trong sản phẩm
+    found_ms = find_product_by_keywords(text)
+    if found_ms and found_ms in PRODUCTS:
+        print(f"[CONTEXT] Tìm thấy sản phẩm theo từ khóa: {found_ms}")
+        return found_ms
     
     return None
 
@@ -1957,8 +2414,9 @@ def send_fallback_suggestions(uid: str):
     """Gửi gợi ý fallback khi không tìm thấy sản phẩm phù hợp"""
     send_message(uid, "Anh/chị có thể:")
     send_message(uid, "1. Gửi thêm ảnh góc khác của sản phẩm")
-    send_message(uid, "2. Mô tả chi tiết hơn về sản phẩm này")
-    send_message(uid, "3. Hoặc gửi mã sản phẩm nếu anh/chị đã biết mã")
+    send_message(uid, "2. Gõ 'xem sản phẩm' để xem toàn bộ danh mục")
+    send_message(uid, "3. Mô tả chi tiết hơn về sản phẩm này")
+    send_message(uid, "4. Hoặc gửi mã sản phẩm nếu anh/chị đã biết mã")
 
 # ============================================
 # HANDLE ORDER FORM STATE
@@ -2043,11 +2501,48 @@ def detect_ms_from_text(text: str) -> Optional[str]:
     return None
 
 # ============================================
-# HANDLE TEXT - XỬ LÝ VỚI FUNCTION CALLING
+# XỬ LÝ PENDING PRODUCT SWITCH
 # ============================================
 
-def handle_text(uid: str, text: str):
-    """Xử lý tin nhắn văn bản từ người dùng - Sử dụng Function Calling"""
+def handle_pending_product_switch(uid: str, text: str) -> bool:
+    """Xử lý xác nhận chuyển sản phẩm đang chờ"""
+    ctx = USER_CONTEXT[uid]
+    
+    if "pending_product_switch" not in ctx:
+        return False
+    
+    new_ms = ctx["pending_product_switch"]
+    text_lower = text.lower()
+    
+    # Kiểm tra phản hồi xác nhận
+    if any(response in text_lower for response in ["có", "yes", "đúng", "chuẩn", "ok", "ừ", "đồng ý"]):
+        # Xác nhận chuyển sản phẩm
+        ctx["last_ms"] = new_ms
+        update_product_context(uid, new_ms)
+        del ctx["pending_product_switch"]
+        
+        # Gửi thông tin sản phẩm mới
+        send_message(uid, f"✅ Đã chuyển sang sản phẩm [{new_ms}] ạ!")
+        send_product_info_debounced(uid, new_ms)
+        return True
+    
+    elif any(response in text_lower for response in ["không", "no", "thôi", "bỏ", "không cần"]):
+        # Không chuyển, giữ nguyên sản phẩm hiện tại
+        current_ms = ctx.get("last_ms")
+        del ctx["pending_product_switch"]
+        
+        if current_ms:
+            send_message(uid, f"✅ Vẫn tiếp tục với sản phẩm [{current_ms}] ạ!")
+        return True
+    
+    return False
+
+# ============================================
+# HANDLE TEXT - XỬ LÝ VỚI FUNCTION CALLING ENHANCED
+# ============================================
+
+def handle_text_enhanced(uid: str, text: str):
+    """Xử lý tin nhắn với Function Calling và context management"""
     if not text or len(text.strip()) == 0:
         return
     
@@ -2077,51 +2572,69 @@ def handle_text(uid: str, text: str):
         load_products()
         ctx["postback_count"] = 0
 
+        # 1. Kiểm tra pending product switch
+        if handle_pending_product_switch(uid, text):
+            ctx["processing_lock"] = False
+            return
+
+        # 2. Xử lý order form (giữ nguyên)
         if handle_order_form_step(uid, text):
             ctx["processing_lock"] = False
             return
         
-        # ƯU TIÊN: Xử lý follow-up từ catalog
-        if handle_catalog_followup(uid, text):
-            ctx["processing_lock"] = False
-            return
+        # 3. Xử lý từ khóa đặc biệt (giữ nguyên logic hiện tại)
+        lower = text.lower()
         
-        # ƯU TIÊN: Xử lý tin nhắn sau click quảng cáo ADS
-        if handle_ads_referral_product(uid, text):
-            ctx["processing_lock"] = False
-            return
-
-        # Tìm sản phẩm phù hợp
-        current_ms = get_relevant_product_for_question(uid, text)
-        
-        # **QUAN TRỌNG: Cập nhật context nếu tìm thấy sản phẩm**
-        if current_ms and current_ms in PRODUCTS and current_ms != ctx.get("last_ms"):
-            print(f"[CONTEXT UPDATE] Cập nhật last_ms từ {ctx.get('last_ms')} -> {current_ms}")
-            ctx["last_ms"] = current_ms
-            update_product_context(uid, current_ms)
-        
-        # PHÂN TÍCH INTENT KHI CÓ SẢN PHẨM HIỆN TẠI
-        if current_ms and current_ms in PRODUCTS:
-            # Phân tích intent với GPT để xác định có phải yêu cầu xem ảnh không
-            intent_result = analyze_intent_with_gpt(uid, text, current_ms)
+        # ƯU TIÊN: Từ khóa đặt hàng
+        if any(kw in lower for kw in ORDER_KEYWORDS):
+            current_ms = ctx.get("last_ms")
             
-            # Nếu intent là xem ảnh và confidence cao (>0.85)
-            if (intent_result.get('intent') == 'view_images' and 
-                intent_result.get('confidence', 0) > 0.85):
+            if current_ms and current_ms in PRODUCTS:
+                domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
+                order_link = f"{domain}/order-form?ms={current_ms}&uid={uid}"
                 
-                print(f"[IMAGE REQUEST DETECTED] User {uid} yêu cầu xem ảnh sản phẩm {current_ms}")
-                print(f"[INTENT DETAILS] Confidence: {intent_result.get('confidence')}, Reason: {intent_result.get('reason')}")
+                # Trích xuất màu/size đơn giản
+                color, size = extract_color_size_simple(text)
+                variant_info = ""
+                if color or size:
+                    variant_info = f" ({color if color else ''}{' - ' if color and size else ''}{size if size else ''})"
                 
-                # Gửi toàn bộ ảnh sản phẩm
-                send_all_product_images(uid, current_ms)
-                ctx["processing_lock"] = False  # Release lock sau khi gửi xong
+                # Reply cực ngắn - LUÔN BÁO CÒN HÀNG
+                reply = f"Dạ, sản phẩm{variant_info} còn hàng ạ!\nĐặt tại: {order_link}"
+                send_message(uid, reply)
+                
+                ctx["processing_lock"] = False
+                return
+        
+        # ƯU TIÊN: Từ khóa carousel
+        if any(kw in lower for kw in CAROUSEL_KEYWORDS):
+            if PRODUCTS:
+                send_message(uid, "Dạ, em đang lấy danh sách sản phẩm cho anh/chị...")
+                execute_tool_enhanced(uid, "show_featured_carousel", {})
+                ctx["processing_lock"] = False
                 return
             else:
-                print(f"[NO IMAGE REQUEST] Intent: {intent_result.get('intent')}, Confidence: {intent_result.get('confidence')}")
+                send_message(uid, "Hiện tại shop chưa có sản phẩm nào ạ. Vui lòng quay lại sau!")
+                ctx["processing_lock"] = False
+                return
         
-        # Sử dụng Function Calling để xử lý tin nhắn
-        print(f"[FUNCTION CALLING] User: {uid}, MS: {current_ms}, Text: {text}")
-        handle_text_with_function_calling(uid, text)
+        # ƯU TIÊN: Từ khóa yêu cầu sản phẩm khác
+        if any(kw in lower for kw in CHANGE_PRODUCT_KEYWORDS):
+            guide_message = """Dạ, hiện tại shop có nhiều mẫu mã đa dạng ạ!
+
+Để xem thêm nhiều sản phẩm khác, anh/chị có thể:
+1. Bấm vào biểu tượng 🛒 rổ hàng trên Messenger để vào gian hàng
+2. Xem danh mục sản phẩm đầy đủ tại Facebook Shop của shop
+3. Hoặc gõ "xem sản phẩm" để em gửi danh sách một số sản phẩm nổi bật
+
+Anh/chị muốn xem sản phẩm nào cụ thể ạ?"""
+            
+            send_message(uid, guide_message)
+            ctx["processing_lock"] = False
+            return
+        
+        # 4. Sử dụng Function Calling với context enhanced
+        handle_text_with_function_calling_enhanced(uid, text)
 
     except Exception as e:
         print(f"Error in handle_text for {uid}: {e}")
@@ -2438,7 +2951,9 @@ def webhook():
                 # **GIỮ NGUYÊN**: Tìm mã sản phẩm trong tin nhắn echo
                 detected_ms = detect_ms_from_text(echo_text)
                 
-                if detected_ms:
+                if detected_ms and detected_ms in PRODUCTS:
+                    print(f"[ECHO FCHAT] Phát hiện mã sản phẩm: {detected_ms} cho user: {recipient_id}")
+                    
                     # KIỂM TRA LOCK để tránh xử lý song song
                     ctx = USER_CONTEXT[recipient_id]
                     if ctx.get("processing_lock"):
@@ -2558,7 +3073,8 @@ Em là trợ lý AI của {FANPAGE_NAME}.
 
 Để em tư vấn chính xác, anh/chị vui lòng:
 1. Gửi mã sản phẩm (ví dụ: [MS123456])
-2. Hoặc mô tả sản phẩm bạn đang tìm
+2. Hoặc gõ "xem sản phẩm" để xem danh sách
+3. Hoặc mô tả sản phẩm bạn đang tìm
 
 Anh/chị quan tâm sản phẩm nào ạ?"""
                         send_message(sender_id, welcome_msg)
@@ -2599,7 +3115,8 @@ Em là trợ lý AI của {FANPAGE_NAME}.
 
 Để em tư vấn chính xác, anh/chị vui lòng:
 1. Gửi mã sản phẩm (ví dụ: [MS123456])
-2. Hoặc mô tả sản phẩm bạn đang tìm
+2. Hoặc gõ "xem sản phẩm" để xem danh sách
+3. Hoặc mô tả sản phẩm bạn đang tìm
 
 Anh/chị quan tâm sản phẩm nào ạ?"""
                         send_message(sender_id, welcome_msg)
@@ -2688,7 +3205,11 @@ Anh/chị quan tâm sản phẩm nào ạ?"""
                         print(f"[TEXT LOCKED] User {sender_id} đang được xử lý, bỏ qua text: {text[:50]}...")
                         continue
                     
-                    handle_text(sender_id, text)
+                    # Kiểm tra pending product switch trước
+                    if handle_pending_product_switch(sender_id, text):
+                        continue
+                    
+                    handle_text_enhanced(sender_id, text)
                 elif attachments:
                     for att in attachments:
                         if att.get("type") == "image":
@@ -3980,21 +4501,30 @@ def health_check():
         "address_form": "Open API - provinces.open-api.vn (dropdown 3 cấp)",
         "address_validation": "enabled",
         "phone_validation": "regex validation",
+        "order_response_mode": "SHORT - Chỉ báo còn hàng khi hỏi tồn kho",
         "price_detailed_response": "ENABLED (hiển thị chi tiết các biến thể giá)",
         "max_gpt_tokens": 150,
         "stock_assumption": "Chỉ báo khi hỏi tồn kho",
+        "order_keywords_priority": "HIGH",
         "context_tracking": "ENABLED (tracks last_ms and product_history)",
+        "change_product_keywords": f"{len(CHANGE_PRODUCT_KEYWORDS)} từ khóa được định nghĩa",
+        "facebook_shop_guidance": "ENABLED (hướng dẫn vào gian hàng khi yêu cầu sản phẩm khác)",
         "ads_context_handling": "ENABLED (không reset context khi có sản phẩm từ ADS)",
-        "openai_function_calling": "ENABLED (tích hợp từ ai_studio_code.py)",
+        "openai_function_calling": "ENHANCED (context-aware function calling)",
         "tools_available": [
             "get_product_info",
             "send_product_images", 
             "provide_order_link",
-            "show_featured_carousel"
+            "show_featured_carousel",
+            "check_product_availability",
+            "handle_general_inquiry"
         ],
         "function_calling_model": "gpt-4o-mini",
         "system_prompt_optimized": "True",
-        "conversation_history_tracking": "ENABLED (10 messages)"
+        "conversation_history_tracking": "ENABLED (10 messages)",
+        "context_lock_management": "ENABLED (thread-safe operations)",
+        "pending_product_switch": "ENABLED (confirmation before switching)",
+        "context_decision_logic": "ENABLED (smart MS decision making)"
     }, 200
 
 # ============================================
@@ -4008,8 +4538,8 @@ if __name__ == "__main__":
     print(f"🟢 Domain: {DOMAIN}")
     print(f"🟢 Google Sheets API: {'SẴN SÀNG' if GOOGLE_SHEET_ID and GOOGLE_SHEETS_CREDENTIALS_JSON else 'CHƯA CẤU HÌNH'}")
     print(f"🟢 Sheet ID: {GOOGLE_SHEET_ID[:20]}..." if GOOGLE_SHEET_ID else "🟡 Chưa cấu hình")
-    print(f"🟢 OpenAI Function Calling: {'TÍCH HỢP THÀNH CÔNG' if client else 'CHƯA CẤU HÌNH'}")
-    print(f"🟢 Tools Available: get_product_info, send_product_images, provide_order_link, show_featured_carousel")
+    print(f"🟢 OpenAI Function Calling: {'ENHANCED CONTEXT-AWARE' if client else 'CHƯA CẤU HÌNH'}")
+    print(f"🟢 Tools Available: get_product_info, send_product_images, provide_order_link, show_featured_carousel, check_product_availability, handle_general_inquiry")
     print(f"🟢 Image Processing: Base64 + Fallback URL")
     print(f"🟢 Search Algorithm: TF-IDF + Cosine Similarity")
     print(f"🟢 Image Carousel: 5 sản phẩm phù hợp nhất")
@@ -4040,14 +4570,15 @@ if __name__ == "__main__":
     print(f"🟢 ADS Follow-up Processing: BẬT (xử lý tin nhắn sau click quảng cáo)")
     print(f"🟢 Order Backup System: Local CSV khi Google Sheet không kết nối được")
     print(f"🟢 Context Tracking: BẬT (ghi nhớ last_ms và product_history)")
+    print(f"🟢 Change Product Keywords: {len(CHANGE_PRODUCT_KEYWORDS)} từ khóa")
+    print(f"🟢 Facebook Shop Guidance: BẬT (hướng dẫn vào gian hàng)")
     print(f"🟢 Price Detailed Response: BẬT (hiển thị chi tiết các biến thể giá)")
     print(f"🔴 QUAN TRỌNG: BOT CHỈ BÁO CÒN HÀNG KHI KHÁCH HỎI VỀ TỒN KHO")
-    print(f"🔴 GPT Reply Mode: FUNCTION CALLING (gpt-4o-mini)")
-    print(f"🔴 Order Priority: Function Calling quyết định")
-    print(f"🔴 Price Priority: Function Calling quyết định")
-    print(f"🔴 Function Calling Integration: HOÀN THÀNH - ĐÃ TÍCH HỢP TỪ AI_STUDIO_CODE.PY")
-    
-    print(f"\n🔧 QUAN TRỌNG: ĐÃ THÊM HÀM handle_product_query_directly()")
-    print(f"🔧 FIX: Bot sẽ tự động gửi thông tin sản phẩm khi đã biết mã và khách hỏi về giá/thông tin/ảnh")
+    print(f"🔴 GPT Reply Mode: ENHANCED FUNCTION CALLING (gpt-4o-mini)")
+    print(f"🔴 Order Priority: ƯU TIÊN GỬI LINK KHI CÓ TỪ KHÓA ĐẶT HÀNG")
+    print(f"🔴 Price Priority: HIỂN THỊ CHI TIẾT KHI KHÁCH HỎI VỀ GIÁ")
+    print(f"🔴 Context Management: THREAD-SAFE VỚI LOCK MECHANISM")
+    print(f"🔴 Pending Product Switch: CONFIRMATION TRƯỚC KHI CHUYỂN SẢN PHẨM")
+    print(f"🔴 Smart Context Decision: DECIDE_WHICH_MS_TO_USE LOGIC")
     
     app.run(host="0.0.0.0", port=5000, debug=True)
