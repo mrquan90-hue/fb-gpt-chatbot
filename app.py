@@ -157,130 +157,6 @@ PRODUCT_TEXT_EMBEDDINGS = {}
 LAST_LOAD = 0
 LOAD_TTL = 300
 
-# Các từ khóa liên quan đến đặt hàng
-ORDER_KEYWORDS = [
-    "đặt hàng nha",
-    "ok đặt",
-    "ok mua",
-    "ok em",
-    "ok e",
-    "mua 1 cái",
-    "mua cái này",
-    "mua luôn",
-    "chốt",
-    "lấy mã",
-    "lấy mẫu",
-    "lấy luôn",
-    "lấy em này",
-    "lấy e này",
-    "gửi cho",
-    "ship cho",
-    "ship 1 cái",
-    "chốt 1 cái",
-    "cho tôi mua",
-    "tôi lấy nhé",
-    "cho mình đặt",
-    "tôi cần mua",
-    "xác nhận đơn hàng giúp tôi",
-    "tôi đồng ý mua",
-    "làm đơn cho tôi đi",
-    "tôi chốt đơn nhé",
-    "cho xin 1 cái",
-    "cho đặt 1 chiếc",
-    "bên shop tạo đơn giúp em",
-    "okela",
-    "ok bạn",
-    "đồng ý",
-    "được đó",
-    "vậy cũng được",
-    "được vậy đi",
-    "chốt như bạn nói",
-    "ok giá đó đi",
-    "lấy mẫu đó đi",
-    "tư vấn giúp mình đặt hàng",
-    "hướng dẫn mình mua với",
-    "bạn giúp mình đặt nhé",
-    "muốn có nó quá",
-    "muốn mua quá",
-    "ưng quá, làm sao để mua",
-    "chốt đơn",
-    "bán cho em",
-    "bán cho em vé",
-    "xuống đơn giúp em",
-    "đơm hàng",
-    "lấy nha",
-    "lấy nhé",
-    "mua nha",
-    "mình lấy đây",
-    "shop ơi, của em",
-    "vậy lấy cái",
-    "thôi lấy cái",
-    "order nhé",
-]
-
-# Từ khóa kích hoạt carousel
-CAROUSEL_KEYWORDS = [
-    "xem sản phẩm",
-    "show sản phẩm",
-    "có gì hot",
-    "sản phẩm mới",
-    "danh sách sản phẩm",
-    "giới thiệu sản phẩm",
-    "tất cả sản phẩm",
-    "cho xem sản phẩm",
-    "có mẫu nào",
-    "mẫu mới",
-    "hàng mới",
-    "xem hàng",
-    "show hàng",
-]
-
-# Các từ khóa liên quan đến yêu cầu sản phẩm khác
-CHANGE_PRODUCT_KEYWORDS = [
-    "còn hàng nào khác",
-    "có cái nào đẹp hơn",
-    "có loại nào rẻ hơn",
-    "có loại nào đắt hơn",
-    "có loại nào dài hơn",
-    "có loại nào ấm hơn",
-    "có loại nào mát hơn",
-    "có loại nào mỏng hơn",
-    "có mẫu nào khác",
-    "có sản phẩm nào khác",
-    "shop còn gì khác",
-    "có loại nào khác",
-    "có model nào khác",
-    "cho xem cái khác",
-    "xem hàng khác",
-    "hàng khác",
-    "mẫu khác",
-    "sản phẩm khác",
-    "sản phẩm mới",
-    "mẫu mới",
-    "còn mẫu nào nữa",
-    "có đa dạng không",
-    "còn kiểu nào",
-    "còn loại nào",
-    "xem thêm sản phẩm",
-    "cho em xem thêm",
-    "còn cái nào",
-    "còn cái gì",
-    "còn gì nữa",
-    "có nhiều mẫu không",
-    "có đa dạng mẫu không",
-    "còn mẫu gì",
-    "có nhiều loại không",
-    "còn loại gì",
-    "có mẫu nào hot",
-    "có sản phẩm nào hot",
-    "có sản phẩm nào bán chạy",
-    "có sản phẩm nào mới nhất",
-    "có sản phẩm mới không",
-    "có hàng mới không",
-    "cập nhật mẫu mới",
-    "hàng mới về",
-]
-
 # ============================================
 # CACHE CHO TÊN FANPAGE
 # ============================================
@@ -1694,10 +1570,13 @@ def handle_text_with_function_calling(uid: str, text: str):
     Xưng em, gọi anh/chị. Trả lời cực ngắn gọn (dưới 3 dòng).
     Sản phẩm khách đang quan tâm: {ctx.get('last_ms', 'Chưa xác định')}.
     Khi khách muốn mua hoặc chốt, dùng công cụ provide_order_link."""
-
+    
     messages = [{"role": "system", "content": system_prompt}]
+    
+    # Thêm lịch sử hội thoại
     for h in ctx["conversation_history"][-6:]: 
         messages.append(h)
+    
     messages.append({"role": "user", "content": text})
 
     try:
@@ -1710,12 +1589,14 @@ def handle_text_with_function_calling(uid: str, text: str):
         )
         
         msg = response.choices[0].message
+        
         if msg.tool_calls:
             messages.append(msg)
             for tool in msg.tool_calls:
                 res = execute_tool(uid, tool.function.name, json.loads(tool.function.arguments))
                 messages.append({"role": "tool", "tool_call_id": tool.id, "name": tool.function.name, "content": res})
             
+            # Lấy phản hồi cuối cùng từ GPT
             final_res = client.chat.completions.create(
                 model="gpt-4o-mini", 
                 messages=messages,
@@ -1727,9 +1608,12 @@ def handle_text_with_function_calling(uid: str, text: str):
 
         if reply:
             send_message(uid, reply)
+            # Lưu lịch sử hội thoại
             ctx["conversation_history"].append({"role": "user", "content": text})
             ctx["conversation_history"].append({"role": "assistant", "content": reply})
-            ctx["conversation_history"] = ctx["conversation_history"][-10:]
+            # Giới hạn lịch sử
+            if len(ctx["conversation_history"]) > 10:
+                ctx["conversation_history"] = ctx["conversation_history"][-10:]
 
     except Exception as e:
         print(f"Chat Error: {e}")
@@ -1766,14 +1650,8 @@ def update_product_context(uid: str, ms: str):
     print(f"[CONTEXT UPDATE] User {uid}: last_ms={ms}, history={ctx['product_history']}")
 
 def get_relevant_product_for_question(uid: str, text: str) -> str | None:
-    """Tìm sản phẩm phù hợp nhất cho câu hỏi dựa trên ngữ cảnh và xử lý từ khóa chuyển đổi sản phẩm"""
+    """Tìm sản phẩm phù hợp nhất cho câu hỏi dựa trên ngữ cảnh"""
     ctx = USER_CONTEXT[uid]
-    lower = text.lower()
-    
-    # **QUAN TRỌNG: Kiểm tra từ khóa yêu cầu sản phẩm khác trước**
-    if any(kw in lower for kw in CHANGE_PRODUCT_KEYWORDS):
-        # Hướng dẫn vào gian hàng Facebook Shop
-        return "GUIDE_TO_FACEBOOK_SHOP"
     
     # 1. Tìm mã sản phẩm trong tin nhắn
     ms_from_text = detect_ms_from_text(text)
@@ -2080,9 +1958,8 @@ def send_fallback_suggestions(uid: str):
     """Gửi gợi ý fallback khi không tìm thấy sản phẩm phù hợp"""
     send_message(uid, "Anh/chị có thể:")
     send_message(uid, "1. Gửi thêm ảnh góc khác của sản phẩm")
-    send_message(uid, "2. Gõ 'xem sản phẩm' để xem toàn bộ danh mục")
-    send_message(uid, "3. Mô tả chi tiết hơn về sản phẩm này")
-    send_message(uid, "4. Hoặc gửi mã sản phẩm nếu anh/chị đã biết mã")
+    send_message(uid, "2. Mô tả chi tiết hơn về sản phẩm này")
+    send_message(uid, "3. Hoặc gửi mã sản phẩm nếu anh/chị đã biết mã")
 
 # ============================================
 # HANDLE ORDER FORM STATE
@@ -2215,84 +2092,8 @@ def handle_text(uid: str, text: str):
             ctx["processing_lock"] = False
             return
 
-        lower = text.lower()
-        
-        # **QUAN TRỌNG: Xử lý từ khóa yêu cầu sản phẩm khác**
-        if any(kw in lower for kw in CHANGE_PRODUCT_KEYWORDS):
-            print(f"[CHANGE PRODUCT] User {uid} yêu cầu sản phẩm khác: {text}")
-            
-            # Hướng dẫn vào gian hàng Facebook Shop
-            guide_message = """Dạ, hiện tại shop có nhiều mẫu mã đa dạng ạ!
-
-Để xem thêm nhiều sản phẩm khác, anh/chị có thể:
-1. Bấm vào biểu tượng 🛒 rổ hàng trên Messenger để vào gian hàng
-2. Xem danh mục sản phẩm đầy đủ tại Facebook Shop của shop
-3. Hoặc gõ "xem sản phẩm" để em gửi danh sách một số sản phẩm nổi bật
-
-Anh/chị muốn xem sản phẩm nào cụ thể ạ?"""
-            
-            send_message(uid, guide_message)
-            ctx["processing_lock"] = False
-            return
-        
-        # ƯU TIÊN 1: Xử lý từ khóa đặt hàng TRƯỚC
-        if any(kw in lower for kw in ORDER_KEYWORDS):
-            # Tìm sản phẩm phù hợp
-            current_ms = get_relevant_product_for_question(uid, text)
-            
-            if current_ms and current_ms in PRODUCTS:
-                domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
-                order_link = f"{domain}/order-form?ms={current_ms}&uid={uid}"
-                
-                # Trích xuất màu/size đơn giản
-                color, size = extract_color_size_simple(text)
-                variant_info = ""
-                if color or size:
-                    variant_info = f" ({color if color else ''}{' - ' if color and size else ''}{size if size else ''})"
-                
-                # Reply cực ngắn - LUÔN BÁO CÒN HÀNG
-                reply = f"Dạ, sản phẩm{variant_info} còn hàng ạ!\nĐặt tại: {order_link}"
-                send_message(uid, reply)
-                
-                # Cập nhật context
-                ctx["last_ms"] = current_ms
-                update_product_context(uid, current_ms)
-                
-                ctx["processing_lock"] = False
-                return
-        
-        # ƯU TIÊN 2: Xử lý từ khóa carousel
-        if any(kw in lower for kw in CAROUSEL_KEYWORDS):
-            if PRODUCTS:
-                send_message(uid, "Dạ, em đang lấy danh sách sản phẩm cho anh/chị...")
-                
-                # Kích hoạt tool show_featured_carousel
-                execute_tool(uid, "show_featured_carousel", {})
-                
-                ctx["processing_lock"] = False
-                return
-            else:
-                send_message(uid, "Hiện tại shop chưa có sản phẩm nào ạ. Vui lòng quay lại sau!")
-                ctx["processing_lock"] = False
-                return
-
         # Tìm sản phẩm phù hợp
         current_ms = get_relevant_product_for_question(uid, text)
-        
-        # Xử lý đặc biệt khi yêu cầu vào gian hàng
-        if current_ms == "GUIDE_TO_FACEBOOK_SHOP":
-            guide_message = """Dạ, hiện tại shop có nhiều mẫu mã đa dạng ạ!
-
-Để xem thêm nhiều sản phẩm khác, anh/chị có thể:
-1. Bấm vào biểu tượng 🛒 rổ hàng trên Messenger để vào gian hàng
-2. Xem dan mục sản phẩm đầy đủ tại Facebook Shop của shop
-3. Hoặc gõ "xem sản phẩm" để em gửi danh sách một số sản phẩm nổi bật
-
-Anh/chị muốn xem sản phẩm nào cụ thể ạ?"""
-            
-            send_message(uid, guide_message)
-            ctx["processing_lock"] = False
-            return
         
         # **QUAN TRỌNG: Cập nhật context nếu tìm thấy sản phẩm**
         if current_ms and current_ms in PRODUCTS and current_ms != ctx.get("last_ms"):
@@ -2760,8 +2561,7 @@ Em là trợ lý AI của {FANPAGE_NAME}.
 
 Để em tư vấn chính xác, anh/chị vui lòng:
 1. Gửi mã sản phẩm (ví dụ: [MS123456])
-2. Hoặc gõ "xem sản phẩm" để xem danh sách
-3. Hoặc mô tả sản phẩm bạn đang tìm
+2. Hoặc mô tả sản phẩm bạn đang tìm
 
 Anh/chị quan tâm sản phẩm nào ạ?"""
                         send_message(sender_id, welcome_msg)
@@ -2802,8 +2602,7 @@ Em là trợ lý AI của {FANPAGE_NAME}.
 
 Để em tư vấn chính xác, anh/chị vui lòng:
 1. Gửi mã sản phẩm (ví dụ: [MS123456])
-2. Hoặc gõ "xem sản phẩm" để xem danh sách
-3. Hoặc mô tả sản phẩm bạn đang tìm
+2. Hoặc mô tả sản phẩm bạn đang tìm
 
 Anh/chị quan tâm sản phẩm nào ạ?"""
                         send_message(sender_id, welcome_msg)
@@ -4184,14 +3983,10 @@ def health_check():
         "address_form": "Open API - provinces.open-api.vn (dropdown 3 cấp)",
         "address_validation": "enabled",
         "phone_validation": "regex validation",
-        "order_response_mode": "SHORT - Chỉ báo còn hàng khi hỏi tồn kho",
         "price_detailed_response": "ENABLED (hiển thị chi tiết các biến thể giá)",
         "max_gpt_tokens": 150,
         "stock_assumption": "Chỉ báo khi hỏi tồn kho",
-        "order_keywords_priority": "HIGH",
         "context_tracking": "ENABLED (tracks last_ms and product_history)",
-        "change_product_keywords": f"{len(CHANGE_PRODUCT_KEYWORDS)} từ khóa được định nghĩa",
-        "facebook_shop_guidance": "ENABLED (hướng dẫn vào gian hàng khi yêu cầu sản phẩm khác)",
         "ads_context_handling": "ENABLED (không reset context khi có sản phẩm từ ADS)",
         "openai_function_calling": "ENABLED (tích hợp từ ai_studio_code.py)",
         "tools_available": [
@@ -4248,13 +4043,11 @@ if __name__ == "__main__":
     print(f"🟢 ADS Follow-up Processing: BẬT (xử lý tin nhắn sau click quảng cáo)")
     print(f"🟢 Order Backup System: Local CSV khi Google Sheet không kết nối được")
     print(f"🟢 Context Tracking: BẬT (ghi nhớ last_ms và product_history)")
-    print(f"🟢 Change Product Keywords: {len(CHANGE_PRODUCT_KEYWORDS)} từ khóa")
-    print(f"🟢 Facebook Shop Guidance: BẬT (hướng dẫn vào gian hàng)")
     print(f"🟢 Price Detailed Response: BẬT (hiển thị chi tiết các biến thể giá)")
     print(f"🔴 QUAN TRỌNG: BOT CHỈ BÁO CÒN HÀNG KHI KHÁCH HỎI VỀ TỒN KHO")
     print(f"🔴 GPT Reply Mode: FUNCTION CALLING (gpt-4o-mini)")
-    print(f"🔴 Order Priority: ƯU TIÊN GỬI LINK KHI CÓ TỪ KHÓA ĐẶT HÀNG")
-    print(f"🔴 Price Priority: HIỂN THỊ CHI TIẾT KHI KHÁCH HỎI VỀ GIÁ")
+    print(f"🔴 Order Priority: Function Calling quyết định")
+    print(f"🔴 Price Priority: Function Calling quyết định")
     print(f"🔴 Function Calling Integration: HOÀN THÀNH - ĐÃ TÍCH HỢP TỪ AI_STUDIO_CODE.PY")
     
     app.run(host="0.0.0.0", port=5000, debug=True)
