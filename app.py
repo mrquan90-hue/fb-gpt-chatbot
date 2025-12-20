@@ -910,81 +910,6 @@ def create_search_text_from_analysis(analysis: dict) -> str:
     return search_text_normalized
 
 # ============================================
-# TÌM SẢN PHẨM THEO TỪ KHÓA
-# ============================================
-
-def find_product_by_keywords(text: str) -> Optional[str]:
-    """Tìm sản phẩm dựa trên từ khóa trong tin nhắn"""
-    if not text or not PRODUCTS:
-        return None
-    
-    text_lower = text.lower()
-    normalized_text = normalize_vietnamese(text_lower)
-    
-    print(f"[KEYWORD SEARCH] Tìm sản phẩm cho: {text_lower}")
-    
-    # Ánh xạ từ khóa -> mã sản phẩm (có thể mở rộng)
-    keyword_to_ms = {
-        "váy và áo đỏ": "MS000004",
-        "bộ váy và áo đỏ": "MS000004", 
-        "áo đỏ": "MS000004",
-        "set len": "MS000004",
-        "váy liền": "MS000004",
-        "len dáng dài": "MS000004",
-        "che khuyết điểm": "MS000004",
-        "nàng mũm mĩm": "MS000004",
-    }
-    
-    # Kiểm tra ánh xạ trực tiếp
-    for keyword, ms in keyword_to_ms.items():
-        if keyword in normalized_text and ms in PRODUCTS:
-            print(f"[KEYWORD MATCH] Tìm thấy qua ánh xạ: {keyword} -> {ms}")
-            return ms
-    
-    # Tìm kiếm động trong tên và mô tả sản phẩm
-    best_match = None
-    best_score = 0
-    
-    for ms, product in PRODUCTS.items():
-        score = 0
-        
-        # Tên sản phẩm
-        product_name = product.get('Ten', '').lower()
-        product_name_norm = normalize_vietnamese(product_name)
-        
-        # Mô tả
-        product_desc = product.get('MoTa', '').lower()
-        product_desc_norm = normalize_vietnamese(product_desc)
-        
-        # Màu sắc
-        product_colors = product.get('màu (Thuộc tính)', '').lower()
-        product_colors_norm = normalize_vietnamese(product_colors)
-        
-        # Tách các từ trong tin nhắn
-        text_words = set(normalized_text.split())
-        
-        # Tính điểm cho tên sản phẩm
-        for word in text_words:
-            if len(word) > 2:  # Bỏ qua từ quá ngắn
-                if word in product_name_norm:
-                    score += 3
-                if word in product_desc_norm:
-                    score += 2
-                if word in product_colors_norm:
-                    score += 2
-        
-        # Ưu tiên sản phẩm có điểm cao nhất
-        if score > best_score:
-            best_score = score
-            best_match = ms
-    
-    if best_match and best_score >= 2:  # Ngưỡng tối thiểu
-        print(f"[KEYWORD SEARCH] Tìm thấy tốt nhất: {best_match} (điểm: {best_score})")
-        return best_match
-    
-    return None
-
-# ============================================
 # TÌM SẢN PHẨM VỚI ĐỘ CHÍNH XÁC CAO
 # ============================================
 
@@ -1679,12 +1604,6 @@ def get_relevant_product_for_question(uid: str, text: str) -> str | None:
         if ms in PRODUCTS:
             print(f"[CONTEXT] Sử dụng từ product history: {ms}")
             return ms
-    
-    # 5. Tìm theo từ khóa trong sản phẩm
-    found_ms = find_product_by_keywords(text)
-    if found_ms and found_ms in PRODUCTS:
-        print(f"[CONTEXT] Tìm thấy sản phẩm theo từ khóa: {found_ms}")
-        return found_ms
     
     return None
 
@@ -3466,7 +3385,7 @@ def order_form():
                 
                 document.getElementById('fullAddress').value = fullAddress;
                 
-                // Update preview
+                # Update preview
                 const previewElement = document.getElementById('addressPreview');
                 if (fullAddress.trim()) {{
                     previewElement.innerHTML = `
@@ -3495,11 +3414,11 @@ def order_form():
             }}
             
             // ============================================
-            // FORM VALIDATION AND SUBMISSION
-            // ============================================
+            # FORM VALIDATION AND SUBMISSION
+            # ============================================
             
             async function submitOrder() {{
-                // Collect form data
+                # Collect form data
                 const formData = {{
                     ms: PRODUCT_MS,
                     uid: PRODUCT_UID,
@@ -3518,7 +3437,7 @@ def order_form():
                     addressDetail: document.getElementById('addressDetail').value.trim()
                 }};
                 
-                // Validate required fields
+                # Validate required fields
                 if (!formData.customerName) {{
                     alert('Vui lòng nhập họ và tên');
                     document.getElementById('customerName').focus();
@@ -3531,7 +3450,7 @@ def order_form():
                     return;
                 }}
                 
-                // Validate phone number
+                # Validate phone number
                 const phoneRegex = /^(0|\\+84)(\\d{{9,10}})$/;
                 if (!phoneRegex.test(formData.phone)) {{
                     alert('Số điện thoại không hợp lệ. Vui lòng nhập số điện thoại 10-11 chữ số');
@@ -3539,7 +3458,7 @@ def order_form():
                     return;
                 }}
                 
-                // Validate address
+                # Validate address
                 if (!formData.provinceId) {{
                     alert('Vui lòng chọn Tỉnh/Thành phố');
                     document.getElementById('province').focus();
@@ -3564,7 +3483,7 @@ def order_form():
                     return;
                 }}
                 
-                // Show loading
+                # Show loading
                 const submitBtn = document.getElementById('submitBtn');
                 const originalText = submitBtn.innerHTML;
                 submitBtn.innerHTML = '<span class="loading-spinner"></span> ĐANG XỬ LÝ...';
@@ -3582,10 +3501,10 @@ def order_form():
                     const data = await response.json();
                     
                     if (response.ok) {{
-                        // Success
+                        # Success
                         alert('🎉 Đã gửi đơn hàng thành công!\\n\\nShop sẽ liên hệ xác nhận trong 5-10 phút.\\nCảm ơn anh/chị đã đặt hàng! ❤️');
                         
-                        // Reset form (optional)
+                        # Reset form (optional)
                         document.getElementById('customerName').value = '';
                         document.getElementById('phone').value = '';
                         document.getElementById('addressDetail').value = '';
@@ -3597,33 +3516,33 @@ def order_form():
                         updateFullAddress();
                         
                     }} else {{
-                        // Error
+                        # Error
                         alert(`❌ ${{data.message || 'Có lỗi xảy ra. Vui lòng thử lại sau'}}`);
                     }}
                 }} catch (error) {{
                     console.error('Lỗi khi gửi đơn hàng:', error);
                     alert('❌ Lỗi kết nối. Vui lòng thử lại sau!');
                 }} finally {{
-                    // Restore button
+                    # Restore button
                     submitBtn.innerHTML = originalText;
                     submitBtn.disabled = false;
                 }}
             }}
             
-            // ============================================
-            // INITIALIZATION
-            // ============================================
+            # ============================================
+            # INITIALIZATION
+            # ============================================
             
             document.addEventListener('DOMContentLoaded', function() {{
-                // Load provinces
+                # Load provinces
                 loadProvinces();
                 
-                // Event listeners for product variant changes
+                # Event listeners for product variant changes
                 document.getElementById('color').addEventListener('change', updateVariantInfo);
                 document.getElementById('size').addEventListener('change', updateVariantInfo);
                 document.getElementById('quantity').addEventListener('input', updatePriceByVariant);
                 
-                // Event listeners for address changes
+                # Event listeners for address changes
                 document.getElementById('province').addEventListener('change', function() {{
                     loadDistricts(this.value);
                     updateFullAddress();
@@ -3637,10 +3556,10 @@ def order_form():
                 document.getElementById('ward').addEventListener('change', updateFullAddress);
                 document.getElementById('addressDetail').addEventListener('input', updateFullAddress);
                 
-                // Initialize product variant info
+                # Initialize product variant info
                 updateVariantInfo();
                 
-                // Enter key to submit form
+                # Enter key to submit form
                 document.getElementById('orderForm').addEventListener('keypress', function(e) {{
                     if (e.which === 13) {{
                         e.preventDefault();
@@ -3648,7 +3567,7 @@ def order_form():
                     }}
                 }});
                 
-                // Focus on first field
+                # Focus on first field
                 setTimeout(() => {{
                     document.getElementById('customerName').focus();
                 }}, 500);
