@@ -541,14 +541,21 @@ def detect_ms_from_text(text: str):
         if ms in PRODUCTS:
             return ms
     
-    # 2. Tìm MS123456
+    # 2. Tìm #MS123456
+    ms_list = re.findall(r"#MS(\d{6})", text.upper())
+    if ms_list:
+        ms = "MS" + ms_list[0]
+        if ms in PRODUCTS:
+            return ms
+    
+    # 3. Tìm MS123456
     ms_list = re.findall(r"MS(\d{6})", text.upper())
     if ms_list:
         ms = "MS" + ms_list[0]
         if ms in PRODUCTS:
             return ms
     
-    # 3. Tìm số đơn thuần
+    # 4. Tìm số đơn thuần
     text_normalized = normalize_vietnamese(text.lower())
     numbers = re.findall(r'\d{1,6}', text_normalized)
     
@@ -998,6 +1005,8 @@ def webhook():
                     ctx = USER_CONTEXT[sender_id]
                     ctx["last_ms"] = detected_ms
                     print(f"[ECHO FCHAT] Phát hiện mã {detected_ms} cho user {sender_id}")
+                else:
+                    print(f"[ECHO FCHAT] Không tìm thấy mã sản phẩm trong echo: {echo_text}")
                 
                 continue
             
