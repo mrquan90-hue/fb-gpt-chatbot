@@ -1001,10 +1001,30 @@ def webhook():
                 # Tìm mã sản phẩm trong echo
                 load_products()
                 detected_ms = detect_ms_from_text(echo_text)
+                
                 if detected_ms and detected_ms in PRODUCTS:
-                    ctx = USER_CONTEXT[sender_id]
-                    ctx["last_ms"] = detected_ms
-                    print(f"[ECHO FCHAT] Phát hiện mã {detected_ms} cho user {sender_id}")
+                    # QUAN TRỌNG: Lấy recipient_id (user thực) thay vì sender_id (page)
+                    recipient_id = m.get("recipient", {}).get("id")
+                    
+                    if recipient_id:
+                        ctx = USER_CONTEXT[recipient_id]
+                        ctx["last_ms"] = detected_ms
+                        print(f"[ECHO FCHAT] Phát hiện mã {detected_ms} cho user {recipient_id}")
+                        
+                        # Gửi thông tin sản phẩm ngay lập tức cho user
+                        welcome_msg = f"""Chào anh/chị! 👋 
+Em là trợ lý AI của {FANPAGE_NAME}.
+
+Em thấy anh/chị quan tâm đến sản phẩm **[{detected_ms}]**.
+Em sẽ gửi thông tin chi tiết sản phẩm ngay ạ!"""
+                        
+                        send_message(recipient_id, welcome_msg)
+                        send_product_info(recipient_id, detected_ms)
+                    else:
+                        # Fallback: nếu không có recipient_id, sử dụng sender_id
+                        print(f"[ECHO FCHAT] Không có recipient_id, sử dụng sender_id: {sender_id}")
+                        ctx = USER_CONTEXT[sender_id]
+                        ctx["last_ms"] = detected_ms
                 else:
                     print(f"[ECHO FCHAT] Không tìm thấy mã sản phẩm trong echo: {echo_text}")
                 
