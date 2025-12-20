@@ -68,6 +68,44 @@ BOT_APP_IDS = {"645956568292435"}  # App ID của bot từ log
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 # ============================================
+# CONTEXT PERSISTENCE SETUP
+# ============================================
+CONTEXT_FILE = "user_context.json"
+CONTEXT_LOCK = False  # Simple lock for file operations
+
+def save_user_context(uid: str):
+    """Lưu context của user cụ thể vào file"""
+    try:
+        if os.path.exists(CONTEXT_FILE):
+            with open(CONTEXT_FILE, 'r', encoding='utf-8') as f:
+                all_contexts = json.load(f)
+        else:
+            all_contexts = {}
+        
+        all_contexts[uid] = dict(USER_CONTEXT[uid])
+        
+        with open(CONTEXT_FILE, 'w', encoding='utf-8') as f:
+            json.dump(all_contexts, f, ensure_ascii=False, indent=2, default=str)
+        
+        print(f"💾 Đã lưu context cho user {uid}")
+    except Exception as e:
+        print(f"❌ Lỗi lưu context cho {uid}: {str(e)}")
+
+def load_user_context(uid: str) -> dict:
+    """Đọc context của user từ file"""
+    try:
+        if not os.path.exists(CONTEXT_FILE):
+            return {}
+        
+        with open(CONTEXT_FILE, 'r', encoding='utf-8') as f:
+            all_contexts = json.load(f)
+        
+        return all_contexts.get(uid, {})
+    except Exception as e:
+        print(f"❌ Lỗi đọc context cho {uid}: {str(e)}")
+        return {}
+
+# ============================================
 # MAP TIẾNG VIỆT CÓ DẤU SANG KHÔNG DẤU
 # ============================================
 VIETNAMESE_MAP = {
@@ -522,22 +560,37 @@ def handle_ads_referral_product(uid: str, text: str) -> bool:
     if ctx.get("referral_source") != "ADS":
         return False
     
-    # 1. Ưu tiên sử dụng last_ms từ context (đã được set từ ad_title)
+    # 1. Ưu tiên sử dụng last_ms từ memory context
     last_ms = ctx.get("last_ms")
-    if last_ms and last_ms in PRODUCTS:
-        print(f"[ADS CONTEXT] Sử dụng last_ms từ ADS context: {last_ms}")
-        
-        # Phân tích intent
-        intent_result = analyze_intent_with_gpt(uid, text, last_ms)
-        
-        # Nếu là yêu cầu xem ảnh
-        if (intent_result.get('intent') == 'view_images' and 
-            intent_result.get('confidence', 0) > 0.85):
-            send_all_product_images(uid, last_ms)
-            return True
-        
-        # Để Function Calling xử lý
-        handle_text_with_function_calling(uid, text)
+    
+    # 2. Nếu không có trong memory, thử khôi phục từ file
+    if not last_ms:
+        file_context = load_user_context(uid)
+        last_ms = file_context.get("last_ms")
+        if last_ms:
+            print(f"[ADS CONTEXT RESTORE] Khôi phục last_ms từ file: {last_ms}")
+            ctx["last_ms"] = last_ms
+            # Cập nhật lại product_history từ file nếu cần
+            if "product_history" in file_context and not ctx.get("product_history"):
+                ctx["product_history"] = file_context["product_history"]
+    
+    # 3. Thử tìm từ product_history
+    if not last_ms:
+        product_history = ctx.get("product_history", [])
+        for ms in product_history:
+            if ms in PRODUCTS:
+                last_ms = ms
+                ctx["last_ms"] = ms
+                print(f"[ADS CONTEXT HISTORY] Khôi phục từ history: {ms}")
+                break
+    
+    if not last_ms or last_ms not in PRODUCTS:
+        return False
+    
+    print(f"[ADS CONTEXT] Sử dụng sản phẩm: {last_ms}")
+    
+    # Xử lý trực tiếp các câu hỏi về sản phẩm
+    if handle_product_query_directly(uid, text):
         return True
     
     return False
@@ -1390,21 +1443,42 @@ def handle_product_query_directly(uid: str, text: str) -> bool:
     Trả về True nếu đã xử lý, False nếu để GPT xử lý.
     """
     ctx = USER_CONTEXT[uid]
+    
+    # DEBUG: Kiểm tra context
+    print(f"[DIRECT HANDLER DEBUG] uid={uid}, text={text}")
+    print(f"[CONTEXT] last_ms: {ctx.get('last_ms')}, product_history: {ctx.get('product_history', [])}")
+    
+    # Nếu không có last_ms, thử tìm trong product_history
     last_ms = ctx.get("last_ms")
+    if not last_ms:
+        product_history = ctx.get("product_history", [])
+        for ms in product_history:
+            if ms in PRODUCTS:
+                last_ms = ms
+                ctx["last_ms"] = ms  # Cập nhật lại last_ms
+                print(f"[CONTEXT RECOVERY] Khôi phục last_ms từ history: {ms}")
+                break
     
     if not last_ms or last_ms not in PRODUCTS:
+        print(f"[DIRECT HANDLER] Không tìm thấy sản phẩm trong context: last_ms={last_ms}")
         return False
     
     text_lower = text.lower().strip()
     
     print(f"[DIRECT HANDLER] Kiểm tra: uid={uid}, last_ms={last_ms}, text={text}")
     
-    # 1. Câu hỏi về giá
-    price_queries = ["giá", "bao nhiêu", "giá bao nhiêu", "giá cả", "giá tiền", "bao nhiêu tiền", "cost", "price"]
-    if any(query in text_lower for query in price_queries):
-        print(f"[DIRECT HANDLER] User {uid} hỏi giá {last_ms}: {text}")
-        send_product_info_debounced(uid, last_ms)
-        return True
+    # 1. Câu hỏi về giá - THÊM NHIỀU TỪ KHÓA HƠN
+    price_queries = [
+        "giá", "bao nhiêu", "giá bao nhiêu", "giá cả", "giá tiền", 
+        "bao nhiêu tiền", "cost", "price", "tầm bao nhiêu", "giá sản phẩm",
+        "bao nhiêu vậy", "giá thế nào", "giá như thế nào", "bao nhiêu ạ"
+    ]
+    
+    for query in price_queries:
+        if query in text_lower:
+            print(f"[DIRECT HANDLER] User {uid} hỏi giá {last_ms}: {text}")
+            send_product_info_debounced(uid, last_ms)
+            return True
     
     # 2. Câu hỏi về thông tin sản phẩm
     info_queries = ["thông tin", "mô tả", "tính năng", "chức năng", "có gì", "như thế nào", "chi tiết", "giới thiệu"]
@@ -1512,6 +1586,7 @@ def execute_tool(uid, name, args):
     if name == "get_product_info":
         if ms in PRODUCTS:
             ctx["last_ms"] = ms
+            update_product_context(uid, ms)
             send_product_info_debounced(uid, ms)
             return "Đã gửi thông tin sản phẩm."
         return "Sản phẩm không tồn tại."
@@ -1547,92 +1622,6 @@ def execute_tool(uid, name, args):
     
     return "Hành động không xác định."
 
-def handle_text_with_function_calling(uid: str, text: str):
-    """Xử lý tin nhắn bằng OpenAI Function Calling - ĐÃ FIX LỖI NGỮ CẢNH"""
-    load_products()
-    ctx = USER_CONTEXT[uid]
-    
-    # 1. Xác định mã sản phẩm đang nói đến (ưu tiên mã trong tin nhắn, sau đó là context)
-    current_ms = detect_ms_from_text(text) or ctx.get("last_ms")
-    
-    # Nếu phát hiện mã mới trong tin nhắn, cập nhật lại context ngay
-    if current_ms and current_ms in PRODUCTS:
-        ctx["last_ms"] = current_ms
-        update_product_context(uid, current_ms)
-
-    # 2. Xử lý trực tiếp các câu hỏi nhanh (Giá, Ảnh, Thông tin)
-    if handle_product_query_directly(uid, text):
-        return 
-
-    # 3. Lấy thông tin chi tiết sản phẩm để "mớm" cho GPT
-    product_data_for_ai = "Không có thông tin sản phẩm cụ thể."
-    if current_ms and current_ms in PRODUCTS:
-        p = PRODUCTS[current_ms]
-        product_data_for_ai = f"""
-        THÔNG TIN SẢN PHẨM KHÁCH ĐANG XEM:
-        - Mã: {current_ms}
-        - Tên: {p.get('Ten')}
-        - Giá: {p.get('Gia')}
-        - Mô tả: {p.get('MoTa')}
-        - Màu sắc: {p.get('màu (Thuộc tính)')}
-        - Size: {p.get('size (Thuộc tính)')}
-        - Trạng thái: Còn hàng
-        """
-
-    fanpage_name = get_fanpage_name_from_api()
-    
-    # 4. System Prompt mạnh mẽ hơn, yêu cầu dùng thông tin đã cung cấp
-    system_prompt = f"""Bạn là chuyên viên tư vấn bán hàng chuyên nghiệp của {fanpage_name}.
-    
-    {product_data_for_ai}
-    
-    QUY TẮC:
-    1. Nếu khách hỏi "cái này", "mẫu này", "nó", "giá sao" thì mặc định trả lời về sản phẩm [{current_ms}] ở trên.
-    2. Trả lời cực ngắn gọn, thân thiện, xưng em gọi anh/chị.
-    3. Nếu thông tin không có trong phần mô tả trên, hãy dùng công cụ get_product_info.
-    4. Luôn chốt bằng một câu gợi ý đặt hàng hoặc hỏi xem khách có cần xem ảnh thật không."""
-    
-    messages = [{"role": "system", "content": system_prompt}]
-    
-    # Thêm lịch sử (giữ 4 câu gần nhất để GPT nhớ mạch hội thoại)
-    for h in ctx["conversation_history"][-4:]: 
-        messages.append(h)
-    
-    messages.append({"role": "user", "content": text})
-
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=messages,
-            tools=get_tools_definition(),
-            tool_choice="auto",
-            temperature=0.1 # Giảm độ sáng tạo để tránh bịa đặt giá
-        )
-        
-        # ... (giữ nguyên phần xử lý tool_calls như cũ)
-        msg = response.choices[0].message
-        if msg.tool_calls:
-            # Xử lý tool calls (giữ nguyên code cũ của bạn từ đoạn này...)
-            messages.append(msg)
-            for tool in msg.tool_calls:
-                res = execute_tool(uid, tool.function.name, json.loads(tool.function.arguments))
-                messages.append({"role": "tool", "tool_call_id": tool.id, "name": tool.function.name, "content": res})
-            final_res = client.chat.completions.create(model="gpt-4o-mini", messages=messages)
-            reply = final_res.choices[0].message.content
-        else:
-            reply = msg.content
-
-        if reply:
-            send_message(uid, reply)
-            ctx["conversation_history"].append({"role": "user", "content": text})
-            ctx["conversation_history"].append({"role": "assistant", "content": reply})
-            if len(ctx["conversation_history"]) > 10:
-                ctx["conversation_history"] = ctx["conversation_history"][-10:]
-
-    except Exception as e:
-        print(f"Chat Error: {e}")
-        send_message(uid, "Dạ em đang gặp chút trục trặc, anh/chị nhắn lại giúp em nhé.")
-
 # ============================================
 # CẢI THIỆN NGỮ CẢNH - THÊM HỖ TRỢ CATALOG
 # ============================================
@@ -1662,10 +1651,19 @@ def update_product_context(uid: str, ms: str):
         ctx["product_history"] = ctx["product_history"][:5]
     
     print(f"[CONTEXT UPDATE] User {uid}: last_ms={ms}, history={ctx['product_history']}")
+    
+    # LƯU CONTEXT VÀO FILE
+    save_user_context(uid)
 
 def get_relevant_product_for_question(uid: str, text: str) -> str | None:
     """Tìm sản phẩm phù hợp nhất cho câu hỏi dựa trên ngữ cảnh"""
     ctx = USER_CONTEXT[uid]
+    
+    # DEBUG: In ra toàn bộ context để debug
+    print(f"[CONTEXT DEBUG] User {uid} context:")
+    print(f"  - last_ms: {ctx.get('last_ms')}")
+    print(f"  - product_history: {ctx.get('product_history', [])}")
+    print(f"  - referral_source: {ctx.get('referral_source')}")
     
     # 1. Tìm mã sản phẩm trong tin nhắn
     ms_from_text = detect_ms_from_text(text)
@@ -1673,26 +1671,26 @@ def get_relevant_product_for_question(uid: str, text: str) -> str | None:
         print(f"[CONTEXT] Phát hiện mã mới trong tin nhắn: {ms_from_text}")
         return ms_from_text
     
-    # 2. Sử dụng retailer_id từ catalog
+    # 2. ƯU TIÊN: Sử dụng last_ms từ context nếu có
+    last_ms = ctx.get("last_ms")
+    if last_ms and last_ms in PRODUCTS:
+        print(f"[CONTEXT] Sử dụng last_ms từ context: {last_ms}")
+        return last_ms
+    
+    # 3. Kiểm tra product history (kể cả khi last_ms là None)
+    product_history = ctx.get("product_history", [])
+    for ms in product_history:
+        if ms in PRODUCTS:
+            print(f"[CONTEXT] Sử dụng từ product history: {ms}")
+            return ms
+    
+    # 4. Sử dụng retailer_id từ catalog
     retailer_id = ctx.get("last_retailer_id")
     if retailer_id:
         ms_from_retailer = extract_ms_from_retailer_id(retailer_id)
         if ms_from_retailer and ms_from_retailer in PRODUCTS:
             print(f"[CATALOG CONTEXT] Sử dụng retailer_id {retailer_id} -> {ms_from_retailer}")
             return ms_from_retailer
-    
-    # 3. Sử dụng last_ms từ context (ƯU TIÊN CAO)
-    last_ms = ctx.get("last_ms")
-    if last_ms and last_ms in PRODUCTS:
-        print(f"[CONTEXT] Sử dụng last_ms từ context: {last_ms}")
-        return last_ms
-    
-    # 4. Sử dụng product history
-    product_history = ctx.get("product_history", [])
-    for ms in product_history:
-        if ms in PRODUCTS:
-            print(f"[CONTEXT] Sử dụng từ product history: {ms}")
-            return ms
     
     return None
 
@@ -2055,6 +2053,98 @@ def detect_ms_from_text(text: str) -> Optional[str]:
 # HANDLE TEXT - XỬ LÝ VỚI FUNCTION CALLING
 # ============================================
 
+def handle_text_with_function_calling(uid: str, text: str):
+    """Xử lý tin nhắn bằng OpenAI Function Calling"""
+    load_products()
+    ctx = USER_CONTEXT[uid]
+    
+    # DEBUG CHI TIẾT: In thông tin context
+    print(f"[DEBUG FUNCTION CALLING] User {uid}:")
+    print(f"  - text: {text}")
+    print(f"  - ctx['last_ms']: {ctx.get('last_ms')}")
+    print(f"  - ctx['product_history']: {ctx.get('product_history', [])}")
+    print(f"  - PRODUCTS keys sample: {list(PRODUCTS.keys())[:5]}")
+    
+    # Logic nhận diện mã nhanh
+    quick_ms = detect_ms_from_text(text)
+    if quick_ms: 
+        ctx["last_ms"] = quick_ms
+        update_product_context(uid, quick_ms)  # Cập nhật và lưu context
+    
+    # ========== FIX: XỬ LÝ TRỰC TIẾP CÂU HỎI VỀ SẢN PHẨM ==========
+    # ƯU TIÊN: Tìm sản phẩm phù hợp nhất từ context
+    current_ms = get_relevant_product_for_question(uid, text)
+    
+    if current_ms and current_ms in PRODUCTS:
+        print(f"[CONTEXT FOUND] Sử dụng sản phẩm {current_ms} cho câu hỏi")
+        
+        # Xử lý trực tiếp nếu là câu hỏi về sản phẩm
+        if handle_product_query_directly(uid, text):
+            return  # Đã xử lý xong, không cần gọi GPT
+    else:
+        print(f"[NO CONTEXT] Không tìm thấy sản phẩm trong context, để GPT xử lý")
+    
+    fanpage_name = get_fanpage_name_from_api()
+    
+    system_prompt = f"""Bạn là nhân viên bán hàng của {fanpage_name}.
+    CHỈ trả lời dựa trên dữ liệu thật. KHÔNG bịa đặt thông tin.
+    Nếu khách hỏi tồn kho, luôn khẳng định CÒN HÀNG.
+    Xưng em, gọi anh/chị. Trả lời cực ngắn gọn (dưới 3 dòng).
+    Sản phẩm khách đang quan tâm: {ctx.get('last_ms', 'Chưa xác định')}.
+    Khi khách muốn mua hoặc chốt, dùng công cụ provide_order_link."""
+    
+    messages = [{"role": "system", "content": system_prompt}]
+    
+    # Thêm lịch sử hội thoại
+    for h in ctx["conversation_history"][-6:]: 
+        messages.append(h)
+    
+    messages.append({"role": "user", "content": text})
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=messages,
+            tools=get_tools_definition(),
+            tool_choice="auto",
+            temperature=0.1
+        )
+        
+        msg = response.choices[0].message
+        
+        if msg.tool_calls:
+            messages.append(msg)
+            for tool in msg.tool_calls:
+                res = execute_tool(uid, tool.function.name, json.loads(tool.function.arguments))
+                messages.append({"role": "tool", "tool_call_id": tool.id, "name": tool.function.name, "content": res})
+            
+            # Lấy phản hồi cuối cùng từ GPT
+            final_res = client.chat.completions.create(
+                model="gpt-4o-mini", 
+                messages=messages,
+                temperature=0.1
+            )
+            reply = final_res.choices[0].message.content
+        else:
+            reply = msg.content
+
+        if reply:
+            send_message(uid, reply)
+            # Lưu lịch sử hội thoại
+            ctx["conversation_history"].append({"role": "user", "content": text})
+            ctx["conversation_history"].append({"role": "assistant", "content": reply})
+            # Giới hạn lịch sử
+            if len(ctx["conversation_history"]) > 10:
+                ctx["conversation_history"] = ctx["conversation_history"][-10:]
+
+    except Exception as e:
+        print(f"Chat Error: {e}")
+        send_message(uid, "Dạ em đang gặp chút trục trặc, anh/chị vui lòng thử lại sau ạ.")
+
+# ============================================
+# HANDLE TEXT - XỬ LÝ VỚI FUNCTION CALLING
+# ============================================
+
 def handle_text(uid: str, text: str):
     """Xử lý tin nhắn văn bản từ người dùng - Sử dụng Function Calling"""
     if not text or len(text.strip()) == 0:
@@ -2086,6 +2176,17 @@ def handle_text(uid: str, text: str):
         load_products()
         ctx["postback_count"] = 0
 
+        # KIỂM TRA VÀ KHÔI PHỤC CONTEXT NẾU CẦN
+        # Nếu context trống (do multi-worker), thử khôi phục từ file
+        if not ctx.get("last_ms") and not ctx.get("product_history"):
+            file_context = load_user_context(uid)
+            if file_context:
+                print(f"[CONTEXT RECOVERY] Khôi phục context từ file cho {uid}")
+                # Cập nhật context từ file
+                for key, value in file_context.items():
+                    if key not in ctx or not ctx[key]:  # Chỉ cập nhật nếu trống
+                        ctx[key] = value
+        
         if handle_order_form_step(uid, text):
             ctx["processing_lock"] = False
             return
@@ -2464,6 +2565,20 @@ def webhook():
                         
                         print(f"[CONTEXT UPDATED] Đã ghi nhận mã {detected_ms} vào ngữ cảnh cho user {recipient_id}")
                         
+                        # Gửi tin nhắn chào hỏi đơn giản (TUÂN THỦ CHÍNH SÁCH FACEBOOK)
+                        product_name = PRODUCTS.get(detected_ms, {}).get('Ten', 'sản phẩm') if detected_ms in PRODUCTS else 'sản phẩm'
+                        
+                        welcome_msg = f"""Chào anh/chị! 👋
+Em là trợ lý AI của {get_fanpage_name_from_api()}.
+
+Em thấy anh/chị quan tâm đến sản phẩm của shop. 
+Anh/chị có muốn em tư vấn thêm về sản phẩm không ạ?
+
+(Hoặc anh/chị có thể gửi mã sản phẩm cụ thể như MS123456)"""
+                        
+                        # CHỈ gửi 1 tin nhắn duy nhất
+                        send_message(recipient_id, welcome_msg)
+                        
                     finally:
                         ctx["processing_lock"] = False
                 else:
@@ -2504,15 +2619,15 @@ def webhook():
                         ctx["last_ms"] = ms_from_ad
                         update_product_context(sender_id, ms_from_ad)
                         
-                        # Gửi thông tin sản phẩm ngay
+                        # THAY ĐỔI: KHÔNG gửi thông tin sản phẩm ngay (TUÂN THỦ CHÍNH SÁCH)
+                        # Chỉ gửi tin nhắn chào hỏi đơn giản
                         welcome_msg = f"""Chào anh/chị! 👋 
 Em là trợ lý AI của {get_fanpage_name_from_api()}.
 
-Em thấy anh/chị quan tâm đến sản phẩm **[{ms_from_ad}]** từ quảng cáo.
-Em sẽ gửi thông tin chi tiết sản phẩm ngay ạ!"""
+Em thấy anh/chị quan tâm đến sản phẩm của shop từ quảng cáo.
+Anh/chị có muốn em tư vấn thêm không ạ?"""
                         
                         send_message(sender_id, welcome_msg)
-                        send_product_info_debounced(sender_id, ms_from_ad)
                         handled = True
                     
                     # ƯU TIÊN 2: Kiểm tra referral payload
@@ -2526,11 +2641,10 @@ Em sẽ gửi thông tin chi tiết sản phẩm ngay ạ!"""
                             welcome_msg = f"""Chào anh/chị! 👋 
 Em là trợ lý AI của {get_fanpage_name_from_api()}.
 
-Em thấy anh/chị quan tâm đến sản phẩm **[{detected_ms}]**.
-Em sẽ gửi thông tin chi tiết sản phẩm ngay ạ!"""
+Em thấy anh/chị quan tâm đến sản phẩm của shop.
+Anh/chị có muốn em tư vấn thêm không ạ?"""
                             
                             send_message(sender_id, welcome_msg)
-                            send_product_info_debounced(sender_id, detected_ms)
                             handled = True
                 
                 # Nếu đã xử lý xong (ADS có sản phẩm) thì bỏ qua phần sau
@@ -2557,9 +2671,8 @@ Em sẽ gửi thông tin chi tiết sản phẩm ngay ạ!"""
 Em là trợ lý AI của {FANPAGE_NAME}.
 
 Em thấy anh/chị quan tâm đến sản phẩm mã [{detected_ms}].
-Em sẽ gửi thông tin chi tiết sản phẩm ngay ạ!"""
+Anh/chị có muốn em tư vấn thêm không ạ?"""
                         send_message(sender_id, welcome_msg)
-                        send_product_info_debounced(sender_id, detected_ms)
                         continue
                     else:
                         welcome_msg = f"""Chào anh/chị! 👋 
@@ -4050,13 +4163,17 @@ if __name__ == "__main__":
     print(f"🟢 Order Backup System: Local CSV khi Google Sheet không kết nối được")
     print(f"🟢 Context Tracking: BẬT (ghi nhớ last_ms và product_history)")
     print(f"🟢 Price Detailed Response: BẬT (hiển thị chi tiết các biến thể giá)")
+    print(f"🟢 Context Persistence: BẬT (lưu vào file JSON để khôi phục khi multi-worker)")
+    print(f"🟢 Context Recovery: BẬT (khôi phục từ file khi context bị mất)")
+    print(f"🟢 Tuân thủ chính sách Facebook: BẬT (không gửi sản phẩm tự động từ ADS/Fchat)")
     print(f"🔴 QUAN TRỌNG: BOT CHỈ BÁO CÒN HÀNG KHI KHÁCH HỎI VỀ TỒN KHO")
     print(f"🔴 GPT Reply Mode: FUNCTION CALLING (gpt-4o-mini)")
     print(f"🔴 Order Priority: Function Calling quyết định")
     print(f"🔴 Price Priority: Function Calling quyết định")
     print(f"🔴 Function Calling Integration: HOÀN THÀNH - ĐÃ TÍCH HỢP TỪ AI_STUDIO_CODE.PY")
     
-    print(f"\n🔧 QUAN TRỌNG: ĐÃ THÊM HÀM handle_product_query_directly()")
-    print(f"🔧 FIX: Bot sẽ tự động gửi thông tin sản phẩm khi đã biết mã và khách hỏi về giá/thông tin/ảnh")
+    print(f"\n🔧 QUAN TRỌNG: ĐÃ THÊM HỆ THỐNG LƯU CONTEXT BỀN VỮNG")
+    print(f"🔧 FIX: Bot sẽ tự động khôi phục context từ file khi bị mất do multi-worker")
+    print(f"🔧 TUÂN THỦ: Không gửi sản phẩm tự động từ ADS/Fchat (chỉ chào hỏi)")
     
     app.run(host="0.0.0.0", port=5000, debug=True)
