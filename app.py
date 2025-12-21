@@ -5,6 +5,8 @@ import time
 import csv
 import hashlib
 import base64
+import threading
+import glob
 from collections import defaultdict
 from urllib.parse import quote
 from datetime import datetime
@@ -17,6 +19,16 @@ from sklearn.metrics.pairwise import cosine_similarity
 import requests
 from flask import Flask, request, send_from_directory, jsonify, render_template_string
 from openai import OpenAI
+
+# ============================================
+# REDIS FOR DISTRIBUTED LOCKING
+# ============================================
+try:
+    import redis
+    REDIS_AVAILABLE = True
+except ImportError:
+    REDIS_AVAILABLE = False
+    print("⚠️ Redis không được cài đặt. Sử dụng file-based locking.")
 
 # ============================================
 # GOOGLE SHEETS API INTEGRATION - NEW IMPORTS
@@ -48,6 +60,13 @@ FANPAGE_NAME = os.getenv("FANPAGE_NAME", "Shop thời trang")
 FCHAT_WEBHOOK_URL = os.getenv("FCHAT_WEBHOOK_URL", "").strip()
 FCHAT_TOKEN = os.getenv("FCHAT_TOKEN", "").strip()
 
+# Redis configuration
+REDIS_URL = os.getenv("REDIS_URL", "").strip()
+REDIS_HOST = os.getenv("REDIS_HOST", "localhost").strip()
+REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+REDIS_DB = int(os.getenv("REDIS_DB", "0"))
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "").strip()
+
 # ============================================
 # GOOGLE SHEETS API CONFIGURATION - NEW
 # ============================================
@@ -58,6 +77,63 @@ if not GOOGLE_SHEET_CSV_URL:
     GOOGLE_SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/18eI8Yn-WG8xN0YK8mWqgIOvn-USBhmXBH3sR2drvWus/export?format=csv"
 
 # ============================================
+# REDIS CLIENT INITIALIZATION
+# ============================================
+redis_client = None
+if REDIS_AVAILABLE and (REDIS_URL or REDIS_HOST):
+    try:
+        if REDIS_URL:
+            redis_client = redis.from_url(REDIS_URL)
+        else:
+            redis_client = redis.Redis(
+                host=REDIS_HOST,
+                port=REDIS_PORT,
+                db=REDIS_DB,
+                password=REDIS_PASSWORD if REDIS_PASSWORD else None,
+                socket_timeout=5,
+                socket_connect_timeout=5,
+                decode_responses=False
+            )
+        # Test connection
+        redis_client.ping()
+        print("✅ Redis connected successfully")
+    except Exception as e:
+        print(f"⚠️ Redis connection failed: {e}")
+        redis_client = None
+else:
+    print("⚠️ Redis not configured, using file-based locking")
+
+# ============================================
+# CLEANUP THREAD FOR OLD LOCK FILES
+# ============================================
+def cleanup_old_locks():
+    """Dọn dẹp các lock file cũ"""
+    while True:
+        try:
+            lock_dir = "message_locks"
+            if os.path.exists(lock_dir):
+                now = time.time()
+                for lock_file in glob.glob(os.path.join(lock_dir, "*.lock")):
+                    try:
+                        # Xóa lock file cũ hơn 5 phút
+                        mtime = os.path.getmtime(lock_file)
+                        if now - mtime > 300:  # 5 phút
+                            os.remove(lock_file)
+                    except:
+                        continue
+        except:
+            pass
+        
+        # Chạy mỗi 5 phút
+        time.sleep(300)
+
+# Khởi động cleanup thread
+if not redis_client:  # Chỉ cần cleanup thread nếu không dùng Redis
+    cleanup_thread = threading.Thread(target=cleanup_old_locks, daemon=True)
+    cleanup_thread.start()
+    print("✅ Cleanup thread started for file-based locking")
+
+# ============================================
 # APP ID CỦA BOT ĐỂ PHÂN BIỆT ECHO MESSAGE
 # ============================================
 BOT_APP_IDS = {"645956568292435"}  # App ID của bot từ log
@@ -66,6 +142,109 @@ BOT_APP_IDS = {"645956568292435"}  # App ID của bot từ log
 # OPENAI CLIENT
 # ============================================
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+
+# ============================================
+# MESSAGE PROCESSING LOCK FUNCTIONS
+# ============================================
+def mark_message_processed(mid: str, ttl: int = 60) -> bool:
+    """
+    Đánh dấu tin nhắn đã xử lý.
+    Trả về True nếu chưa xử lý, False nếu đã xử lý.
+    """
+    if not mid:
+        return True
+    
+    key = f"processed:{mid}"
+    
+    # Ưu tiên Redis nếu có
+    if redis_client:
+        try:
+            # Kiểm tra nếu đã tồn tại
+            if redis_client.exists(key):
+                return False
+            
+            # Đánh dấu đã xử lý với TTL
+            redis_client.setex(key, ttl, "1")
+            return True
+        except Exception as e:
+            print(f"⚠️ Redis error in mark_message_processed: {e}")
+            # Fallback to file-based
+    
+    # Fallback: Dùng file-based tracking
+    lock_dir = "message_locks"
+    os.makedirs(lock_dir, exist_ok=True)
+    
+    lock_file = os.path.join(lock_dir, f"{mid}.lock")
+    now = time.time()
+    
+    if os.path.exists(lock_file):
+        try:
+            with open(lock_file, 'r') as f:
+                lock_time = float(f.read().strip())
+            if now - lock_time < ttl:
+                return False
+        except:
+            pass
+    
+    # Tạo lock mới
+    try:
+        with open(lock_file, 'w') as f:
+            f.write(str(now))
+        return True
+    except:
+        return True  # Nếu không lock được, vẫn xử lý để không mất tin nhắn
+
+def acquire_user_lock(uid: str, ttl: int = 10) -> bool:
+    """
+    Acquire lock cho user để tránh xử lý song song.
+    Trả về True nếu lấy được lock, False nếu user đang bị lock.
+    """
+    if not uid:
+        return True
+    
+    key = f"user_lock:{uid}"
+    
+    # Ưu tiên Redis
+    if redis_client:
+        try:
+            # Thử đặt lock với NX (chỉ set nếu chưa tồn tại)
+            return redis_client.set(key, "1", nx=True, ex=ttl)
+        except Exception as e:
+            print(f"⚠️ Redis error in acquire_user_lock: {e}")
+            # Fallback to context-based
+    
+    # Fallback: Dùng context-based locking
+    ctx = USER_CONTEXT.get(uid, {})
+    if ctx.get("processing_lock"):
+        lock_start = ctx.get("lock_start_time", 0)
+        # Nếu lock quá 30 giây thì auto release
+        if time.time() - lock_start > 30:
+            ctx["processing_lock"] = False
+            return True
+        return False
+    
+    ctx["processing_lock"] = True
+    ctx["lock_start_time"] = time.time()
+    return True
+
+def release_user_lock(uid: str):
+    """Release lock cho user"""
+    if not uid:
+        return
+    
+    key = f"user_lock:{uid}"
+    
+    # Ưu tiên Redis
+    if redis_client:
+        try:
+            redis_client.delete(key)
+        except:
+            pass
+    else:
+        # Fallback: context-based
+        ctx = USER_CONTEXT.get(uid, {})
+        ctx["processing_lock"] = False
+        ctx["lock_start_time"] = 0
 
 # ============================================
 # CONTEXT PERSISTENCE SETUP
@@ -154,6 +333,7 @@ USER_CONTEXT = defaultdict(lambda: {
     "order_state": None,
     "order_data": {},
     "processing_lock": False,
+    "lock_start_time": 0,
     "postback_count": 0,
     "product_info_sent_ms": None,
     "last_product_info_time": 0,
@@ -176,6 +356,7 @@ USER_CONTEXT = defaultdict(lambda: {
     # Thêm trường cho debounce và duplicate detection
     "processed_message_mids": {},
     "last_processed_text": "",
+    "last_msg_time_processed": 0,
     # Thêm trường cho gửi ảnh sản phẩm
     "last_all_images_time": 0,
     "last_images_request_time": 0,
@@ -187,6 +368,8 @@ USER_CONTEXT = defaultdict(lambda: {
     "last_catalog_product": None,
     # Thêm dict để lưu nhiều sản phẩm từ catalog
     "catalog_products": {},
+    # Redis-based lock tracking
+    "redis_lock_acquired": False,
 })
 
 PRODUCTS = {}
@@ -2050,7 +2233,7 @@ def detect_ms_from_text(text: str) -> Optional[str]:
     return None
 
 # ============================================
-# HANDLE TEXT - XỬ LÝ VỚI FUNCTION CALLING
+# HANDLE TEXT - XỬ LÝ VỚI FUNCTION CALLING (ĐÃ CẢI THIỆN DEBOUNCE)
 # ============================================
 
 def handle_text_with_function_calling(uid: str, text: str):
@@ -2141,64 +2324,61 @@ def handle_text_with_function_calling(uid: str, text: str):
         print(f"Chat Error: {e}")
         send_message(uid, "Dạ em đang gặp chút trục trặc, anh/chị vui lòng thử lại sau ạ.")
 
-# ============================================
-# HANDLE TEXT - XỬ LÝ VỚI FUNCTION CALLING
-# ============================================
-
 def handle_text(uid: str, text: str):
-    """Xử lý tin nhắn văn bản từ người dùng - Sử dụng Function Calling"""
+    """Xử lý tin nhắn văn bản từ người dùng - Debounce mạnh"""
     if not text or len(text.strip()) == 0:
         return
     
+    # KIỂM TRA DEBOUNCE NÂNG CAO
+    now = time.time()
     ctx = USER_CONTEXT[uid]
-
-    if ctx.get("processing_lock"):
-        print(f"[TEXT SKIP] User {uid} đang được xử lý")
+    
+    # 1. Debounce theo thời gian (1.5 giây)
+    last_msg_time_processed = ctx.get("last_msg_time_processed", 0)
+    if now - last_msg_time_processed < 1.5:
+        print(f"[TEXT DEBOUNCE] Bỏ qua, chưa đủ 1.5s: {uid}")
         return
-
-    ctx["processing_lock"] = True
-
+    
+    # 2. Debounce theo nội dung
+    last_text = ctx.get("last_processed_text", "")
+    if text.strip().lower() == last_text.lower():
+        print(f"[TEXT DUPLICATE] Bỏ qua nội dung trùng: {text[:50]}...")
+        return
+    
+    # 3. Kiểm tra lock distributed
+    if not acquire_user_lock(uid, ttl=15):
+        print(f"[USER LOCKED] User {uid} đang được xử lý")
+        return
+    
     try:
-        now = time.time()
-        last_msg_time = ctx.get("last_msg_time", 0)
-        
-        # Debounce: kiểm tra tin nhắn trùng lặp
-        if now - last_msg_time < 1:
-            last_text = ctx.get("last_processed_text", "")
-            if text.strip().lower() == last_text.lower():
-                print(f"[TEXT DEBOUNCE] Bỏ qua tin nhắn trùng lặp: {text[:50]}...")
-                ctx["processing_lock"] = False
-                return
-        
-        ctx["last_msg_time"] = now
+        # Cập nhật thời gian xử lý
+        ctx["last_msg_time_processed"] = now
         ctx["last_processed_text"] = text.strip().lower()
+        ctx["processing_lock"] = True
+        ctx["lock_start_time"] = now
         
+        # Xử lý chính
         load_products()
         ctx["postback_count"] = 0
 
         # KIỂM TRA VÀ KHÔI PHỤC CONTEXT NẾU CẦN
-        # Nếu context trống (do multi-worker), thử khôi phục từ file
         if not ctx.get("last_ms") and not ctx.get("product_history"):
             file_context = load_user_context(uid)
             if file_context:
                 print(f"[CONTEXT RECOVERY] Khôi phục context từ file cho {uid}")
-                # Cập nhật context từ file
                 for key, value in file_context.items():
-                    if key not in ctx or not ctx[key]:  # Chỉ cập nhật nếu trống
+                    if key not in ctx or not ctx[key]:
                         ctx[key] = value
         
         if handle_order_form_step(uid, text):
-            ctx["processing_lock"] = False
             return
         
         # ƯU TIÊN: Xử lý follow-up từ catalog
         if handle_catalog_followup(uid, text):
-            ctx["processing_lock"] = False
             return
         
         # ƯU TIÊN: Xử lý tin nhắn sau click quảng cáo ADS
         if handle_ads_referral_product(uid, text):
-            ctx["processing_lock"] = False
             return
 
         # Tìm sản phẩm phù hợp
@@ -2224,7 +2404,6 @@ def handle_text(uid: str, text: str):
                 
                 # Gửi toàn bộ ảnh sản phẩm
                 send_all_product_images(uid, current_ms)
-                ctx["processing_lock"] = False  # Release lock sau khi gửi xong
                 return
             else:
                 print(f"[NO IMAGE REQUEST] Intent: {intent_result.get('intent')}, Confidence: {intent_result.get('confidence')}")
@@ -2240,8 +2419,10 @@ def handle_text(uid: str, text: str):
         except:
             pass
     finally:
-        if ctx.get("processing_lock"):
-            ctx["processing_lock"] = False
+        # Release locks
+        release_user_lock(uid)
+        ctx["processing_lock"] = False
+        ctx["lock_start_time"] = 0
 
 # ============================================
 # GOOGLE SHEETS API FUNCTIONS
@@ -2414,7 +2595,7 @@ def save_order_to_local_csv(order_data: dict):
         print(f"❌ Lỗi khi lưu file local backup: {str(e)}")
 
 # ============================================
-# WEBHOOK HANDLER
+# WEBHOOK HANDLER - ĐÃ CẢI THIỆN VỚI KIỂM TRA NGHIÊM NGẶT
 # ============================================
 
 @app.route("/", methods=["GET"])
@@ -2449,121 +2630,153 @@ def webhook():
                 continue
 
             # ============================================
-            # XỬ LÝ ATTACHMENT TEMPLATE TỪ CATALOG - LƯU RETAILER_ID
+            # KIỂM TRA NGHIÊM NGẶT TRƯỚC KHI XỬ LÝ
             # ============================================
-            if "message" in m and "attachments" in m["message"]:
-                attachments = m["message"]["attachments"]
-                for att in attachments:
-                    if att.get("type") == "template":
-                        payload = att.get("payload", {})
-                        # Kiểm tra xem có phải product template không
-                        if "product" in payload:
-                            product = payload["product"]
-                            elements = product.get("elements", [])
-                            if elements and len(elements) > 0:
-                                element = elements[0]
-                                retailer_id = element.get("retailer_id")
-                                product_id = element.get("id")
-                                
-                                if retailer_id:
-                                    ctx = USER_CONTEXT[sender_id]
-                                    ctx["last_retailer_id"] = retailer_id
-                                    ctx["last_product_id"] = product_id
-                                    ctx["catalog_view_time"] = time.time()
-                                    
-                                    # Lưu vào catalog_products dict
-                                    if "catalog_products" not in ctx:
-                                        ctx["catalog_products"] = {}
-                                    ctx["catalog_products"][product_id] = retailer_id
-                                    
-                                    # Giới hạn kích thước catalog_products
-                                    if len(ctx["catalog_products"]) > 10:
-                                        # Xóa phần tử cũ nhất
-                                        oldest_key = list(ctx["catalog_products"].keys())[0]
-                                        del ctx["catalog_products"][oldest_key]
-                                    
-                                    # Trích xuất mã sản phẩm từ retailer_id
-                                    ms_from_retailer = extract_ms_from_retailer_id(retailer_id)
-                                    if ms_from_retailer:
-                                        ctx["last_catalog_product"] = ms_from_retailer
-                                        ctx["last_ms"] = ms_from_retailer
-                                        update_product_context(sender_id, ms_from_retailer)
-                                    
-                                    print(f"[CATALOG] Lưu retailer_id: {retailer_id} -> MS: {ms_from_retailer} cho user {sender_id}")
-                                    
-                                    # KHÔNG gửi tin nhắn tự động để tránh spam
-                                    # Chỉ lưu retailer_id, chờ khách hỏi mới trả lời
-
-            # ============================================
-            # XỬ LÝ ECHO MESSAGE TỪ FCHAT - GIỮ NGUYÊN LOGIC TRÍCH XUẤT MÃ
-            # ============================================
-            if m.get("message", {}).get("is_echo"):
-                # Lấy recipient_id (người nhận tin nhắn echo) - chính là khách hàng
-                recipient_id = m.get("recipient", {}).get("id")
-                if not recipient_id:
-                    continue
+            
+            # Lấy message ID (mid) từ các loại tin nhắn
+            msg_mid = None
+            if "message" in m:
+                msg_mid = m["message"].get("mid")
+            elif "postback" in m:
+                msg_mid = m["postback"].get("mid")
+            elif "delivery" in m:
+                msg_mid = m["delivery"].get("mid")
+            elif "read" in m:
+                msg_mid = m["read"].get("mid")
+            
+            # KIỂM TRA 1: Chống trùng lặp message ID
+            if msg_mid and not mark_message_processed(msg_mid, ttl=60):
+                print(f"[DUPLICATE] Bỏ qua message đã xử lý: {msg_mid}")
+                continue
+            
+            # KIỂM TRA 2: Debounce theo thời gian và sender
+            current_time = time.time()
+            user_key = f"user_last_msg:{sender_id}"
+            last_msg_time = 0
+            
+            if redis_client:
+                try:
+                    last_msg_time = float(redis_client.get(user_key) or 0)
+                except:
+                    pass
+            
+            # Nếu tin nhắn đến quá nhanh (<1 giây) thì bỏ qua
+            if current_time - last_msg_time < 1.0:
+                print(f"[DEBOUNCE] Bỏ qua tin nhắn quá nhanh từ {sender_id}")
+                continue
+            
+            # Cập nhật thời gian tin nhắn cuối
+            if redis_client:
+                try:
+                    redis_client.setex(user_key, 5, str(current_time))
+                except:
+                    pass
+            
+            # KIỂM TRA 3: Kiểm tra user lock distributed
+            if not acquire_user_lock(sender_id, ttl=10):
+                print(f"[USER LOCKED] User {sender_id} đang được xử lý, bỏ qua")
+                continue
+            
+            try:
+                # ============================================
+                # PHẦN XỬ LÝ CHÍNH (GIỮ NGUYÊN LOGIC)
+                # ============================================
                 
-                # Lấy thông tin echo message
-                msg = m["message"]
-                msg_mid = msg.get("mid")
-                echo_text = msg.get("text", "")
-                attachments = msg.get("attachments", [])
-                app_id = msg.get("app_id", "")
+                ctx = USER_CONTEXT[sender_id]
+                ctx["processing_lock"] = True
+                ctx["lock_start_time"] = current_time
                 
-                # **QUAN TRỌNG**: KIỂM TRA CÓ PHẢI ECHO TỪ BOT KHÔNG
-                # Nếu là echo từ bot → BỎ QUA để tránh lặp
-                if is_bot_generated_echo(echo_text, app_id, attachments):
-                    print(f"[ECHO BOT] Bỏ qua echo message từ bot: {echo_text[:50]}...")
-                    continue
+                # Xử lý attachment template từ catalog
+                if "message" in m and "attachments" in m["message"]:
+                    attachments = m["message"]["attachments"]
+                    for att in attachments:
+                        if att.get("type") == "template":
+                            payload = att.get("payload", {})
+                            # Kiểm tra xem có phải product template không
+                            if "product" in payload:
+                                product = payload["product"]
+                                elements = product.get("elements", [])
+                                if elements and len(elements) > 0:
+                                    element = elements[0]
+                                    retailer_id = element.get("retailer_id")
+                                    product_id = element.get("id")
+                                    
+                                    if retailer_id:
+                                        ctx["last_retailer_id"] = retailer_id
+                                        ctx["last_product_id"] = product_id
+                                        ctx["catalog_view_time"] = time.time()
+                                        
+                                        # Lưu vào catalog_products dict
+                                        if "catalog_products" not in ctx:
+                                            ctx["catalog_products"] = {}
+                                        ctx["catalog_products"][product_id] = retailer_id
+                                        
+                                        # Giới hạn kích thước catalog_products
+                                        if len(ctx["catalog_products"]) > 10:
+                                            # Xóa phần tử cũ nhất
+                                            oldest_key = list(ctx["catalog_products"].keys())[0]
+                                            del ctx["catalog_products"][oldest_key]
+                                        
+                                        # Trích xuất mã sản phẩm từ retailer_id
+                                        ms_from_retailer = extract_ms_from_retailer_id(retailer_id)
+                                        if ms_from_retailer:
+                                            ctx["last_catalog_product"] = ms_from_retailer
+                                            ctx["last_ms"] = ms_from_retailer
+                                            update_product_context(sender_id, ms_from_retailer)
+                                        
+                                        print(f"[CATALOG] Lưu retailer_id: {retailer_id} -> MS: {ms_from_retailer} cho user {sender_id}")
                 
-                # **GIỮ NGUYÊN**: Kiểm tra duplicate echo message
-                if msg_mid:
-                    ctx = USER_CONTEXT[recipient_id]
-                    if "processed_echo_mids" not in ctx:
-                        ctx["processed_echo_mids"] = set()
+                # Xử lý echo message từ Fchat
+                if m.get("message", {}).get("is_echo"):
+                    msg = m["message"]
+                    msg_mid = msg.get("mid")
+                    echo_text = msg.get("text", "")
+                    attachments = msg.get("attachments", [])
+                    app_id = msg.get("app_id", "")
                     
-                    if msg_mid in ctx["processed_echo_mids"]:
-                        print(f"[ECHO DUPLICATE] Bỏ qua echo message đã xử lý: {msg_mid}")
+                    # **QUAN TRỌNG**: KIỂM TRA CÓ PHẢI ECHO TỪ BOT KHÔNG
+                    if is_bot_generated_echo(echo_text, app_id, attachments):
+                        print(f"[ECHO BOT] Bỏ qua echo message từ bot: {echo_text[:50]}...")
                         continue
                     
-                    now = time.time()
-                    last_echo_time = ctx.get("last_echo_processed_time", 0)
+                    # **GIỮ NGUYÊN**: Kiểm tra duplicate echo message
+                    if msg_mid:
+                        if "processed_echo_mids" not in ctx:
+                            ctx["processed_echo_mids"] = set()
+                        
+                        if msg_mid in ctx["processed_echo_mids"]:
+                            print(f"[ECHO DUPLICATE] Bỏ qua echo message đã xử lý: {msg_mid}")
+                            continue
+                        
+                        now = time.time()
+                        last_echo_time = ctx.get("last_echo_processed_time", 0)
+                        
+                        if now - last_echo_time < 2:
+                            print(f"[ECHO DEBOUNCE] Bỏ qua echo message, chưa đủ 2s: {msg_mid}")
+                            continue
+                        
+                        ctx["last_echo_processed_time"] = now
+                        ctx["processed_echo_mids"].add(msg_mid)
+                        
+                        if len(ctx["processed_echo_mids"]) > 20:
+                            ctx["processed_echo_mids"] = set(list(ctx["processed_echo_mids"])[-20:])
                     
-                    if now - last_echo_time < 2:
-                        print(f"[ECHO DEBOUNCE] Bỏ qua echo message, chưa đủ 2s: {msg_mid}")
-                        continue
+                    # **GIỮ NGUYÊN LOGIC CŨ**: Xử lý echo từ bình luận người dùng
+                    print(f"[ECHO USER] Đang xử lý echo từ bình luận người dùng")
                     
-                    ctx["last_echo_processed_time"] = now
-                    ctx["processed_echo_mids"].add(msg_mid)
+                    # QUAN TRỌNG: Load sản phẩm trước khi tìm mã
+                    load_products()
                     
-                    if len(ctx["processed_echo_mids"]) > 20:
-                        ctx["processed_echo_mids"] = set(list(ctx["processed_echo_mids"])[-20:])
-                
-                # **GIỮ NGUYÊN LOGIC CŨ**: Xử lý echo từ bình luận người dùng
-                print(f"[ECHO USER] Đang xử lý echo từ bình luận người dùng")
-                
-                # QUAN TRỌNG: Load sản phẩm trước khi tìm mã
-                load_products()
-                
-                # **GIỮ NGUYÊN**: Tìm mã sản phẩm trong tin nhắn echo
-                detected_ms = detect_ms_from_text(echo_text)
-                
-                if detected_ms:
-                    # KIỂM TRA LOCK để tránh xử lý song song
-                    ctx = USER_CONTEXT[recipient_id]
-                    if ctx.get("processing_lock"):
-                        print(f"[ECHO LOCKED] User {recipient_id} đang được xử lý, bỏ qua echo")
-                        continue
+                    # **GIỮ NGUYÊN**: Tìm mã sản phẩm trong tin nhắn echo
+                    detected_ms = detect_ms_from_text(echo_text)
                     
-                    ctx["processing_lock"] = True
-                    
-                    try:
+                    if detected_ms:
                         # **QUAN TRỌNG: Cập nhật context khi phát hiện mã từ Fchat echo**
                         ctx["last_ms"] = detected_ms
                         ctx["referral_source"] = "fchat_echo"
-                        update_product_context(recipient_id, detected_ms)
+                        update_product_context(sender_id, detected_ms)
                         
-                        print(f"[CONTEXT UPDATED] Đã ghi nhận mã {detected_ms} vào ngữ cảnh cho user {recipient_id}")
+                        print(f"[CONTEXT UPDATED] Đã ghi nhận mã {detected_ms} vào ngữ cảnh cho user {sender_id}")
                         
                         # Gửi tin nhắn chào hỏi đơn giản (TUÂN THỦ CHÍNH SÁCH FACEBOOK)
                         product_name = PRODUCTS.get(detected_ms, {}).get('Ten', 'sản phẩm') if detected_ms in PRODUCTS else 'sản phẩm'
@@ -2577,162 +2790,134 @@ Anh/chị có muốn em tư vấn thêm về sản phẩm không ạ?
 (Hoặc anh/chị có thể gửi mã sản phẩm cụ thể như MS123456)"""
                         
                         # CHỈ gửi 1 tin nhắn duy nhất
-                        send_message(recipient_id, welcome_msg)
+                        send_message(sender_id, welcome_msg)
                         
-                    finally:
-                        ctx["processing_lock"] = False
-                else:
-                    print(f"[ECHO FCHAT] Không tìm thấy mã sản phẩm trong echo: {echo_text[:100]}...")
-                
-                continue
-            
-            if m.get("delivery") or m.get("read"):
-                continue
-            
-            # ============================================
-            # XỬ LÝ REFERRAL (TỪ QUẢNG CÁO, FACEBOOK SHOP, CATALOG)
-            # ============================================
-            if m.get("referral"):
-                ref = m["referral"]
-                ctx = USER_CONTEXT[sender_id]
-                ctx["referral_source"] = ref.get("source", "unknown")
-                referral_payload = ref.get("ref", "")
-                ctx["referral_payload"] = referral_payload
-                
-                print(f"[REFERRAL] User {sender_id} từ {ctx['referral_source']} với payload: {referral_payload}")
-                
-                handled = False
-                
-                # Xử lý đặc biệt cho ADS với catalog
-                if ref.get("source") == "ADS" and ref.get("ads_context_data"):
-                    ads_data = ref.get("ads_context_data", {})
-                    ad_title = ads_data.get("ad_title", "")
+                    else:
+                        print(f"[ECHO FCHAT] Không tìm thấy mã sản phẩm trong echo: {echo_text[:100]}...")
                     
-                    print(f"[ADS REFERRAL] Ad title: {ad_title}")
+                    continue
+                
+                if m.get("delivery") or m.get("read"):
+                    continue
+                
+                # ============================================
+                # XỬ LÝ REFERRAL (TỪ QUẢNG CÁO, FACEBOOK SHOP, CATALOG)
+                # ============================================
+                if m.get("referral"):
+                    ref = m["referral"]
+                    ctx["referral_source"] = ref.get("source", "unknown")
+                    referral_payload = ref.get("ref", "")
+                    ctx["referral_payload"] = referral_payload
                     
-                    # ƯU TIÊN 1: Trích xuất mã từ ad_title
-                    ms_from_ad = extract_ms_from_ad_title(ad_title)
-                    if ms_from_ad and ms_from_ad in PRODUCTS:
-                        print(f"[ADS PRODUCT] Xác định sản phẩm từ ad_title: {ms_from_ad}")
+                    print(f"[REFERRAL] User {sender_id} từ {ctx['referral_source']} với payload: {referral_payload}")
+                    
+                    handled = False
+                    
+                    # Xử lý đặc biệt cho ADS với catalog
+                    if ref.get("source") == "ADS" and ref.get("ads_context_data"):
+                        ads_data = ref.get("ads_context_data", {})
+                        ad_title = ads_data.get("ad_title", "")
                         
-                        # KHÔNG reset context, mà update context với sản phẩm mới
-                        ctx["last_ms"] = ms_from_ad
-                        update_product_context(sender_id, ms_from_ad)
+                        print(f"[ADS REFERRAL] Ad title: {ad_title}")
                         
-                        # THAY ĐỔI: KHÔNG gửi thông tin sản phẩm ngay (TUÂN THỦ CHÍNH SÁCH)
-                        # Chỉ gửi tin nhắn chào hỏi đơn giản
-                        welcome_msg = f"""Chào anh/chị! 👋 
+                        # ƯU TIÊN 1: Trích xuất mã từ ad_title
+                        ms_from_ad = extract_ms_from_ad_title(ad_title)
+                        if ms_from_ad and ms_from_ad in PRODUCTS:
+                            print(f"[ADS PRODUCT] Xác định sản phẩm từ ad_title: {ms_from_ad}")
+                            
+                            # KHÔNG reset context, mà update context với sản phẩm mới
+                            ctx["last_ms"] = ms_from_ad
+                            update_product_context(sender_id, ms_from_ad)
+                            
+                            # THAY ĐỔI: KHÔNG gửi thông tin sản phẩm ngay (TUÂN THỦ CHÍNH SÁCH)
+                            # Chỉ gửi tin nhắn chào hỏi đơn giản
+                            welcome_msg = f"""Chào anh/chị! 👋 
 Em là trợ lý AI của {get_fanpage_name_from_api()}.
 
 Em thấy anh/chị quan tâm đến sản phẩm của shop từ quảng cáo.
 Anh/chị có muốn em tư vấn thêm không ạ?"""
-                        
-                        send_message(sender_id, welcome_msg)
-                        handled = True
-                    
-                    # ƯU TIÊN 2: Kiểm tra referral payload
-                    if not handled and referral_payload:
-                        detected_ms = detect_ms_from_text(referral_payload)
-                        if detected_ms and detected_ms in PRODUCTS:
-                            print(f"[ADS REFERRAL] Nhận diện mã từ payload: {detected_ms}")
-                            ctx["last_ms"] = detected_ms
-                            update_product_context(sender_id, detected_ms)
                             
-                            welcome_msg = f"""Chào anh/chị! 👋 
+                            send_message(sender_id, welcome_msg)
+                            handled = True
+                        
+                        # ƯU TIÊN 2: Kiểm tra referral payload
+                        if not handled and referral_payload:
+                            detected_ms = detect_ms_from_text(referral_payload)
+                            if detected_ms and detected_ms in PRODUCTS:
+                                print(f"[ADS REFERRAL] Nhận diện mã từ payload: {detected_ms}")
+                                ctx["last_ms"] = detected_ms
+                                update_product_context(sender_id, detected_ms)
+                                
+                                welcome_msg = f"""Chào anh/chị! 👋 
 Em là trợ lý AI của {get_fanpage_name_from_api()}.
 
 Em thấy anh/chị quan tâm đến sản phẩm của shop.
 Anh/chị có muốn em tư vấn thêm không ạ?"""
-                            
-                            send_message(sender_id, welcome_msg)
-                            handled = True
-                
-                # Nếu đã xử lý xong (ADS có sản phẩm) thì bỏ qua phần sau
-                if handled:
-                    continue
-                
-                # CHỈ reset context nếu KHÔNG phải từ ADS hoặc không xác định được sản phẩm
-                if ctx.get("referral_source") != "ADS" or not ctx.get("last_ms"):
-                    print(f"[REFERRAL RESET] Reset context cho user {sender_id}")
-                    ctx["last_ms"] = None
-                    ctx["product_history"] = []
-                
-                # Fallback: Xử lý referral bình thường
-                if referral_payload:
-                    detected_ms = detect_ms_from_text(referral_payload)
+                                
+                                send_message(sender_id, welcome_msg)
+                                handled = True
                     
-                    if detected_ms and detected_ms in PRODUCTS:
-                        print(f"[REFERRAL AUTO] Nhận diện mã sản phẩm từ referral: {detected_ms}")
+                    # Nếu đã xử lý xong (ADS có sản phẩm) thì bỏ qua phần sau
+                    if handled:
+                        continue
+                    
+                    # CHỈ reset context nếu KHÔNG phải từ ADS hoặc không xác định được sản phẩm
+                    if ctx.get("referral_source") != "ADS" or not ctx.get("last_ms"):
+                        print(f"[REFERRAL RESET] Reset context cho user {sender_id}")
+                        ctx["last_ms"] = None
+                        ctx["product_history"] = []
+                    
+                    # Fallback: Xử lý referral bình thường
+                    if referral_payload:
+                        detected_ms = detect_ms_from_text(referral_payload)
                         
-                        ctx["last_ms"] = detected_ms
-                        update_product_context(sender_id, detected_ms)
-                        
-                        welcome_msg = f"""Chào anh/chị! 👋 
+                        if detected_ms and detected_ms in PRODUCTS:
+                            print(f"[REFERRAL AUTO] Nhận diện mã sản phẩm từ referral: {detected_ms}")
+                            
+                            ctx["last_ms"] = detected_ms
+                            update_product_context(sender_id, detected_ms)
+                            
+                            welcome_msg = f"""Chào anh/chị! 👋 
 Em là trợ lý AI của {FANPAGE_NAME}.
 
 Em thấy anh/chị quan tâm đến sản phẩm mã [{detected_ms}].
 Anh/chị có muốn em tư vấn thêm không ạ?"""
-                        send_message(sender_id, welcome_msg)
-                        continue
-                    else:
-                        welcome_msg = f"""Chào anh/chị! 👋 
-Em là trợ lý AI của {FANPAGE_NAME}.
-
-Để em tư vấn chính xác, anh/chị vui lòng:
-1. Gửi mã sản phẩm (ví dụ: [MS123456])
-2. Hoặc mô tả sản phẩm bạn đang tìm
-
-Anh/chị quan tâm sản phẩm nào ạ?"""
-                        send_message(sender_id, welcome_msg)
-                        continue
-            
-            # ============================================
-            # XỬ LÝ POSTBACK (GET_STARTED, ADVICE_, ORDER_)
-            # ============================================
-            if "postback" in m:
-                payload = m["postback"].get("payload")
-                if payload:
-                    ctx = USER_CONTEXT[sender_id]
-                    postback_id = m["postback"].get("mid")
-                    now = time.time()
-                    
-                    if postback_id and postback_id in ctx.get("processed_postbacks", set()):
-                        print(f"[POSTBACK DUPLICATE] Bỏ qua postback trùng: {postback_id}")
-                        continue
-                    
-                    last_postback_time = ctx.get("last_postback_time", 0)
-                    if now - last_postback_time < 1:
-                        print(f"[POSTBACK SPAM] User {sender_id} gửi postback quá nhanh")
-                        continue
-                    
-                    if postback_id:
-                        if "processed_postbacks" not in ctx:
-                            ctx["processed_postbacks"] = set()
-                        ctx["processed_postbacks"].add(postback_id)
-                        if len(ctx["processed_postbacks"]) > 10:
-                            ctx["processed_postbacks"] = set(list(ctx["processed_postbacks"])[-10:])
-                    
-                    ctx["last_postback_time"] = now
-                    
-                    if payload == "GET_STARTED":
-                        ctx["referral_source"] = "get_started"
-                        welcome_msg = f"""Chào anh/chị! 👋 
-Em là trợ lý AI của {FANPAGE_NAME}.
-
-Để em tư vấn chính xác, anh/chị vui lòng:
-1. Gửi mã sản phẩm (ví dụ: [MS123456])
-2. Hoặc mô tả sản phẩm bạn đang tìm
-
-Anh/chị quan tâm sản phẩm nào ạ?"""
-                        send_message(sender_id, welcome_msg)
-                    
-                    elif payload.startswith("ADVICE_"):
-                        if ctx.get("processing_lock"):
-                            print(f"[POSTBACK LOCKED] User {sender_id} đang được xử lý, bỏ qua ADVICE")
+                            send_message(sender_id, welcome_msg)
                             continue
+                        else:
+                            welcome_msg = f"""Chào anh/chị! 👋 
+Em là trợ lý AI của {FANPAGE_NAME}.
+
+Để em tư vấn chính xác, anh/chị vui lòng:
+1. Gửi mã sản phẩm (ví dụ: [MS123456])
+2. Hoặc mô tả sản phẩm bạn đang tìm
+
+Anh/chị quan tâm sản phẩm nào ạ?"""
+                            send_message(sender_id, welcome_msg)
+                            continue
+                
+                # ============================================
+                # XỬ LÝ POSTBACK (GET_STARTED, ADVICE_, ORDER_)
+                # ============================================
+                if "postback" in m:
+                    payload = m["postback"].get("payload")
+                    if payload:
+                        postback_id = m["postback"].get("mid")
+                        now = time.time()
                         
-                        ctx["processing_lock"] = True
-                        try:
+                        if payload == "GET_STARTED":
+                            ctx["referral_source"] = "get_started"
+                            welcome_msg = f"""Chào anh/chị! 👋 
+Em là trợ lý AI của {FANPAGE_NAME}.
+
+Để em tư vấn chính xác, anh/chị vui lòng:
+1. Gửi mã sản phẩm (ví dụ: [MS123456])
+2. Hoặc mô tả sản phẩm bạn đang tìm
+
+Anh/chị quan tâm sản phẩm nào ạ?"""
+                            send_message(sender_id, welcome_msg)
+                        
+                        elif payload.startswith("ADVICE_"):
                             load_products()
                             ms = payload.replace("ADVICE_", "")
                             if ms in PRODUCTS:
@@ -2741,16 +2926,8 @@ Anh/chị quan tâm sản phẩm nào ạ?"""
                                 send_product_info_debounced(sender_id, ms)
                             else:
                                 send_message(sender_id, "❌ Em không tìm thấy sản phẩm này. Anh/chị vui lòng kiểm tra lại mã sản phẩm ạ.")
-                        finally:
-                            ctx["processing_lock"] = False
-                    
-                    elif payload.startswith("ORDER_"):
-                        if ctx.get("processing_lock"):
-                            print(f"[POSTBACK LOCKED] User {sender_id} đang được xử lý, bỏ qua ORDER")
-                            continue
                         
-                        ctx["processing_lock"] = True
-                        try:
+                        elif payload.startswith("ORDER_"):
                             load_products()
                             ms = payload.replace("ORDER_", "")
                             if ms in PRODUCTS:
@@ -2762,66 +2939,49 @@ Anh/chị quan tâm sản phẩm nào ạ?"""
                                 send_message(sender_id, f"🎯 Anh/chị chọn sản phẩm [{ms}] {product_name}!\n\n📋 Đặt hàng ngay tại đây:\n{order_link}")
                             else:
                                 send_message(sender_id, "❌ Em không tìm thấy sản phẩm này. Anh/chị vui lòng kiểm tra lại mã sản phẩm ạ.")
-                        finally:
-                            ctx["processing_lock"] = False
-                    
-                    continue
-            
-            # ============================================
-            # XỬ LÝ TIN NHẮN THƯỜNG (TEXT & ẢNH) - THÊM DEBOUNCE
-            # ============================================
-            if "message" in m:
-                msg = m["message"]
-                text = msg.get("text")
-                attachments = msg.get("attachments") or []
+                        
+                        continue
                 
-                msg_mid = msg.get("mid")
-                timestamp = m.get("timestamp", 0)
-                
-                if msg_mid:
-                    ctx = USER_CONTEXT[sender_id]
-                    if "processed_message_mids" not in ctx:
-                        ctx["processed_message_mids"] = {}
+                # ============================================
+                # XỬ LÝ TIN NHẮN THƯỜNG (TEXT & ẢNH)
+                # ============================================
+                if "message" in m:
+                    msg = m["message"]
+                    text = msg.get("text")
+                    attachments = msg.get("attachments") or []
                     
-                    if msg_mid in ctx["processed_message_mids"]:
-                        processed_time = ctx["processed_message_mids"][msg_mid]
-                        now = time.time()
-                        if now - processed_time < 3:
-                            print(f"[MSG DUPLICATE] Bỏ qua message đã xử lý: {msg_mid}")
-                            continue
-                    
-                    last_msg_time = ctx.get("last_msg_time", 0)
+                    # KIỂM TRA: Debounce chi tiết trong context
                     now = time.time()
+                    last_msg_time = ctx.get("last_msg_time", 0)
                     
-                    if now - last_msg_time < 0.5:
-                        print(f"[MSG DEBOUNCE] Message đến quá nhanh, bỏ qua: {msg_mid}")
+                    if now - last_msg_time < 0.8:
+                        print(f"[CONTEXT DEBOUNCE] Tin nhắn quá nhanh trong context: {sender_id}")
                         continue
                     
                     ctx["last_msg_time"] = now
-                    ctx["processed_message_mids"][msg_mid] = now
                     
-                    if len(ctx["processed_message_mids"]) > 50:
-                        sorted_items = sorted(ctx["processed_message_mids"].items(), key=lambda x: x[1], reverse=True)[:30]
-                        ctx["processed_message_mids"] = dict(sorted_items)
-                
-                if text:
-                    ctx = USER_CONTEXT[sender_id]
-                    if ctx.get("processing_lock"):
-                        print(f"[TEXT LOCKED] User {sender_id} đang được xử lý, bỏ qua text: {text[:50]}...")
-                        continue
+                    # KIỂM TRA: Kiểm tra tin nhắn trùng lặp nội dung
+                    if text:
+                        last_text = ctx.get("last_processed_text", "")
+                        if text.strip().lower() == last_text.lower():
+                            print(f"[DUPLICATE TEXT] Bỏ qua tin nhắn trùng nội dung: {text[:50]}...")
+                            continue
+                        ctx["last_processed_text"] = text.strip().lower()
                     
-                    handle_text(sender_id, text)
-                elif attachments:
-                    for att in attachments:
-                        if att.get("type") == "image":
-                            image_url = att.get("payload", {}).get("url")
-                            if image_url:
-                                ctx = USER_CONTEXT[sender_id]
-                                if ctx.get("processing_lock"):
-                                    print(f"[IMAGE LOCKED] User {sender_id} đang được xử lý, bỏ qua image")
-                                    continue
-                                
-                                handle_image(sender_id, image_url)
+                    if text:
+                        handle_text(sender_id, text)
+                    elif attachments:
+                        for att in attachments:
+                            if att.get("type") == "image":
+                                image_url = att.get("payload", {}).get("url")
+                                if image_url:
+                                    handle_image(sender_id, image_url)
+            
+            finally:
+                # Release locks
+                release_user_lock(sender_id)
+                ctx["processing_lock"] = False
+                ctx["lock_start_time"] = 0
 
     return "OK", 200
 
@@ -4058,6 +4218,15 @@ def health_check():
         except Exception as e:
             sheets_service_status = f"Connection Error: {type(e).__name__}"
     
+    # Kiểm tra Redis
+    redis_status = "Not Configured"
+    if redis_client:
+        try:
+            redis_client.ping()
+            redis_status = "Connected"
+        except Exception as e:
+            redis_status = f"Connection Error: {type(e).__name__}"
+    
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
@@ -4070,6 +4239,12 @@ def health_check():
         "openai_vision_available": bool(client and OPENAI_API_KEY),
         "facebook_configured": bool(PAGE_ACCESS_TOKEN),
         "fanpage_name": current_fanpage_name,
+        "redis_integration": {
+            "status": redis_status,
+            "lock_mechanism": "Distributed (Redis + file-based fallback)",
+            "message_duplicate_protection": "Enabled",
+            "user_lock_protection": "Enabled (10s TTL)"
+        },
         "google_sheets_integration": {
             "method": "Official Google Sheets API v4",
             "sheet_id_configured": bool(GOOGLE_SHEET_ID),
@@ -4116,7 +4291,15 @@ def health_check():
         ],
         "function_calling_model": "gpt-4o-mini",
         "system_prompt_optimized": "True",
-        "conversation_history_tracking": "ENABLED (10 messages)"
+        "conversation_history_tracking": "ENABLED (10 messages)",
+        "debounce_configuration": {
+            "message_processing": "1.5 seconds",
+            "user_lock": "10 seconds",
+            "message_id_tracking": "60 seconds",
+            "image_send": "5 seconds",
+            "echo_processing": "2 seconds"
+        },
+        "lock_cleanup": "Enabled (file-based when Redis not available)"
     }, 200
 
 # ============================================
@@ -4128,6 +4311,7 @@ if __name__ == "__main__":
     print(f"🟢 GPT-4o Vision API: {'SẴN SÀNG' if client and OPENAI_API_KEY else 'CHƯA CẤU HÌNH'}")
     print(f"🟢 Fanpage: {get_fanpage_name_from_api()}")
     print(f"🟢 Domain: {DOMAIN}")
+    print(f"🟢 Redis: {'CONNECTED' if redis_client else 'NOT CONFIGURED (using file-based locking)'}")
     print(f"🟢 Google Sheets API: {'SẴN SÀNG' if GOOGLE_SHEET_ID and GOOGLE_SHEETS_CREDENTIALS_JSON else 'CHƯA CẤU HÌNH'}")
     print(f"🟢 Sheet ID: {GOOGLE_SHEET_ID[:20]}..." if GOOGLE_SHEET_ID else "🟡 Chưa cấu hình")
     print(f"🟢 OpenAI Function Calling: {'TÍCH HỢP THÀNH CÔNG' if client else 'CHƯA CẤU HÌNH'}")
@@ -4139,7 +4323,7 @@ if __name__ == "__main__":
     print(f"🟢 Address Validation: BẬT")
     print(f"🟢 Phone Validation: BẬT (regex)")
     print(f"🟢 Image Debounce: 3 giây")
-    print(f"🟢 Text Message Debounce: 1 giây")
+    print(f"🟢 Text Message Debounce: 1.5 giây")
     print(f"🟢 Echo Message Debounce: 2 giây")
     print(f"🟢 Bot Echo Filter: BẬT (phân biệt echo từ bot vs Fchat)")
     print(f"🟢 Fchat Echo Processing: BẬT (giữ nguyên logic trích xuất mã từ Fchat)")
@@ -4148,7 +4332,7 @@ if __name__ == "__main__":
     print(f"🟢 ADS Referral Processing: BẬT (trích xuất mã từ ad_title)")
     print(f"🟢 ADS Context: KHÔNG reset khi đã xác định được sản phẩm")
     print(f"🟢 Referral Auto Processing: BẬT")
-    print(f"🟢 Duplicate Message Protection: BẬT")
+    print(f"🟢 Duplicate Message Protection: BẬT (Redis/file-based)")
     print(f"🟢 Intent Analysis: GPT-based (phát hiện yêu cầu xem ảnh)")
     print(f"🟢 Image Send Debounce: 5 giây")
     print(f"🟢 Image Request Confidence Threshold: 0.85")
@@ -4175,5 +4359,11 @@ if __name__ == "__main__":
     print(f"\n🔧 QUAN TRỌNG: ĐÃ THÊM HỆ THỐNG LƯU CONTEXT BỀN VỮNG")
     print(f"🔧 FIX: Bot sẽ tự động khôi phục context từ file khi bị mất do multi-worker")
     print(f"🔧 TUÂN THỦ: Không gửi sản phẩm tự động từ ADS/Fchat (chỉ chào hỏi)")
+    print(f"\n🔧 ANTI-DUPLICATE SYSTEM:")
+    print(f"🔧 1. Message ID tracking (Redis/file-based)")
+    print(f"🔧 2. User lock (10s TTL)")
+    print(f"🔧 3. Content-based deduplication")
+    print(f"🔧 4. Time-based debounce (1.5s)")
+    print(f"🔧 5. Distributed lock support")
     
     app.run(host="0.0.0.0", port=5000, debug=True)
