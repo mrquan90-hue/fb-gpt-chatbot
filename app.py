@@ -116,15 +116,11 @@ USER_CONTEXT = defaultdict(lambda: {
     "order_state": None,
     "order_data": {},
     "processing_lock": False,
-    "processing_lock_time": 0,
     "postback_count": 0,
     "product_info_sent_ms": None,
     "last_product_info_time": 0,
     "last_postback_time": 0,
-    "last_postback_payload": None,
-    "processed_postbacks": {},
-    "product_info_processing": False,
-    "product_info_sent_ms": None,
+    "processed_postbacks": set(),
     "last_product_images_sent": {},
     "product_history": [],
     "conversation_history": [],
@@ -153,13 +149,6 @@ USER_CONTEXT = defaultdict(lambda: {
     "last_catalog_product": None,
     # Thêm dict để lưu nhiều sản phẩm từ catalog
     "catalog_products": {},
-    # THÊM: Trạng thái cho tin nhắn đầu tiên sau referral
-    "first_message_after_referral": False,
-    "pending_carousel_ms": None,
-    "referral_processed": False,
-    # THÊM: Atomic lock để tránh double processing
-    "product_info_atomic_lock": False,
-    "last_lock_release_time": 0,
 })
 
 PRODUCTS = {}
@@ -167,130 +156,6 @@ PRODUCTS_BY_NUMBER = {}
 PRODUCT_TEXT_EMBEDDINGS = {}
 LAST_LOAD = 0
 LOAD_TTL = 300
-
-# Các từ khóa liên quan đến đặt hàng
-ORDER_KEYWORDS = [
-    "đặt hàng nha",
-    "ok đặt",
-    "ok mua",
-    "ok em",
-    "ok e",
-    "mua 1 cái",
-    "mua cái này",
-    "mua luôn",
-    "chốt",
-    "lấy mã",
-    "lấy mẫu",
-    "lấy luôn",
-    "lấy em này",
-    "lấy e này",
-    "gửi cho",
-    "ship cho",
-    "ship 1 cái",
-    "chốt 1 cái",
-    "cho tôi mua",
-    "tôi lấy nhé",
-    "cho mình đặt",
-    "tôi cần mua",
-    "xác nhận đơn hàng giúp tôi",
-    "tôi đồng ý mua",
-    "làm đơn cho tôi đi",
-    "tôi chốt đơn nhé",
-    "cho xin 1 cái",
-    "cho đặt 1 chiếc",
-    "bên shop tạo đơn giúp em",
-    "okela",
-    "ok bạn",
-    "đồng ý",
-    "được đó",
-    "vậy cũng được",
-    "được vậy đi",
-    "chốt như bạn nói",
-    "ok giá đó đi",
-    "lấy mẫu đó đi",
-    "tư vấn giúp mình đặt hàng",
-    "hướng dẫn mình mua với",
-    "bạn giúp mình đặt nhé",
-    "muốn có nó quá",
-    "muốn mua quá",
-    "ưng quá, làm sao để mua",
-    "chốt đơn",
-    "bán cho em",
-    "bán cho em vé",
-    "xuống đơn giúp em",
-    "đơm hàng",
-    "lấy nha",
-    "lấy nhé",
-    "mua nha",
-    "mình lấy đây",
-    "shop ơi, của em",
-    "vậy lấy cái",
-    "thôi lấy cái",
-    "order nhé",
-]
-
-# Từ khóa kích hoạt carousel
-CAROUSEL_KEYWORDS = [
-    "xem sản phẩm",
-    "show sản phẩm",
-    "có gì hot",
-    "sản phẩm mới",
-    "danh sách sản phẩm",
-    "giới thiệu sản phẩm",
-    "tất cả sản phẩm",
-    "cho xem sản phẩm",
-    "có mẫu nào",
-    "mẫu mới",
-    "hàng mới",
-    "xem hàng",
-    "show hàng",
-]
-
-# Các từ khóa liên quan đến yêu cầu sản phẩm khác
-CHANGE_PRODUCT_KEYWORDS = [
-    "còn hàng nào khác",
-    "có cái nào đẹp hơn",
-    "có loại nào rẻ hơn",
-    "có loại nào đắt hơn",
-    "có loại nào dài hơn",
-    "có loại nào ấm hơn",
-    "có loại nào mát hơn",
-    "có loại nào mỏng hơn",
-    "có mẫu nào khác",
-    "có sản phẩm nào khác",
-    "shop còn gì khác",
-    "có loại nào khác",
-    "có model nào khác",
-    "cho xem cái khác",
-    "xem hàng khác",
-    "hàng khác",
-    "mẫu khác",
-    "sản phẩm khác",
-    "sản phẩm mới",
-    "mẫu mới",
-    "còn mẫu nào nữa",
-    "có đa dạng không",
-    "còn kiểu nào",
-    "còn loại nào",
-    "xem thêm sản phẩm",
-    "cho em xem thêm",
-    "còn cái nào",
-    "còn cái gì",
-    "còn gì nữa",
-    "có nhiều mẫu không",
-    "có đa dạng mẫu không",
-    "còn mẫu gì",
-    "có nhiều loại không",
-    "còn loại gì",
-    "có mẫu nào hot",
-    "có sản phẩm nào hot",
-    "có sản phẩm nào bán chạy",
-    "có sản phẩm nào mới nhất",
-    "có sản phẩm mới không",
-    "có hàng mới không",
-    "cập nhật mẫu mới",
-    "hàng mới về",
-]
 
 # ============================================
 # CACHE CHO TÊN FANPAGE
@@ -676,67 +541,6 @@ def handle_ads_referral_product(uid: str, text: str) -> bool:
         return True
     
     return False
-
-# ============================================
-# THÊM: HÀM GỬI CAROUSEL 1 SẢN PHẨM
-# ============================================
-
-def send_single_product_carousel(uid: str, ms: str):
-    """
-    Gửi carousel chỉ với 1 sản phẩm duy nhất
-    Sử dụng khi bot đã nhận diện được MS từ ad_title, catalog, Fchat
-    """
-    if ms not in PRODUCTS:
-        return
-    
-    load_products()
-    product = PRODUCTS[ms]
-    
-    # Lấy ảnh đầu tiên
-    images_field = product.get("Images", "")
-    urls = parse_image_urls(images_field)
-    image_url = urls[0] if urls else ""
-    
-    # Format giá
-    gia_raw = product.get("Gia", "")
-    gia_int = extract_price_int(gia_raw) or 0
-    
-    # Tạo mô tả ngắn
-    short_desc = short_description(product.get("MoTa", ""), 120)
-    
-    # Tạo carousel element cho 1 sản phẩm
-    element = {
-        "title": f"[{ms}] {product.get('Ten', '')}",
-        "image_url": image_url,
-        "subtitle": f"💰 {gia_int:,.0f} đ\n{short_desc}",
-        "buttons": [
-            {
-                "type": "web_url",
-                "url": f"{DOMAIN}/order-form?ms={ms}&uid={uid}",
-                "title": "🛒 Đặt ngay"
-            },
-            {
-                "type": "postback",
-                "title": "🔍 Xem chi tiết",
-                "payload": f"ADVICE_{ms}"
-            },
-            {
-                "type": "postback", 
-                "title": "🖼️ Xem ảnh",
-                "payload": f"VIEW_IMAGES_{ms}"
-            }
-        ]
-    }
-    
-    # Gửi carousel
-    send_carousel_template(uid, [element])
-    
-    # QUAN TRỌNG: Cập nhật context ngay sau khi gửi carousel
-    ctx = USER_CONTEXT[uid]
-    ctx["last_ms"] = ms
-    update_product_context(uid, ms)
-    
-    print(f"[SINGLE CAROUSEL] Đã gửi carousel 1 sản phẩm {ms} cho user {uid}")
 
 # ============================================
 # GỬI TOÀN BỘ ẢNH SẢN PHẨM - ĐÃ SỬA LỖI DEADLOCK
@@ -1766,10 +1570,13 @@ def handle_text_with_function_calling(uid: str, text: str):
     Xưng em, gọi anh/chị. Trả lời cực ngắn gọn (dưới 3 dòng).
     Sản phẩm khách đang quan tâm: {ctx.get('last_ms', 'Chưa xác định')}.
     Khi khách muốn mua hoặc chốt, dùng công cụ provide_order_link."""
-
+    
     messages = [{"role": "system", "content": system_prompt}]
+    
+    # Thêm lịch sử hội thoại
     for h in ctx["conversation_history"][-6:]: 
         messages.append(h)
+    
     messages.append({"role": "user", "content": text})
 
     try:
@@ -1782,12 +1589,14 @@ def handle_text_with_function_calling(uid: str, text: str):
         )
         
         msg = response.choices[0].message
+        
         if msg.tool_calls:
             messages.append(msg)
             for tool in msg.tool_calls:
                 res = execute_tool(uid, tool.function.name, json.loads(tool.function.arguments))
                 messages.append({"role": "tool", "tool_call_id": tool.id, "name": tool.function.name, "content": res})
             
+            # Lấy phản hồi cuối cùng từ GPT
             final_res = client.chat.completions.create(
                 model="gpt-4o-mini", 
                 messages=messages,
@@ -1799,9 +1608,12 @@ def handle_text_with_function_calling(uid: str, text: str):
 
         if reply:
             send_message(uid, reply)
+            # Lưu lịch sử hội thoại
             ctx["conversation_history"].append({"role": "user", "content": text})
             ctx["conversation_history"].append({"role": "assistant", "content": reply})
-            ctx["conversation_history"] = ctx["conversation_history"][-10:]
+            # Giới hạn lịch sử
+            if len(ctx["conversation_history"]) > 10:
+                ctx["conversation_history"] = ctx["conversation_history"][-10:]
 
     except Exception as e:
         print(f"Chat Error: {e}")
@@ -1838,14 +1650,8 @@ def update_product_context(uid: str, ms: str):
     print(f"[CONTEXT UPDATE] User {uid}: last_ms={ms}, history={ctx['product_history']}")
 
 def get_relevant_product_for_question(uid: str, text: str) -> str | None:
-    """Tìm sản phẩm phù hợp nhất cho câu hỏi dựa trên ngữ cảnh và xử lý từ khóa chuyển đổi sản phẩm"""
+    """Tìm sản phẩm phù hợp nhất cho câu hỏi dựa trên ngữ cảnh"""
     ctx = USER_CONTEXT[uid]
-    lower = text.lower()
-    
-    # **QUAN TRỌNG: Kiểm tra từ khóa yêu cầu sản phẩm khác trước**
-    if any(kw in lower for kw in CHANGE_PRODUCT_KEYWORDS):
-        # Hướng dẫn vào gian hàng Facebook Shop
-        return "GUIDE_TO_FACEBOOK_SHOP"
     
     # 1. Tìm mã sản phẩm trong tin nhắn
     ms_from_text = detect_ms_from_text(text)
@@ -1891,33 +1697,27 @@ def send_product_info_debounced(uid: str, ms: str):
     ctx = USER_CONTEXT[uid]
     now = time.time()
 
-    # KIỂM TRA DEBOUNCE NÂNG CAO
     last_ms = ctx.get("product_info_sent_ms")
     last_time = ctx.get("last_product_info_time", 0)
-    
-    # Debounce: 30 giây cho cùng sản phẩm (tăng từ 10s lên 30s)
-    if last_ms == ms and (now - last_time) < 30:
-        print(f"[PRODUCT INFO STRICT DEBOUNCE] Đã gửi {ms} trong 30s, bỏ qua")
+
+    if last_ms == ms and (now - last_time) < 5:
+        print(f"[DEBOUNCE] Bỏ qua gửi lại thông tin sản phẩm {ms} cho user {uid} (chưa đủ 5s)")
         return
+    elif last_ms != ms:
+        ctx["last_product_info_time"] = 0
     
-    # Debounce: 5 giây cho bất kỳ sản phẩm nào (tăng từ 3s lên 5s)
-    if (now - last_time) < 5:
-        print(f"[GLOBAL PRODUCT DEBOUNCE] Chưa đủ 5s kể từ lần gửi sản phẩm cuối")
-        return
-    
-    # SET LOCK TRƯỚC KHI XỬ LÝ
-    if ctx.get("product_info_atomic_lock"):
-        print(f"[PRODUCT ATOMIC LOCK] Không thể gửi, atomic lock đang active")
-        return
-    
-    ctx["product_info_atomic_lock"] = True
-    
+    # **QUAN TRỌNG: Cập nhật context khi gửi sản phẩm mới**
+    print(f"[PRODUCT INFO] Gửi thông tin sản phẩm {ms}, cập nhật context")
+    ctx["product_info_sent_ms"] = ms
+    ctx["last_product_info_time"] = now
+    ctx["processing_lock"] = True
+
     try:
         load_products()
         product = PRODUCTS.get(ms)
         if not product:
             send_message(uid, "Em không tìm thấy sản phẩm này trong hệ thống, anh/chị kiểm tra lại mã giúp em ạ.")
-            ctx["product_info_atomic_lock"] = False
+            ctx["processing_lock"] = False
             return
 
         # **QUAN TRỌNG: Cập nhật context khi gửi sản phẩm mới**
@@ -2017,10 +1817,6 @@ def send_product_info_debounced(uid: str, ms: str):
         order_link = f"{domain}/order-form?ms={ms}&uid={uid}"
         send_message(uid, f"📋 Đặt hàng ngay tại đây:\n{order_link}")
 
-        # CẬP NHẬT THỜI GIAN SAU KHI GỬI XONG
-        ctx["product_info_sent_ms"] = ms
-        ctx["last_product_info_time"] = now
-
     except Exception as e:
         print(f"Lỗi khi gửi thông tin sản phẩm: {str(e)}")
         try:
@@ -2031,9 +1827,7 @@ def send_product_info_debounced(uid: str, ms: str):
         except:
             pass
     finally:
-        # LUÔN RELEASE LOCK
-        ctx["product_info_atomic_lock"] = False
-        ctx["last_lock_release_time"] = now
+        ctx["processing_lock"] = False
 
 # ============================================
 # HANDLE IMAGE - VERSION CẢI TIẾN ĐỘ CHÍNH XÁC
@@ -2164,9 +1958,8 @@ def send_fallback_suggestions(uid: str):
     """Gửi gợi ý fallback khi không tìm thấy sản phẩm phù hợp"""
     send_message(uid, "Anh/chị có thể:")
     send_message(uid, "1. Gửi thêm ảnh góc khác của sản phẩm")
-    send_message(uid, "2. Gõ 'xem sản phẩm' để xem toàn bộ danh mục")
-    send_message(uid, "3. Mô tả chi tiết hơn về sản phẩm này")
-    send_message(uid, "4. Hoặc gửi mã sản phẩm nếu anh/chị đã biết mã")
+    send_message(uid, "2. Mô tả chi tiết hơn về sản phẩm này")
+    send_message(uid, "3. Hoặc gửi mã sản phẩm nếu anh/chị đã biết mã")
 
 # ============================================
 # HANDLE ORDER FORM STATE
@@ -2285,30 +2078,6 @@ def handle_text(uid: str, text: str):
         load_products()
         ctx["postback_count"] = 0
 
-        # KIỂM TRA XEM CÓ PHẢI TIN NHẮN ĐẦU TIÊN SAU REFERRAL KHÔNG
-        # Nếu có pending_carousel_ms, gửi carousel 1 sản phẩm thay vì dùng function calling
-        pending_ms = ctx.get("pending_carousel_ms")
-        first_message = ctx.get("first_message_after_referral", False)
-        
-        if pending_ms and pending_ms in PRODUCTS and first_message:
-            print(f"[FIRST MESSAGE] User {uid} gửi tin nhắn đầu tiên sau referral, gửi carousel cho {pending_ms}")
-            
-            # Gửi carousel 1 sản phẩm
-            send_single_product_carousel(uid, pending_ms)
-            
-            # QUAN TRỌNG: Cập nhật context ngay lập tức
-            ctx["last_ms"] = pending_ms
-            update_product_context(uid, pending_ms)
-            
-            # Xóa trạng thái pending
-            ctx["pending_carousel_ms"] = None
-            ctx["first_message_after_referral"] = False
-            
-            # KHÔNG xử lý tin nhắn này bằng function calling
-            ctx["processing_lock"] = False
-            return
-        
-        # Nếu không phải first message, tiếp tục xử lý bình thường
         if handle_order_form_step(uid, text):
             ctx["processing_lock"] = False
             return
@@ -2323,84 +2092,8 @@ def handle_text(uid: str, text: str):
             ctx["processing_lock"] = False
             return
 
-        lower = text.lower()
-        
-        # **QUAN TRỌNG: Xử lý từ khóa yêu cầu sản phẩm khác**
-        if any(kw in lower for kw in CHANGE_PRODUCT_KEYWORDS):
-            print(f"[CHANGE PRODUCT] User {uid} yêu cầu sản phẩm khác: {text}")
-            
-            # Hướng dẫn vào gian hàng Facebook Shop
-            guide_message = """Dạ, hiện tại shop có nhiều mẫu mã đa dạng ạ!
-
-Để xem thêm nhiều sản phẩm khác, anh/chị có thể:
-1. Bấm vào biểu tượng 🛒 rổ hàng trên Messenger để vào gian hàng
-2. Xem danh mục sản phẩm đầy đủ tại Facebook Shop của shop
-3. Hoặc gõ "xem sản phẩm" để em gửi danh sách một số sản phẩm nổi bật
-
-Anh/chị muốn xem sản phẩm nào cụ thể ạ?"""
-            
-            send_message(uid, guide_message)
-            ctx["processing_lock"] = False
-            return
-        
-        # ƯU TIÊN 1: Xử lý từ khóa đặt hàng TRƯỚC
-        if any(kw in lower for kw in ORDER_KEYWORDS):
-            # Tìm sản phẩm phù hợp
-            current_ms = get_relevant_product_for_question(uid, text)
-            
-            if current_ms and current_ms in PRODUCTS:
-                domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
-                order_link = f"{domain}/order-form?ms={current_ms}&uid={uid}"
-                
-                # Trích xuất màu/size đơn giản
-                color, size = extract_color_size_simple(text)
-                variant_info = ""
-                if color or size:
-                    variant_info = f" ({color if color else ''}{' - ' if color and size else ''}{size if size else ''})"
-                
-                # Reply cực ngắn - LUÔN BÁO CÒN HÀNG
-                reply = f"Dạ, sản phẩm{variant_info} còn hàng ạ!\nĐặt tại: {order_link}"
-                send_message(uid, reply)
-                
-                # Cập nhật context
-                ctx["last_ms"] = current_ms
-                update_product_context(uid, current_ms)
-                
-                ctx["processing_lock"] = False
-                return
-        
-        # ƯU TIÊN 2: Xử lý từ khóa carousel
-        if any(kw in lower for kw in CAROUSEL_KEYWORDS):
-            if PRODUCTS:
-                send_message(uid, "Dạ, em đang lấy danh sách sản phẩm cho anh/chị...")
-                
-                # Kích hoạt tool show_featured_carousel
-                execute_tool(uid, "show_featured_carousel", {})
-                
-                ctx["processing_lock"] = False
-                return
-            else:
-                send_message(uid, "Hiện tại shop chưa có sản phẩm nào ạ. Vui lòng quay lại sau!")
-                ctx["processing_lock"] = False
-                return
-
         # Tìm sản phẩm phù hợp
         current_ms = get_relevant_product_for_question(uid, text)
-        
-        # Xử lý đặc biệt khi yêu cầu vào gian hàng
-        if current_ms == "GUIDE_TO_FACEBOOK_SHOP":
-            guide_message = """Dạ, hiện tại shop có nhiều mẫu mã đa dạng ạ!
-
-Để xem thêm nhiều sản phẩm khác, anh/chị có thể:
-1. Bấm vào biểu tượng 🛒 rổ hàng trên Messenger để vào gian hàng
-2. Xem dan mục sản phẩm đầy đủ tại Facebook Shop của shop
-3. Hoặc gõ "xem sản phẩm" để em gửi danh sách một số sản phẩm nổi bật
-
-Anh/chị muốn xem sản phẩm nào cụ thể ạ?"""
-            
-            send_message(uid, guide_message)
-            ctx["processing_lock"] = False
-            return
         
         # **QUAN TRỌNG: Cập nhật context nếu tìm thấy sản phẩm**
         if current_ms and current_ms in PRODUCTS and current_ms != ctx.get("last_ms"):
@@ -2427,7 +2120,7 @@ Anh/chị muốn xem sản phẩm nào cụ thể ạ?"""
             else:
                 print(f"[NO IMAGE REQUEST] Intent: {intent_result.get('intent')}, Confidence: {intent_result.get('confidence')}")
         
-        # Sử dụng Function Calling để xử lý tin nhắn (từ tin nhắn thứ 2 trở đi)
+        # Sử dụng Function Calling để xử lý tin nhắn
         print(f"[FUNCTION CALLING] User: {uid}, MS: {current_ms}, Text: {text}")
         handle_text_with_function_calling(uid, text)
 
@@ -2612,160 +2305,6 @@ def save_order_to_local_csv(order_data: dict):
         print(f"❌ Lỗi khi lưu file local backup: {str(e)}")
 
 # ============================================
-# IMPROVED: XỬ LÝ POSTBACK VỚI RECOVERY MECHANISM VÀ ECHO FILTER
-# ============================================
-
-def handle_postback_with_recovery(uid: str, payload: str, postback_id: str = None, is_echo: bool = False):
-    """
-    Xử lý postback với cơ chế recovery và duplicate protection mạnh mẽ
-    Bỏ qua postback từ bot (echo message)
-    """
-    # BỎ QUA POSTBACK TỪ BOT (ECHO MESSAGE)
-    if is_echo:
-        print(f"[POSTBACK ECHO] Bỏ qua postback từ echo message: {payload}")
-        return False
-    
-    ctx = USER_CONTEXT[uid]
-    now = time.time()
-    
-    # 1. KIỂM TRA DÙNG POSTBACK_ID TRƯỚC (ƯU TIÊN CAO)
-    if postback_id:
-        # Tạo unique key cho postback + timestamp
-        postback_key = f"{postback_id}_{payload}"
-        
-        # Kiểm tra trong processed_postbacks (giữ 100 items)
-        if "processed_postbacks" not in ctx:
-            ctx["processed_postbacks"] = {}
-        
-        # Nếu đã xử lý trong 60 giây gần đây → bỏ qua (tăng từ 30s lên 60s)
-        if postback_key in ctx["processed_postbacks"]:
-            last_time = ctx["processed_postbacks"][postback_key]
-            if now - last_time < 60:
-                print(f"[POSTBACK STRICT DUPLICATE] Bỏ qua postback đã xử lý gần đây: {postback_key}")
-                return True  # Đã xử lý
-        
-        # Lưu thời gian xử lý
-        ctx["processed_postbacks"][postback_key] = now
-        
-        # Giới hạn kích thước dict
-        if len(ctx["processed_postbacks"]) > 100:
-            # Xóa các item cũ nhất
-            sorted_items = sorted(ctx["processed_postbacks"].items(), key=lambda x: x[1])
-            items_to_keep = dict(sorted_items[-50:])  # Giữ 50 item gần nhất
-            ctx["processed_postbacks"] = items_to_keep
-    
-    # 2. KIỂM TRA DEBOUNCE THEO PAYLOAD (phòng trường hợp không có postback_id)
-    last_payload = ctx.get("last_postback_payload")
-    last_payload_time = ctx.get("last_postback_time", 0)
-    
-    if payload == last_payload and (now - last_payload_time) < 5:
-        print(f"[PAYLOAD DEBOUNCE] Bỏ qua payload trùng trong 5s: {payload}")
-        return True
-    
-    # 3. SET LOCK VỚI TIMEOUT (tránh deadlock)
-    if ctx.get("processing_lock"):
-        lock_time = ctx.get("processing_lock_time", 0)
-        # Nếu lock quá 10 giây → force release (có thể bị treo)
-        if now - lock_time > 10:
-            print(f"[LOCK RECOVERY] Force release lock sau 10s cho user {uid}")
-            ctx["processing_lock"] = False
-        else:
-            print(f"[POSTBACK LOCKED] User {uid} đang được xử lý, bỏ qua")
-            return False
-    
-    # 4. XỬ LÝ POSTBACK VỚI TRY-EXCEPT-FINALLY ĐẢM BẢO RELEASE LOCK
-    ctx["processing_lock"] = True
-    ctx["processing_lock_time"] = now
-    ctx["last_postback_payload"] = payload
-    ctx["last_postback_time"] = now
-    
-    try:
-        load_products()
-        
-        if payload.startswith("ADVICE_"):
-            ms = payload.replace("ADVICE_", "")
-            if ms in PRODUCTS:
-                # CẬP NHẬT CONTEXT - CHỈ 1 LẦN
-                if ctx.get("last_ms") != ms:
-                    ctx["last_ms"] = ms
-                    update_product_context(uid, ms)
-                
-                # THÊM: Kiểm tra xem đã gửi sản phẩm này chưa (30s debounce)
-                last_info_ms = ctx.get("product_info_sent_ms")
-                last_info_time = ctx.get("last_product_info_time", 0)
-                
-                if last_info_ms == ms and (now - last_info_time) < 30:
-                    print(f"[PRODUCT INFO DEBOUNCE] Đã gửi sản phẩm {ms} trong 30s, bỏ qua")
-                    return True
-                
-                send_product_info_debounced(uid, ms)
-                return True
-            else:
-                send_message(uid, "❌ Em không tìm thấy sản phẩm này. Anh/chị vui lòng kiểm tra lại mã sản phẩm ạ.")
-                return True
-                
-        elif payload.startswith("ORDER_"):
-            if ctx.get("processing_lock"):
-                print(f"[POSTBACK LOCKED] User {uid} đang được xử lý, bỏ qua ORDER")
-                return False
-            
-            ctx["processing_lock"] = True
-            try:
-                load_products()
-                ms = payload.replace("ORDER_", "")
-                if ms in PRODUCTS:
-                    ctx["last_ms"] = ms
-                    update_product_context(uid, ms)
-                    domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
-                    order_link = f"{domain}/order-form?ms={ms}&uid={uid}"
-                    product_name = PRODUCTS[ms].get('Ten', '')
-                    send_message(uid, f"🎯 Anh/chị chọn sản phẩm [{ms}] {product_name}!\n\n📋 Đặt hàng ngay tại đây:\n{order_link}")
-                else:
-                    send_message(uid, "❌ Em không tìm thấy sản phẩm này. Anh/chị vui lòng kiểm tra lại mã sản phẩm ạ.")
-            finally:
-                ctx["processing_lock"] = False
-            return True
-            
-        elif payload.startswith("VIEW_IMAGES_"):
-            ms = payload.replace("VIEW_IMAGES_", "")
-            if ms in PRODUCTS:
-                ctx["last_ms"] = ms
-                update_product_context(uid, ms)
-                send_all_product_images(uid, ms)
-                return True
-            else:
-                send_message(uid, "❌ Em không tìm thấy sản phẩm này. Anh/chị vui lòng kiểm tra lại mã sản phẩm ạ.")
-                return True
-            
-        elif payload == "GET_STARTED":
-            ctx["referral_source"] = "get_started"
-            welcome_msg = f"""Chào anh/chị! 👋 
-Em là trợ lý AI của {FANPAGE_NAME}.
-
-Để em tư vấn chính xác, anh/chị vui lòng:
-1. Gửi mã sản phẩm (ví dụ: [MS123456])
-2. Hoặc gõ "xem sản phẩm" để xem danh sách
-3. Hoặc mô tả sản phẩm bạn đang tìm
-
-Anh/chị quan tâm sản phẩm nào ạ?"""
-            send_message(uid, welcome_msg)
-            return True
-            
-    except Exception as e:
-        print(f"❌ Lỗi xử lý postback: {str(e)}")
-        try:
-            send_message(uid, "❌ Có lỗi xảy ra. Vui lòng thử lại sau ạ.")
-        except:
-            pass
-    finally:
-        # QUAN TRỌNG: LUÔN RELEASE LOCK TRONG FINALLY
-        ctx["processing_lock"] = False
-        # Giữ lại thời gian release để debug
-        ctx["last_lock_release_time"] = now
-    
-    return False
-
-# ============================================
 # WEBHOOK HANDLER
 # ============================================
 
@@ -2839,8 +2378,6 @@ def webhook():
                                     if ms_from_retailer:
                                         ctx["last_catalog_product"] = ms_from_retailer
                                         ctx["last_ms"] = ms_from_retailer
-                                        ctx["pending_carousel_ms"] = ms_from_retailer  # Đánh dấu cần gửi carousel
-                                        ctx["first_message_after_referral"] = True
                                         update_product_context(sender_id, ms_from_retailer)
                                     
                                     print(f"[CATALOG] Lưu retailer_id: {retailer_id} -> MS: {ms_from_retailer} cho user {sender_id}")
@@ -2916,8 +2453,6 @@ def webhook():
                     try:
                         # **QUAN TRỌNG: Cập nhật context khi phát hiện mã từ Fchat echo**
                         ctx["last_ms"] = detected_ms
-                        ctx["pending_carousel_ms"] = detected_ms  # Đánh dấu cần gửi carousel
-                        ctx["first_message_after_referral"] = True
                         ctx["referral_source"] = "fchat_echo"
                         update_product_context(recipient_id, detected_ms)
                         
@@ -2961,18 +2496,17 @@ def webhook():
                         
                         # KHÔNG reset context, mà update context với sản phẩm mới
                         ctx["last_ms"] = ms_from_ad
-                        ctx["pending_carousel_ms"] = ms_from_ad  # Đánh dấu cần gửi carousel
-                        ctx["first_message_after_referral"] = True
                         update_product_context(sender_id, ms_from_ad)
                         
-                        # Gửi thông báo ngắn, KHÔNG gửi thông tin chi tiết
+                        # Gửi thông tin sản phẩm ngay
                         welcome_msg = f"""Chào anh/chị! 👋 
 Em là trợ lý AI của {get_fanpage_name_from_api()}.
 
 Em thấy anh/chị quan tâm đến sản phẩm **[{ms_from_ad}]** từ quảng cáo.
-Để xem thông tin chi tiết, anh/chị vui lòng gửi tin nhắn bất kỳ ạ!"""
+Em sẽ gửi thông tin chi tiết sản phẩm ngay ạ!"""
                         
                         send_message(sender_id, welcome_msg)
+                        send_product_info_debounced(sender_id, ms_from_ad)
                         handled = True
                     
                     # ƯU TIÊN 2: Kiểm tra referral payload
@@ -2981,17 +2515,16 @@ Em thấy anh/chị quan tâm đến sản phẩm **[{ms_from_ad}]** từ quản
                         if detected_ms and detected_ms in PRODUCTS:
                             print(f"[ADS REFERRAL] Nhận diện mã từ payload: {detected_ms}")
                             ctx["last_ms"] = detected_ms
-                            ctx["pending_carousel_ms"] = detected_ms  # Đánh dấu cần gửi carousel
-                            ctx["first_message_after_referral"] = True
                             update_product_context(sender_id, detected_ms)
                             
                             welcome_msg = f"""Chào anh/chị! 👋 
 Em là trợ lý AI của {get_fanpage_name_from_api()}.
 
 Em thấy anh/chị quan tâm đến sản phẩm **[{detected_ms}]**.
-Để xem thông tin chi tiết, anh/chị vui lòng gửi tin nhắn bất kỳ ạ!"""
+Em sẽ gửi thông tin chi tiết sản phẩm ngay ạ!"""
                             
                             send_message(sender_id, welcome_msg)
+                            send_product_info_debounced(sender_id, detected_ms)
                             handled = True
                 
                 # Nếu đã xử lý xong (ADS có sản phẩm) thì bỏ qua phần sau
@@ -3012,16 +2545,15 @@ Em thấy anh/chị quan tâm đến sản phẩm **[{detected_ms}]**.
                         print(f"[REFERRAL AUTO] Nhận diện mã sản phẩm từ referral: {detected_ms}")
                         
                         ctx["last_ms"] = detected_ms
-                        ctx["pending_carousel_ms"] = detected_ms  # Đánh dấu cần gửi carousel
-                        ctx["first_message_after_referral"] = True
                         update_product_context(sender_id, detected_ms)
                         
                         welcome_msg = f"""Chào anh/chị! 👋 
 Em là trợ lý AI của {FANPAGE_NAME}.
 
 Em thấy anh/chị quan tâm đến sản phẩm mã [{detected_ms}].
-Để xem thông tin chi tiết, anh/chị vui lòng gửi tin nhắn bất kỳ ạ!"""
+Em sẽ gửi thông tin chi tiết sản phẩm ngay ạ!"""
                         send_message(sender_id, welcome_msg)
+                        send_product_info_debounced(sender_id, detected_ms)
                         continue
                     else:
                         welcome_msg = f"""Chào anh/chị! 👋 
@@ -3029,8 +2561,7 @@ Em là trợ lý AI của {FANPAGE_NAME}.
 
 Để em tư vấn chính xác, anh/chị vui lòng:
 1. Gửi mã sản phẩm (ví dụ: [MS123456])
-2. Hoặc gõ "xem sản phẩm" để xem danh sách
-3. Hoặc mô tả sản phẩm bạn đang tìm
+2. Hoặc mô tả sản phẩm bạn đang tìm
 
 Anh/chị quan tâm sản phẩm nào ạ?"""
                         send_message(sender_id, welcome_msg)
@@ -3042,16 +2573,83 @@ Anh/chị quan tâm sản phẩm nào ạ?"""
             if "postback" in m:
                 payload = m["postback"].get("payload")
                 if payload:
+                    ctx = USER_CONTEXT[sender_id]
                     postback_id = m["postback"].get("mid")
-                    # KIỂM TRA CÓ PHẢI ECHO KHÔNG
-                    is_echo = m.get("message", {}).get("is_echo", False)
+                    now = time.time()
                     
-                    # Sử dụng hàm xử lý mới với recovery và echo filter
-                    handle_postback_with_recovery(sender_id, payload, postback_id, is_echo)
+                    if postback_id and postback_id in ctx.get("processed_postbacks", set()):
+                        print(f"[POSTBACK DUPLICATE] Bỏ qua postback trùng: {postback_id}")
+                        continue
+                    
+                    last_postback_time = ctx.get("last_postback_time", 0)
+                    if now - last_postback_time < 1:
+                        print(f"[POSTBACK SPAM] User {sender_id} gửi postback quá nhanh")
+                        continue
+                    
+                    if postback_id:
+                        if "processed_postbacks" not in ctx:
+                            ctx["processed_postbacks"] = set()
+                        ctx["processed_postbacks"].add(postback_id)
+                        if len(ctx["processed_postbacks"]) > 10:
+                            ctx["processed_postbacks"] = set(list(ctx["processed_postbacks"])[-10:])
+                    
+                    ctx["last_postback_time"] = now
+                    
+                    if payload == "GET_STARTED":
+                        ctx["referral_source"] = "get_started"
+                        welcome_msg = f"""Chào anh/chị! 👋 
+Em là trợ lý AI của {FANPAGE_NAME}.
+
+Để em tư vấn chính xác, anh/chị vui lòng:
+1. Gửi mã sản phẩm (ví dụ: [MS123456])
+2. Hoặc mô tả sản phẩm bạn đang tìm
+
+Anh/chị quan tâm sản phẩm nào ạ?"""
+                        send_message(sender_id, welcome_msg)
+                    
+                    elif payload.startswith("ADVICE_"):
+                        if ctx.get("processing_lock"):
+                            print(f"[POSTBACK LOCKED] User {sender_id} đang được xử lý, bỏ qua ADVICE")
+                            continue
+                        
+                        ctx["processing_lock"] = True
+                        try:
+                            load_products()
+                            ms = payload.replace("ADVICE_", "")
+                            if ms in PRODUCTS:
+                                ctx["last_ms"] = ms
+                                update_product_context(sender_id, ms)
+                                send_product_info_debounced(sender_id, ms)
+                            else:
+                                send_message(sender_id, "❌ Em không tìm thấy sản phẩm này. Anh/chị vui lòng kiểm tra lại mã sản phẩm ạ.")
+                        finally:
+                            ctx["processing_lock"] = False
+                    
+                    elif payload.startswith("ORDER_"):
+                        if ctx.get("processing_lock"):
+                            print(f"[POSTBACK LOCKED] User {sender_id} đang được xử lý, bỏ qua ORDER")
+                            continue
+                        
+                        ctx["processing_lock"] = True
+                        try:
+                            load_products()
+                            ms = payload.replace("ORDER_", "")
+                            if ms in PRODUCTS:
+                                ctx["last_ms"] = ms
+                                update_product_context(sender_id, ms)
+                                domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
+                                order_link = f"{domain}/order-form?ms={ms}&uid={sender_id}"
+                                product_name = PRODUCTS[ms].get('Ten', '')
+                                send_message(sender_id, f"🎯 Anh/chị chọn sản phẩm [{ms}] {product_name}!\n\n📋 Đặt hàng ngay tại đây:\n{order_link}")
+                            else:
+                                send_message(sender_id, "❌ Em không tìm thấy sản phẩm này. Anh/chị vui lòng kiểm tra lại mã sản phẩm ạ.")
+                        finally:
+                            ctx["processing_lock"] = False
+                    
                     continue
             
             # ============================================
-            # XỬ LÝ TIN NHẮN THƯỜNG (TEXT & ẢNH) - ĐÃ SỬA DUPLICATE CHECK 30s
+            # XỬ LÝ TIN NHẮN THƯỜNG (TEXT & ẢNH) - THÊM DEBOUNCE
             # ============================================
             if "message" in m:
                 msg = m["message"]
@@ -3069,7 +2667,7 @@ Anh/chị quan tâm sản phẩm nào ạ?"""
                     if msg_mid in ctx["processed_message_mids"]:
                         processed_time = ctx["processed_message_mids"][msg_mid]
                         now = time.time()
-                        if now - processed_time < 30:  # TĂNG TỪ 3s LÊN 30s ĐỂ TRÁNH DUPLICATE
+                        if now - processed_time < 3:
                             print(f"[MSG DUPLICATE] Bỏ qua message đã xử lý: {msg_mid}")
                             continue
                     
@@ -3861,14 +3459,14 @@ def order_form():
                 document.getElementById('districtName').value = districtText;
                 document.getElementById('wardName').value = wardText;
                 
-                # Build full address
+                // Build full address
                 const fullAddress = [detailText, wardText, districtText, provinceText]
                     .filter(part => part.trim() !== '')
                     .join(', ');
                 
                 document.getElementById('fullAddress').value = fullAddress;
                 
-                # Update preview
+                // Update preview
                 const previewElement = document.getElementById('addressPreview');
                 if (fullAddress.trim()) {{
                     previewElement.innerHTML = `
@@ -3885,7 +3483,7 @@ def order_form():
                 return fullAddress;
             }}
             
-            # Load preset address từ URL parameters
+            // Load preset address từ URL parameters
             function loadPresetAddress() {{
                 const urlParams = new URLSearchParams(window.location.search);
                 const presetAddress = urlParams.get('address');
@@ -3896,12 +3494,12 @@ def order_form():
                 }}
             }}
             
-            # ============================================
-            # FORM VALIDATION AND SUBMISSION
-            # ============================================
+            // ============================================
+            // FORM VALIDATION AND SUBMISSION
+            // ============================================
             
             async function submitOrder() {{
-                # Collect form data
+                // Collect form data
                 const formData = {{
                     ms: PRODUCT_MS,
                     uid: PRODUCT_UID,
@@ -3920,7 +3518,7 @@ def order_form():
                     addressDetail: document.getElementById('addressDetail').value.trim()
                 }};
                 
-                # Validate required fields
+                // Validate required fields
                 if (!formData.customerName) {{
                     alert('Vui lòng nhập họ và tên');
                     document.getElementById('customerName').focus();
@@ -3933,7 +3531,7 @@ def order_form():
                     return;
                 }}
                 
-                # Validate phone number
+                // Validate phone number
                 const phoneRegex = /^(0|\\+84)(\\d{{9,10}})$/;
                 if (!phoneRegex.test(formData.phone)) {{
                     alert('Số điện thoại không hợp lệ. Vui lòng nhập số điện thoại 10-11 chữ số');
@@ -3941,7 +3539,7 @@ def order_form():
                     return;
                 }}
                 
-                # Validate address
+                // Validate address
                 if (!formData.provinceId) {{
                     alert('Vui lòng chọn Tỉnh/Thành phố');
                     document.getElementById('province').focus();
@@ -3966,7 +3564,7 @@ def order_form():
                     return;
                 }}
                 
-                # Show loading
+                // Show loading
                 const submitBtn = document.getElementById('submitBtn');
                 const originalText = submitBtn.innerHTML;
                 submitBtn.innerHTML = '<span class="loading-spinner"></span> ĐANG XỬ LÝ...';
@@ -3984,10 +3582,10 @@ def order_form():
                     const data = await response.json();
                     
                     if (response.ok) {{
-                        # Success
+                        // Success
                         alert('🎉 Đã gửi đơn hàng thành công!\\n\\nShop sẽ liên hệ xác nhận trong 5-10 phút.\\nCảm ơn anh/chị đã đặt hàng! ❤️');
                         
-                        # Reset form (optional)
+                        // Reset form (optional)
                         document.getElementById('customerName').value = '';
                         document.getElementById('phone').value = '';
                         document.getElementById('addressDetail').value = '';
@@ -3999,33 +3597,33 @@ def order_form():
                         updateFullAddress();
                         
                     }} else {{
-                        # Error
+                        // Error
                         alert(`❌ ${{data.message || 'Có lỗi xảy ra. Vui lòng thử lại sau'}}`);
                     }}
                 }} catch (error) {{
                     console.error('Lỗi khi gửi đơn hàng:', error);
                     alert('❌ Lỗi kết nối. Vui lòng thử lại sau!');
                 }} finally {{
-                    # Restore button
+                    // Restore button
                     submitBtn.innerHTML = originalText;
                     submitBtn.disabled = false;
                 }}
             }}
             
-            # ============================================
-            # INITIALIZATION
-            # ============================================
+            // ============================================
+            // INITIALIZATION
+            // ============================================
             
             document.addEventListener('DOMContentLoaded', function() {{
-                # Load provinces
+                // Load provinces
                 loadProvinces();
                 
-                # Event listeners for product variant changes
+                // Event listeners for product variant changes
                 document.getElementById('color').addEventListener('change', updateVariantInfo);
                 document.getElementById('size').addEventListener('change', updateVariantInfo);
                 document.getElementById('quantity').addEventListener('input', updatePriceByVariant);
                 
-                # Event listeners for address changes
+                // Event listeners for address changes
                 document.getElementById('province').addEventListener('change', function() {{
                     loadDistricts(this.value);
                     updateFullAddress();
@@ -4039,10 +3637,10 @@ def order_form():
                 document.getElementById('ward').addEventListener('change', updateFullAddress);
                 document.getElementById('addressDetail').addEventListener('input', updateFullAddress);
                 
-                # Initialize product variant info
+                // Initialize product variant info
                 updateVariantInfo();
                 
-                # Enter key to submit form
+                // Enter key to submit form
                 document.getElementById('orderForm').addEventListener('keypress', function(e) {{
                     if (e.which === 13) {{
                         e.preventDefault();
@@ -4050,7 +3648,7 @@ def order_form():
                     }}
                 }});
                 
-                # Focus on first field
+                // Focus on first field
                 setTimeout(() => {{
                     document.getElementById('customerName').focus();
                 }}, 500);
@@ -4385,14 +3983,10 @@ def health_check():
         "address_form": "Open API - provinces.open-api.vn (dropdown 3 cấp)",
         "address_validation": "enabled",
         "phone_validation": "regex validation",
-        "order_response_mode": "SHORT - Chỉ báo còn hàng khi hỏi tồn kho",
         "price_detailed_response": "ENABLED (hiển thị chi tiết các biến thể giá)",
         "max_gpt_tokens": 150,
         "stock_assumption": "Chỉ báo khi hỏi tồn kho",
-        "order_keywords_priority": "HIGH",
         "context_tracking": "ENABLED (tracks last_ms and product_history)",
-        "change_product_keywords": f"{len(CHANGE_PRODUCT_KEYWORDS)} từ khóa được định nghĩa",
-        "facebook_shop_guidance": "ENABLED (hướng dẫn vào gian hàng khi yêu cầu sản phẩm khác)",
         "ads_context_handling": "ENABLED (không reset context khi có sản phẩm từ ADS)",
         "openai_function_calling": "ENABLED (tích hợp từ ai_studio_code.py)",
         "tools_available": [
@@ -4403,46 +3997,8 @@ def health_check():
         ],
         "function_calling_model": "gpt-4o-mini",
         "system_prompt_optimized": "True",
-        "conversation_history_tracking": "ENABLED (10 messages)",
-        "first_message_carousel_feature": "ENABLED (gửi carousel 1 sản phẩm cho tin nhắn đầu tiên sau referral)",
-        "carousel_trigger_sources": ["ADS (ad_title)", "Catalog (retailer_id)", "Fchat echo"],
-        "carousel_buttons": "3 nút: 🛒 Đặt ngay, 🔍 Xem chi tiết, 🖼️ Xem ảnh",
-        "first_message_processing": "Carousel 1 sản phẩm → Từ tin nhắn thứ 2: Function Calling",
-        "postback_double_processing_fix": "ENABLED (atomic lock + strict duplicate detection + echo filter)",
-        "postback_duplicate_protection": "60s (tăng từ 30s)",
-        "product_info_debounce": "30s cho cùng sản phẩm (tăng từ 10s), 5s cho bất kỳ sản phẩm (tăng từ 3s)",
-        "lock_recovery_mechanism": "ENABLED (auto release sau 10s)",
-        "postback_echo_filter": "ENABLED (bỏ qua postback từ bot echo messages)"
+        "conversation_history_tracking": "ENABLED (10 messages)"
     }, 200
-
-# ============================================
-# DEBUG LOCKS ENDPOINT
-# ============================================
-
-@app.route("/debug/locks", methods=["GET"])
-def debug_locks():
-    """Debug locks để kiểm tra deadlock"""
-    now = time.time()
-    locked_users = []
-    
-    for uid, ctx in USER_CONTEXT.items():
-        if ctx.get("processing_lock"):
-            lock_time = ctx.get("processing_lock_time", 0)
-            lock_age = now - lock_time
-            if lock_age > 5:  # Lock quá 5 giây
-                locked_users.append({
-                    "uid": uid,
-                    "lock_age": lock_age,
-                    "last_ms": ctx.get("last_ms"),
-                    "last_activity": ctx.get("last_msg_time", 0)
-                })
-    
-    return jsonify({
-        "total_users": len(USER_CONTEXT),
-        "locked_users": len(locked_users),
-        "locked_details": locked_users,
-        "timestamp": now
-    }), 200
 
 # ============================================
 # MAIN
@@ -4487,24 +4043,11 @@ if __name__ == "__main__":
     print(f"🟢 ADS Follow-up Processing: BẬT (xử lý tin nhắn sau click quảng cáo)")
     print(f"🟢 Order Backup System: Local CSV khi Google Sheet không kết nối được")
     print(f"🟢 Context Tracking: BẬT (ghi nhớ last_ms và product_history)")
-    print(f"🟢 Change Product Keywords: {len(CHANGE_PRODUCT_KEYWORDS)} từ khóa")
-    print(f"🟢 Facebook Shop Guidance: BẬT (hướng dẫn vào gian hàng)")
     print(f"🟢 Price Detailed Response: BẬT (hiển thị chi tiết các biến thể giá)")
-    print(f"🟢 FIRST MESSAGE CAROUSEL FEATURE: BẬT (gửi carousel 1 sản phẩm)")
-    print(f"🟢 Carousel Trigger: ADS (ad_title), Catalog (retailer_id), Fchat echo")
-    print(f"🟢 Carousel Buttons: 🛒 Đặt ngay, 🔍 Xem chi tiết, 🖼️ Xem ảnh")
     print(f"🔴 QUAN TRỌNG: BOT CHỈ BÁO CÒN HÀNG KHI KHÁCH HỎI VỀ TỒN KHO")
     print(f"🔴 GPT Reply Mode: FUNCTION CALLING (gpt-4o-mini)")
-    print(f"🔴 FIRST MESSAGE: CAROUSEL 1 SẢN PHẨM (không dùng function calling)")
-    print(f"🔴 FROM SECOND MESSAGE: FUNCTION CALLING (bình thường)")
-    print(f"🔴 Order Priority: ƯU TIÊN GỬI LINK KHI CÓ TỪ KHÓA ĐẶT HÀNG")
-    print(f"🔴 Price Priority: HIỂN THỊ CHI TIẾT KHI KHÁCH HỎI VỀ GIÁ")
+    print(f"🔴 Order Priority: Function Calling quyết định")
+    print(f"🔴 Price Priority: Function Calling quyết định")
     print(f"🔴 Function Calling Integration: HOÀN THÀNH - ĐÃ TÍCH HỢP TỪ AI_STUDIO_CODE.PY")
-    print(f"🔴 POSTBACK DOUBLE PROCESSING FIX: ĐÃ SỬA - Atomic lock + Strict duplicate detection + Echo filter")
-    print(f"🔴 Postback Duplicate Protection: 60s memory (tăng từ 30s)")
-    print(f"🔴 Product Info Debounce: 30s cho cùng sản phẩm (tăng từ 10s), 5s cho bất kỳ sản phẩm (tăng từ 3s)")
-    print(f"🔴 Lock Recovery Mechanism: TỰ ĐỘNG release sau 10s")
-    print(f"🔴 Postback Echo Filter: BỎ QUA postback từ bot echo messages")
-    print(f"🔴 Debug Endpoint: /debug/locks (kiểm tra deadlock)")
     
     app.run(host="0.0.0.0", port=5000, debug=True)
