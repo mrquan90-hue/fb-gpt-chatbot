@@ -724,6 +724,11 @@ def send_single_product_carousel(uid: str, ms: str):
     # Gửi carousel
     send_carousel_template(uid, [element])
     
+    # QUAN TRỌNG: Cập nhật context ngay sau khi gửi carousel
+    ctx = USER_CONTEXT[uid]
+    ctx["last_ms"] = ms
+    update_product_context(uid, ms)
+    
     print(f"[SINGLE CAROUSEL] Đã gửi carousel 1 sản phẩm {ms} cho user {uid}")
 
 # ============================================
@@ -2272,6 +2277,10 @@ def handle_text(uid: str, text: str):
             # Gửi carousel 1 sản phẩm
             send_single_product_carousel(uid, pending_ms)
             
+            # QUAN TRỌNG: Cập nhật context ngay lập tức
+            ctx["last_ms"] = pending_ms
+            update_product_context(uid, pending_ms)
+            
             # Xóa trạng thái pending
             ctx["pending_carousel_ms"] = None
             ctx["first_message_after_referral"] = False
@@ -2937,7 +2946,7 @@ Anh/chị quan tâm sản phẩm nào ạ?"""
                     continue
             
             # ============================================
-            # XỬ LÝ TIN NHẮN THƯỜNG (TEXT & ẢNH) - THÊM DEBOUNCE
+            # XỬ LÝ TIN NHẮN THƯỜNG (TEXT & ẢNH) - ĐÃ SỬA DUPLICATE CHECK 30s
             # ============================================
             if "message" in m:
                 msg = m["message"]
@@ -2955,7 +2964,7 @@ Anh/chị quan tâm sản phẩm nào ạ?"""
                     if msg_mid in ctx["processed_message_mids"]:
                         processed_time = ctx["processed_message_mids"][msg_mid]
                         now = time.time()
-                        if now - processed_time < 3:
+                        if now - processed_time < 30:  # TĂNG TỪ 3s LÊN 30s ĐỂ TRÁNH DUPLICATE
                             print(f"[MSG DUPLICATE] Bỏ qua message đã xử lý: {msg_mid}")
                             continue
                     
@@ -3925,10 +3934,10 @@ def order_form():
                 document.getElementById('ward').addEventListener('change', updateFullAddress);
                 document.getElementById('addressDetail').addEventListener('input', updateFullAddress);
                 
-                // Initialize product variant info
+                # Initialize product variant info
                 updateVariantInfo();
                 
-                // Enter key to submit form
+                # Enter key to submit form
                 document.getElementById('orderForm').addEventListener('keypress', function(e) {{
                     if (e.which === 13) {{
                         e.preventDefault();
@@ -3936,7 +3945,7 @@ def order_form():
                     }}
                 }});
                 
-                // Focus on first field
+                # Focus on first field
                 setTimeout(() => {{
                     document.getElementById('customerName').focus();
                 }}, 500);
