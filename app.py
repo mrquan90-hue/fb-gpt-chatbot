@@ -1614,24 +1614,43 @@ def handle_text_with_function_calling(uid: str, text: str):
     load_products()
     ctx = USER_CONTEXT[uid]
     
-    # Logic nhận diện mã nhanh
-    quick_ms = detect_ms_from_text(text)
-    if quick_ms: 
-        ctx["last_ms"] = quick_ms
-
+    # ƯU TIÊN: Sử dụng last_ms từ context nếu đã có (trừ khi tin nhắn chứa mã mới)
+    current_ms = ctx.get("last_ms")
+    
+    # Nếu tin nhắn không chứa mã mới và đã có last_ms, giữ nguyên last_ms
+    msg_lower = text.lower()
+    detected_ms = detect_ms_from_text(text)
+    
+    if not detected_ms and current_ms and current_ms in PRODUCTS:
+        print(f"[CONTEXT PRIORITY] Giữ nguyên last_ms từ context: {current_ms}")
+        # KHÔNG thay đổi last_ms, giữ nguyên context hiện tại
+    elif detected_ms and detected_ms in PRODUCTS:
+        # Nếu có mã mới trong tin nhắn, cập nhật context
+        print(f"[NEW MS DETECTED] Phát hiện mã mới: {detected_ms}")
+        ctx["last_ms"] = detected_ms
+        update_product_context(uid, detected_ms)
+        current_ms = detected_ms
+    
     fanpage_name = get_fanpage_name_from_api()
     
+    # Thêm thông tin last_ms vào system prompt
     system_prompt = f"""Bạn là nhân viên bán hàng của {fanpage_name}.
     CHỈ trả lời dựa trên dữ liệu thật. KHÔNG bịa đặt thông tin.
     Nếu khách hỏi tồn kho, luôn khẳng định CÒN HÀNG.
     Xưng em, gọi anh/chị. Trả lời cực ngắn gọn (dưới 3 dòng).
-    Sản phẩm khách đang quan tâm: {ctx.get('last_ms', 'Chưa xác định')}.
-    Khi khách muốn mua hoặc chốt, dùng công cụ provide_order_link.
+    
+    **QUAN TRỌNG: Sản phẩm khách đang quan tâm là: {current_ms or 'Chưa xác định'}**
+    **Nếu khách hỏi về sản phẩm khác (có mã mới), mới chuyển sang sản phẩm đó**
+    
+    Khi khách muốn mua hoặc chốt, dùng công cụ provide_order_link với mã sản phẩm {current_ms}.
     
     KHI KHÁCH HỎI:
     - "xem sản phẩm" → dùng tool show_featured_carousel
-    - "ảnh", "hình", "xem ảnh", "gửi ảnh" → dùng tool send_product_images
-    - "còn hàng nào khác", "có mẫu nào khác" → hướng dẫn vào Facebook Shop (không dùng tool)"""
+    - "ảnh", "hình", "xem ảnh", "gửi ảnh" → dùng tool send_product_images với mã {current_ms}
+    - "còn hàng nào khác", "có mẫu nào khác" → hướng dẫn vào Facebook Shop (không dùng tool)
+    
+    **NẾU KHÁCH HỎI CHUNG CHUNG (ví dụ: "giá bao nhiêu?") → LUÔN TRẢ LỜI VỀ SẢN PHẨM {current_ms}**
+    **NẾU KHÁCH HỎI VỀ SẢN PHẨM KHÁC (có đề cập mã mới) → mới chuyển sang sản phẩm đó**"""
 
     messages = [{"role": "system", "content": system_prompt}]
     for h in ctx["conversation_history"][-6:]: 
@@ -1890,18 +1909,19 @@ def send_product_info_debounced(uid: str, ms: str):
     ctx = USER_CONTEXT[uid]
     now = time.time()
 
-    # KIỂM TRA DEBOUNCE NÂNG CAO
+    # KIỂM TRA DEBOUNCE NÂNG CAO - TĂNG LÊN 15 GIÂY
     last_ms = ctx.get("product_info_sent_ms")
     last_time = ctx.get("last_product_info_time", 0)
     
-    # Debounce: 10 giây cho cùng sản phẩm
-    if last_ms == ms and (now - last_time) < 10:
-        print(f"[PRODUCT INFO STRICT DEBOUNCE] Đã gửi {ms} trong 10s, bỏ qua")
+    # Debounce: 15 giây cho cùng sản phẩm
+    if last_ms == ms and (now - last_time) < 15:
+        print(f"[PRODUCT INFO STRICT DEBOUNCE] Đã gửi {ms} trong 15s, bỏ qua")
+        send_message(uid, f"Em vừa gửi thông tin sản phẩm [{ms}] rồi ạ. Anh/chị cần hỏi thêm gì không?")
         return
     
-    # Debounce: 3 giây cho bất kỳ sản phẩm nào
-    if (now - last_time) < 3:
-        print(f"[GLOBAL PRODUCT DEBOUNCE] Chưa đủ 3s kể từ lần gửi sản phẩm cuối")
+    # Debounce: 5 giây cho bất kỳ sản phẩm nào
+    if (now - last_time) < 5:
+        print(f"[GLOBAL PRODUCT DEBOUNCE] Chưa đủ 5s kể từ lần gửi sản phẩm cuối")
         return
     
     # SET LOCK TRƯỚC KHI XỬ LÝ
@@ -2275,8 +2295,8 @@ def handle_text(uid: str, text: str):
         now = time.time()
         last_msg_time = ctx.get("last_msg_time", 0)
         
-        # Debounce: kiểm tra tin nhắn trùng lặp
-        if now - last_msg_time < 1:
+        # Debounce: kiểm tra tin nhắn trùng lặp - TĂNG TỪ 1s LÊN 2s
+        if now - last_msg_time < 2:
             last_text = ctx.get("last_processed_text", "")
             if text.strip().lower() == last_text.lower():
                 print(f"[TEXT DEBOUNCE] Bỏ qua tin nhắn trùng lặp: {text[:50]}...")
@@ -2331,8 +2351,29 @@ def handle_text(uid: str, text: str):
         
         # ƯU TIÊN 1: Xử lý từ khóa đặt hàng TRƯỚC
         if any(kw in lower for kw in ORDER_KEYWORDS):
-            # Tìm sản phẩm phù hợp
-            current_ms = get_relevant_product_for_question(uid, text)
+            # TÌM SẢN PHẨM PHÙ HỢP - ƯU TIÊN CONTEXT HIỆN TẠI
+            current_ms = ctx.get("last_ms")
+            detected_ms = detect_ms_from_text(text)
+            
+            # Nếu tin nhắn KHÔNG chứa mã mới và đã có current_ms → giữ nguyên
+            if not detected_ms and current_ms and current_ms in PRODUCTS:
+                print(f"[CONTEXT PRIORITY] Giữ nguyên sản phẩm hiện tại: {current_ms}")
+                # KHÔNG thay đổi context
+            elif detected_ms and detected_ms in PRODUCTS:
+                # Nếu có mã mới → cập nhật context
+                print(f"[NEW MS DETECTED] Chuyển sang sản phẩm mới: {detected_ms}")
+                ctx["last_ms"] = detected_ms
+                update_product_context(uid, detected_ms)
+                current_ms = detected_ms
+            else:
+                # Tìm sản phẩm phù hợp nhất
+                current_ms = get_relevant_product_for_question(uid, text)
+                
+                # Nếu tìm thấy sản phẩm mới và khác với last_ms hiện tại
+                if current_ms and current_ms in PRODUCTS and current_ms != ctx.get("last_ms"):
+                    print(f"[CONTEXT UPDATE] Cập nhật last_ms từ {ctx.get('last_ms')} -> {current_ms}")
+                    ctx["last_ms"] = current_ms
+                    update_product_context(uid, current_ms)
             
             if current_ms and current_ms in PRODUCTS:
                 domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
@@ -2355,8 +2396,27 @@ def handle_text(uid: str, text: str):
                 ctx["processing_lock"] = False
                 return
         
-        # Tìm sản phẩm phù hợp
-        current_ms = get_relevant_product_for_question(uid, text)
+        # TÌM SẢN PHẨM PHÙ HỢP - ƯU TIÊN CONTEXT HIỆN TẠI
+        current_ms = ctx.get("last_ms")
+        detected_ms = detect_ms_from_text(text)
+        
+        # Nếu tin nhắn KHÔNG chứa mã mới và đã có current_ms → giữ nguyên
+        if not detected_ms and current_ms and current_ms in PRODUCTS:
+            print(f"[CONTEXT PRIORITY] Giữ nguyên sản phẩm hiện tại: {current_ms}")
+            # KHÔNG thay đổi context
+        elif detected_ms and detected_ms in PRODUCTS:
+            # Nếu có mã mới → cập nhật context
+            print(f"[NEW MS DETECTED] Chuyển sang sản phẩm mới: {detected_ms}")
+            ctx["last_ms"] = detected_ms
+            update_product_context(uid, detected_ms)
+            current_ms = detected_ms
+        else:
+            # Nếu không có mã mới và cũng không có last_ms, mới đi tìm sản phẩm phù hợp
+            current_ms = get_relevant_product_for_question(uid, text)
+            if current_ms and current_ms in PRODUCTS and current_ms != ctx.get("last_ms"):
+                print(f"[CONTEXT UPDATE] Cập nhật last_ms từ {ctx.get('last_ms')} -> {current_ms}")
+                ctx["last_ms"] = current_ms
+                update_product_context(uid, current_ms)
         
         # **QUAN TRỌNG: Cập nhật context nếu tìm thấy sản phẩm**
         if current_ms and current_ms in PRODUCTS and current_ms != ctx.get("last_ms"):
@@ -2556,8 +2616,28 @@ def handle_postback_with_recovery(uid: str, payload: str, postback_id: str = Non
     """
     Xử lý postback với cơ chế recovery và duplicate protection mạnh mẽ
     """
-    # Tạo unique key
-    postback_key = f"{uid}_{payload}_{postback_id or 'no_id'}"
+    # Tạo unique key với timestamp để tránh duplicate
+    now = time.time()
+    postback_key = f"{uid}_{payload}_{postback_id or 'no_id'}_{int(now)}"
+    
+    # KIỂM TRA DUPLICATE NÂNG CAO
+    ctx = USER_CONTEXT[uid]
+    
+    # Tạo danh sách processed postbacks nếu chưa có
+    if "processed_postbacks" not in ctx:
+        ctx["processed_postbacks"] = {}
+    
+    # Kiểm tra xem postback này đã xử lý chưa (trong vòng 30 giây)
+    for key, processed_time in list(ctx["processed_postbacks"].items()):
+        # Dọn dẹp postback cũ (hơn 30 giây)
+        if now - processed_time > 30:
+            del ctx["processed_postbacks"][key]
+            continue
+        
+        # Nếu cùng uid và payload đã xử lý trong 10 giây gần đây → bỏ qua
+        if f"{uid}_{payload}" in key and now - processed_time < 10:
+            print(f"[POSTBACK STRICT DUPLICATE] Bỏ qua postback đã xử lý: {uid}_{payload}")
+            return True
     
     # Lấy global lock
     lock = get_postback_lock(uid, payload)
@@ -2568,45 +2648,36 @@ def handle_postback_with_recovery(uid: str, payload: str, postback_id: str = Non
         return False
     
     try:
-        ctx = USER_CONTEXT[uid]
-        now = time.time()
+        # ĐÁNH DẤU ĐÃ XỬ LÝ NGAY LẬP TỨC (trước khi xử lý thực tế)
+        ctx["processed_postbacks"][postback_key] = now
         
-        # KIỂM TRA DÙNG POSTBACK_ID TRƯỚC (ƯU TIÊN CAO)
-        if postback_id:
-            # Tạo unique key cho postback + timestamp
-            postback_key = f"{postback_id}_{payload}"
-            
-            # Kiểm tra trong processed_postbacks (giữ 100 items)
-            if "processed_postbacks" not in ctx:
-                ctx["processed_postbacks"] = {}
-            
-            # Nếu đã xử lý trong 60 giây gần đây → bỏ qua (TĂNG LÊN 60s)
-            if postback_key in ctx["processed_postbacks"]:
-                last_time = ctx["processed_postbacks"][postback_key]
-                if now - last_time < 60:  # TĂNG TỪ 30s LÊN 60s
-                    print(f"[POSTBACK STRICT DUPLICATE] Bỏ qua postback đã xử lý gần đây: {postback_key}")
-                    return True
+        # Giới hạn kích thước dict (tránh memory leak)
+        if len(ctx["processed_postbacks"]) > 50:
+            # Giữ lại 30 postback gần nhất
+            sorted_items = sorted(ctx["processed_postbacks"].items(), 
+                                key=lambda x: x[1], reverse=True)[:30]
+            ctx["processed_postbacks"] = dict(sorted_items)
         
-        # KIỂM TRA DEBOUNCE THEO PAYLOAD (phòng trường hợp không có postback_id)
+        # KIỂM TRA DEBOUNCE THEO PAYLOAD
         last_payload = ctx.get("last_postback_payload")
         last_payload_time = ctx.get("last_postback_time", 0)
         
-        if payload == last_payload and (now - last_payload_time) < 5:
-            print(f"[PAYLOAD DEBOUNCE] Bỏ qua payload trùng trong 5s: {payload}")
+        if payload == last_payload and (now - last_payload_time) < 3:
+            print(f"[PAYLOAD DEBOUNCE] Bỏ qua payload trùng trong 3s: {payload}")
             return True
         
-        # SET LOCK VỚI TIMEOUT (tránh deadlock)
+        # SET LOCK VỚI TIMEOUT
         if ctx.get("processing_lock"):
             lock_time = ctx.get("processing_lock_time", 0)
-            # Nếu lock quá 10 giây → force release (có thể bị treo)
-            if now - lock_time > 10:
-                print(f"[LOCK RECOVERY] Force release lock sau 10s cho user {uid}")
+            # Nếu lock quá 15 giây → force release
+            if now - lock_time > 15:
+                print(f"[LOCK RECOVERY] Force release lock sau 15s cho user {uid}")
                 ctx["processing_lock"] = False
             else:
                 print(f"[POSTBACK LOCKED] User {uid} đang được xử lý, bỏ qua")
                 return False
         
-        # XỬ LÝ POSTBACK VỚI TRY-EXCEPT-FINALLY ĐẢM BẢO RELEASE LOCK
+        # XỬ LÝ POSTBACK
         ctx["processing_lock"] = True
         ctx["processing_lock_time"] = now
         ctx["last_postback_payload"] = payload
@@ -2617,23 +2688,18 @@ def handle_postback_with_recovery(uid: str, payload: str, postback_id: str = Non
         if payload.startswith("ADVICE_"):
             ms = payload.replace("ADVICE_", "")
             if ms in PRODUCTS:
-                ctx["last_ms"] = ms
-                update_product_context(uid, ms)
-                
-                # THÊM: Kiểm tra xem đã gửi sản phẩm này chưa (10s debounce)
+                # KIỂM TRA DEBOUNCE: không gửi thông tin sản phẩm quá nhanh
                 last_info_ms = ctx.get("product_info_sent_ms")
                 last_info_time = ctx.get("last_product_info_time", 0)
                 
-                if last_info_ms == ms and (now - last_info_time) < 10:
-                    print(f"[PRODUCT INFO DEBOUNCE] Đã gửi sản phẩm {ms} trong 10s, bỏ qua")
+                if last_info_ms == ms and (now - last_info_time) < 15:
+                    print(f"[PRODUCT INFO STRICT DEBOUNCE] Đã gửi sản phẩm {ms} trong 15s, bỏ qua")
+                    send_message(uid, f"Em vừa gửi thông tin sản phẩm [{ms}] rồi ạ. Anh/chị cần xem lại thông tin gì không?")
                     return True
                 
+                ctx["last_ms"] = ms
+                update_product_context(uid, ms)
                 send_product_info_debounced(uid, ms)
-                
-                # Lưu thời gian xử lý postback
-                if postback_id:
-                    ctx["processed_postbacks"][f"{postback_id}_{payload}"] = now
-                    
                 return True
             else:
                 send_message(uid, "❌ Em không tìm thấy sản phẩm này. Anh/chị vui lòng kiểm tra lại mã sản phẩm ạ.")
@@ -2655,6 +2721,13 @@ def handle_postback_with_recovery(uid: str, payload: str, postback_id: str = Non
         elif payload.startswith("VIEW_IMAGES_"):
             ms = payload.replace("VIEW_IMAGES_", "")
             if ms in PRODUCTS:
+                # KIỂM TRA DEBOUNCE: không gửi ảnh quá nhanh
+                last_images_time = ctx.get("last_all_images_time", 0)
+                if now - last_images_time < 10:
+                    print(f"[IMAGES DEBOUNCE] Đã gửi ảnh trong 10s, bỏ qua")
+                    send_message(uid, f"Em vừa gửi ảnh sản phẩm [{ms}] rồi ạ. Anh/chị cần xem lại ảnh nào không?")
+                    return True
+                
                 ctx["last_ms"] = ms
                 update_product_context(uid, ms)
                 send_all_product_images(uid, ms)
@@ -4336,9 +4409,9 @@ def health_check():
         "carousel_buttons": "3 nút: 🛒 Đặt ngay, 🔍 Xem chi tiết, 🖼️ Xem ảnh",
         "first_message_processing": "Carousel 1 sản phẩm → Từ tin nhắn thứ 2: Function Calling",
         "postback_double_processing_fix": "ENABLED (global lock + strict duplicate detection 60s)",
-        "product_info_debounce": "10s cho cùng sản phẩm, 3s cho bất kỳ sản phẩm",
-        "lock_recovery_mechanism": "ENABLED (auto release sau 10s)",
-        "postback_duplicate_protection": "ENABLED (60s memory)"
+        "product_info_debounce": "15s cho cùng sản phẩm, 5s cho bất kỳ sản phẩm",
+        "lock_recovery_mechanism": "ENABLED (auto release sau 15s)",
+        "postback_duplicate_protection": "ENABLED (30s memory)"
     }, 200
 
 # ============================================
@@ -4390,7 +4463,7 @@ if __name__ == "__main__":
     print(f"🟢 Address Validation: BẬT")
     print(f"🟢 Phone Validation: BẬT (regex)")
     print(f"🟢 Image Debounce: 3 giây")
-    print(f"🟢 Text Message Debounce: 1 giây")
+    print(f"🟢 Text Message Debounce: 2 giây (tăng từ 1s)")
     print(f"🟢 Echo Message Debounce: 2 giây")
     print(f"🟢 Bot Echo Filter: BẬT (phân biệt echo từ bot vs Fchat)")
     print(f"🟢 Fchat Echo Processing: BẬT (giữ nguyên logic trích xuất mã từ Fchat)")
@@ -4413,20 +4486,18 @@ if __name__ == "__main__":
     print(f"🟢 Context Tracking: BẬT (ghi nhớ last_ms và product_history)")
     print(f"🟢 Facebook Shop Guidance: BẬT (hướng dẫn vào gian hàng)")
     print(f"🟢 Price Detailed Response: BẬT (hiển thị chi tiết các biến thể giá)")
-    print(f"🟢 FIRST MESSAGE CAROUSEL FEATURE: BẬT (gửi carousel 1 sản phẩm)")
-    print(f"🟢 Carousel Trigger: ADS (ad_title), Catalog (retailer_id), Fchat echo")
-    print(f"🟢 Carousel Buttons: 🛒 Đặt ngay, 🔍 Xem chi tiết, 🖼️ Xem ảnh")
-    print(f"🔴 QUAN TRỌNG: BOT CHỈ BÁO CÒN HÀNG KHI KHÁCH HỎI VỀ TỒN KHO")
-    print(f"🔴 GPT Reply Mode: FUNCTION CALLING (gpt-4o-mini)")
+    print(f"🔴 QUAN TRỌNG: BOT ƯU TIÊN CONTEXT HIỆN TẠI (sửa vấn đề 1)")
+    print(f"🔴 BOT CHỈ BÁO CÒN HÀNG KHI KHÁCH HỎI VỀ TỒN KHO")
+    print(f"🔴 GPT Reply Mode: FUNCTION CALLING (gpt-4o-mini) với CONTEXT PRIORITY")
     print(f"🔴 FIRST MESSAGE: CAROUSEL 1 SẢN PHẨM (không dùng function calling)")
-    print(f"🔴 FROM SECOND MESSAGE: FUNCTION CALLING (bình thường)")
+    print(f"🔴 FROM SECOND MESSAGE: FUNCTION CALLING với CONTEXT PRIORITY")
     print(f"🔴 Order Priority: ƯU TIÊN GỬI LINK KHI CÓ TỪ KHÓA ĐẶT HÀNG")
     print(f"🔴 Price Priority: HIỂN THỊ CHI TIẾT KHI KHÁCH HỎI VỀ GIÁ")
     print(f"🔴 Function Calling Integration: HOÀN THÀNH - ĐÃ TÍCH HỢP TỪ AI_STUDIO_CODE.PY")
-    print(f"🔴 POSTBACK DOUBLE PROCESSING FIX: ĐÃ SỬA - GLOBAL LOCK + Strict duplicate detection 60s")
-    print(f"🔴 Product Info Debounce: 10s cho cùng sản phẩm, 3s cho bất kỳ sản phẩm")
-    print(f"🔴 Lock Recovery Mechanism: TỰ ĐỘNG release sau 10s")
-    print(f"🔴 Postback Duplicate Protection: 60s memory")
+    print(f"🔴 POSTBACK DOUBLE PROCESSING FIX: ĐÃ SỬA - GLOBAL LOCK + Strict duplicate detection 30s (sửa vấn đề 2)")
+    print(f"🔴 Product Info Debounce: 15s cho cùng sản phẩm, 5s cho bất kỳ sản phẩm")
+    print(f"🔴 Lock Recovery Mechanism: TỰ ĐỘNG release sau 15s")
+    print(f"🔴 Postback Duplicate Protection: 30s memory + immediate marking")
     print(f"🔴 Debug Endpoint: /debug/locks (kiểm tra deadlock)")
     print(f"🔴 MÔ TẢ SẢN PHẨM MỚI: 5 gạch đầu dòng")
     print(f"🔴 PHÂN TÍCH GIÁ THÔNG MINH: Theo màu/Size/Nhóm giá")
