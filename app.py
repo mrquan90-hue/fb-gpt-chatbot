@@ -2967,7 +2967,7 @@ Em thấy anh/chị quan tâm đến sản phẩm mã [{detected_ms}].
                         continue
                     else:
                         ctx["has_sent_first_carousel"] = False
-                                                welcome_msg = f"""Chào anh/chị! 👋 
+                        welcome_msg = f"""Chào anh/chị! 👋 
 Em là trợ lý AI của {FANPAGE_NAME}.
 
 Để em tư vấn chính xác, anh/chị vui lòng:
