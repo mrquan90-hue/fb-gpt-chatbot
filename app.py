@@ -189,6 +189,8 @@ USER_CONTEXT = defaultdict(lambda: {
     "last_lock_release_time": 0,
     # ▼▼▼ THÊM MỚI: Idempotency key storage cho postback
     "idempotent_postbacks": {},
+    # THÊM MỚI: Counter cho tin nhắn thực từ user
+    "real_message_count": 0,
 })
 
 PRODUCTS = {}
@@ -2290,11 +2292,11 @@ def detect_ms_from_text(text: str) -> Optional[str]:
     return None
 
 # ============================================
-# HANDLE TEXT - XỬ LÝ VỚI FUNCTION CALLING
+# HANDLE TEXT - XỬ LÝ VỚI FUNCTION CALLING (ĐÃ SỬA)
 # ============================================
 
 def handle_text(uid: str, text: str):
-    """Xử lý tin nhắn văn bản từ người dùng - BỎ QUA TIN NHẮN ĐẦU TIÊN"""
+    """Xử lý tin nhắn văn bản từ người dùng - CHỈ CAROUSEL CHO TIN NHẮN THẬT ĐẦU TIÊN"""
     if not text or len(text.strip()) == 0:
         return
     
@@ -2325,32 +2327,40 @@ def handle_text(uid: str, text: str):
         ctx["postback_count"] = 0
 
         # ============================================
-        # QUY TẮC CỨNG: TIN NHẮN ĐẦU TIÊN = GỬI CAROUSEL, KHÔNG XỬ LÝ
+        # QUY TẮC MỚI: CHỈ CAROUSEL KHI LÀ TIN NHẮN THẬT ĐẦU TIÊN CỦA USER
+        # KHÔNG PHẢI KHI CÓ CONTEXT TỪ FCHAT/ADS/CATALOG
         # ============================================
+        
+        # Đếm số tin nhắn THẬT đã nhận từ user (không tính postback, echo, referral)
+        if "real_message_count" not in ctx:
+            ctx["real_message_count"] = 0
+        
+        # Tăng counter cho tin nhắn này
+        ctx["real_message_count"] += 1
+        message_count = ctx["real_message_count"]
+        
+        print(f"[MESSAGE COUNT] User {uid}: tin nhắn thứ {message_count}")
+        
+        # QUY TẮC QUAN TRỌNG:
+        # 1. Tin nhắn đầu tiên (real_message_count == 1): Gửi carousel, KHÔNG GPT
+        # 2. Từ tin nhắn thứ 2 trở đi: LUÔN dùng GPT Function Calling
         last_ms = ctx.get("last_ms")
         
-        # KIỂM TRA: Đây có phải tin nhắn đầu tiên sau khi có mã sản phẩm không?
-        # Bất kỳ nguồn nào (Fchat, ADS, Catalog) - MIỄN CÓ last_ms
-        if last_ms and last_ms in PRODUCTS:
-            has_sent_carousel = ctx.get("has_sent_first_carousel", False)
+        if message_count == 1 and last_ms and last_ms in PRODUCTS:
+            print(f"🚨 [FIRST REAL MESSAGE] Tin nhắn THẬT đầu tiên từ user {uid}")
+            print(f"🚨 [FIRST MESSAGE RULE] BỎ QUA nội dung '{text[:50]}...', gửi carousel cho {last_ms}")
             
-            if not has_sent_carousel:
-                print(f"🚨 [FIRST MESSAGE RULE] Phát hiện tin nhắn đầu tiên: '{text[:50]}...'")
-                print(f"🚨 [FIRST MESSAGE RULE] BỎ QUA nội dung, gửi carousel cho {last_ms}")
-                
-                # 1. GỬI CAROUSEL CHO SẢN PHẨM ĐÃ ĐƯỢC XÁC ĐỊNH
-                send_single_product_carousel(uid, last_ms)
-                
-                # 2. ĐÁNH DẤU ĐÃ GỬI CAROUSEL ĐẦU TIÊN
-                ctx["has_sent_first_carousel"] = True
-                
-                # 3. KHÔNG XỬ LÝ TIN NHẮN NÀY BẰNG GPT - QUAN TRỌNG!
-                ctx["processing_lock"] = False
-                return
+            # 1. GỬI CAROUSEL CHO SẢN PHẨM ĐÃ ĐƯỢC XÁC ĐỊNH
+            send_single_product_carousel(uid, last_ms)
+            
+            # 2. KHÔNG XỬ LÝ TIN NHẮN NÀY BẰNG GPT
+            ctx["processing_lock"] = False
+            return
         
         # ============================================
-        # NẾU KHÔNG PHẢI TIN NHẮN ĐẦU TIÊN: XỬ LÝ BÌNH THƯỜNG
+        # TỪ TIN NHẮN THỨ 2 TRỞ ĐI: LUÔN DÙNG GPT FUNCTION CALLING
         # ============================================
+        print(f"✅ [GPT REQUIRED] Tin nhắn thứ {message_count} từ user {uid}, BẮT BUỘC dùng GPT")
         
         if handle_order_form_step(uid, text):
             ctx["processing_lock"] = False
@@ -2419,8 +2429,8 @@ def handle_text(uid: str, text: str):
         current_ms = ctx.get("last_ms")
         detected_ms = detect_ms_from_text(text)
         
-        # Sử dụng Function Calling để xử lý tin nhắn (từ tin nhắn thứ 2 trở đi)
-        print(f"[FUNCTION CALLING] User: {uid}, MS: {current_ms}, Text: {text}")
+        # BẮT BUỘC DÙNG FUNCTION CALLING CHO TIN NHẮN THỨ 2 TRỞ ĐI
+        print(f"[FUNCTION CALLING REQUIRED] User: {uid}, MS: {current_ms}, Text: {text}")
         handle_text_with_function_calling(uid, text)
 
     except Exception as e:
@@ -2712,7 +2722,7 @@ Vui lòng gửi mã sản phẩm (ví dụ: MS123456) hoặc mô tả sản ph�
     return False
 
 # ============================================
-# WEBHOOK HANDLER - CẢI THIỆN DUPLICATE DETECTION
+# WEBHOOK HANDLER - CẢI THIỆN DUPLICATE DETECTION (ĐÃ SỬA)
 # ============================================
 
 @app.route("/", methods=["GET"])
@@ -2863,6 +2873,10 @@ def webhook():
                         ctx["referral_source"] = "fchat_echo"
                         update_product_context(recipient_id, detected_ms)
                         
+                        # **RESET COUNTER KHI CÓ ECHO MỚI TỪ FCHAT**
+                        ctx["real_message_count"] = 0
+                        print(f"[ECHO RESET COUNTER] Reset real_message_count cho user {recipient_id} từ Fchat echo")
+                        
                         print(f"[CONTEXT UPDATED] Đã ghi nhận mã {detected_ms} vào ngữ cảnh cho user {recipient_id}")
                         print(f"[WAITING FIRST MS] Đang chờ tin nhắn đầu tiên từ user để gửi carousel")
                         
@@ -2885,6 +2899,10 @@ def webhook():
                 ctx["referral_source"] = ref.get("source", "unknown")
                 referral_payload = ref.get("ref", "")
                 ctx["referral_payload"] = referral_payload
+                
+                # **RESET COUNTER KHI CÓ REFERRAL MỚI**
+                ctx["real_message_count"] = 0
+                print(f"[REFERRAL RESET COUNTER] Reset real_message_count cho user {sender_id}")
                 
                 print(f"[REFERRAL] User {sender_id} từ {ctx['referral_source']} với payload: {referral_payload}")
                 
@@ -4364,7 +4382,12 @@ def health_check():
         "worker_mode": "SINGLE WORKER (optimized for Koyeb 1-worker deployment)",
         "image_send_timeout": "3s (reduced to avoid worker timeout)",
         "max_images_per_postback": "2 ảnh (reduced to avoid timeout)",
-        "postback_id_based_idempotency": "ENABLED (uses postback_id for uniqueness)"
+        "postback_id_based_idempotency": "ENABLED (uses postback_id for uniqueness)",
+        # THÊM MỚI: Real message counter feature
+        "real_message_counter_enabled": True,
+        "real_message_counter_logic": "Tin nhắn 1: Carousel | Tin nhắn 2+: GPT Function Calling",
+        "counter_reset_triggers": ["Fchat echo", "Referral", "ADS"],
+        "counter_preservation": "Không reset khi chỉ có context update"
     }, 200
 
 # ============================================
@@ -4387,7 +4410,8 @@ def debug_locks():
                     "lock_age": lock_age,
                     "last_ms": ctx.get("last_ms"),
                     "last_activity": ctx.get("last_msg_time", 0),
-                    "idempotent_postbacks_count": len(ctx.get("idempotent_postbacks", {}))
+                    "idempotent_postbacks_count": len(ctx.get("idempotent_postbacks", {})),
+                    "real_message_count": ctx.get("real_message_count", 0)
                 })
     
     return jsonify({
@@ -4460,8 +4484,10 @@ if __name__ == "__main__":
     print(f"🔴 BOT ƯU TIÊN CONTEXT HIỆN TẠI")
     print(f"🔴 BOT CHỈ BÁO CÒN HÀNG KHI KHÁCH HỎI VỀ TỒN KHO")
     print(f"🔴 GPT Reply Mode: FUNCTION CALLING (gpt-4o-mini) với CONTEXT PRIORITY")
-    print(f"🔴 FIRST MESSAGE: CAROUSEL 1 SẢN PHẨM (không dùng function calling)")
-    print(f"🔴 FROM SECOND MESSAGE: FUNCTION CALLING với CONTEXT PRIORITY")
+    print(f"🔴 REAL MESSAGE COUNTER: Đếm tin nhắn THẬT từ user")
+    print(f"🔴 TIN NHẮN 1: Carousel 1 sản phẩm (không dùng function calling)")
+    print(f"🔴 TIN NHẮN 2+: FUNCTION CALLING với CONTEXT PRIORITY (BẮT BUỘC GPT)")
+    print(f"🔴 RESET COUNTER KHI: Fchat echo, Referral mới, ADS mới")
     print(f"🔴 Order Priority: ƯU TIÊN GỬI LINK KHI CÓ TỪ KHÓA ĐẶT HÀNG")
     print(f"🔴 Price Priority: HIỂN THỊ CHI TIẾT KHI KHÁCH HỎI VỀ GIÁ")
     print(f"🔴 Function Calling Integration: HOÀN THÀNH")
