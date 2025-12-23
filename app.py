@@ -923,9 +923,9 @@ def handle_text_with_function_calling(uid: str, text: str):
 
 **QUY TẮC TRẢ LỜI VỀ CHÍNH SÁCH (KHÔNG DÙNG TOOL RIÊNG):**
 1. Khi khách hỏi về: vận chuyển, bảo quản, hướng dẫn sử dụng, đổi trả, khuyến mãi, bảo hành, chất liệu, thời gian giao hàng, chính sách đổi trả
-   → LUÔN dùng tool 'get_product_basic_info' để lấy MÔ TẢ SẢN PHẨM
-   → TỰ ĐỌC và PHÂN TÍCH mô tả để tìm thông tin liên quan
-   → Trả lời như một nhân viên thật: tự nhiên, thân thiện, dựa trên thông tin có sẵn
+   - LUÔN dùng tool 'get_product_basic_info' để lấy MÔ TẢ SẢN PHẨM
+   - TỰ ĐỌC và PHÂN TÍCH mô tả để tìm thông tin liên quan
+   - Trả lời như một nhân viên thật: tự nhiên, thân thiện, dựa trên thông tin có sẵn
 
 2. Nếu trong mô tả CÓ thông tin liên quan:
    - Trích xuất thông tin chính xác từ mô tả
@@ -938,7 +938,7 @@ def handle_text_with_function_calling(uid: str, text: str):
    - KHÔNG bịa thông tin, KHÔNG đoán mò
 
 **QUY TẮC TRẢ LỜI VỀ GIÁ:**
-1. Khi khách hỏi về giá → LUÔN dùng tool 'get_product_price_details'
+1. Khi khách hỏi về giá - LUÔN dùng tool 'get_product_price_details'
 2. Phân tích kết quả từ tool và trả lời theo định dạng:
    - Giá theo màu: Liệt kê từng màu và giá
    - Giá theo size: Liệt kê từng size và giá
@@ -960,29 +960,29 @@ def handle_text_with_function_calling(uid: str, text: str):
 5. send_product_videos - Cho câu hỏi "xem video"
 
 **KHI KHÁCH HỎI:**
-- "giá bao nhiêu", "bao nhiêu tiền" → get_product_price_details
-- "chất liệu gì", "làm bằng gì" → get_product_basic_info (đọc mô tả để tìm thông tin)
-- "có những màu nào" → get_product_basic_info (sau đó liệt kê màu từ data)
-- "size nào có" → get_product_basic_info (liệt kê size từ data)
-- "xem ảnh", "gửi ảnh" → send_product_images
-- "có video không" → send_product_videos
-- "đặt hàng", "mua hàng" → provide_order_link
-- "miễn ship chứ?", "ship bao nhiêu?", "thời gian giao hàng", "có free ship không" → get_product_basic_info (đọc mô tả tìm thông tin ship)
-- "bảo quản thế nào?", "giặt như thế nào?", "cách bảo quản" → get_product_basic_info (đọc mô tả tìm hướng dẫn bảo quản)
-- "hướng dẫn sử dụng", "cách dùng", "sử dụng thế nào" → get_product_basic_info (đọc mô tả tìm hướng dẫn sử dụng)
-- "có giảm giá không?", "chính sách đổi trả", "bảo hành thế nào" → get_product_basic_info (đọc mô tả tìm thông tin chính sách)
+- "giá bao nhiêu", "bao nhiêu tiền" - get_product_price_details
+- "chất liệu gì", "làm bằng gì" - get_product_basic_info (đọc mô tả để tìm thông tin)
+- "có những màu nào" - get_product_basic_info (sau đó liệt kê màu từ data)
+- "size nào có" - get_product_basic_info (liệt kê size từ data)
+- "xem ảnh", "gửi ảnh" - send_product_images
+- "có video không" - send_product_videos
+- "đặt hàng", "mua hàng" - provide_order_link
+- "miễn ship chứ?", "ship bao nhiêu?", "thời gian giao hàng", "có free ship không" - get_product_basic_info (đọc mô tả tìm thông tin ship)
+- "bảo quản thế nào?", "giặt như thế nào?", "cách bảo quản" - get_product_basic_info (đọc mô tả tìm hướng dẫn bảo quản)
+- "hướng dẫn sử dụng", "cách dùng", "sử dụng thế nào" - get_product_basic_info (đọc mô tả tìm hướng dẫn sử dụng)
+- "có giảm giá không?", "chính sách đổi trả", "bảo hành thế nào" - get_product_basic_info (đọc mô tả tìm thông tin chính sách)
 
 **VÍ DỤ XỬ LÝ CHÍNH SÁCH:**
 - Khách hỏi: "Có miễn ship không?"
   - Gọi get_product_basic_info
   - Đọc mô tả, tìm thông tin về "ship", "vận chuyển", "miễn phí"
-  - Nếu có: "Dạ, theo thông tin sản phẩm thì {trích dẫn thông tin} ạ!"
+  - Nếu có: "Dạ, theo thông tin sản phẩm thì [trích dẫn thông tin] ạ!"
   - Nếu không: "Dạ, phần này trong hệ thống chưa có thông tin ạ..."
 
 - Khách hỏi: "Bảo quản thế nào?"
   - Gọi get_product_basic_info
   - Tìm hướng dẫn bảo quản trong mô tả
-  - Trả lời tự nhiên: "Dạ, sản phẩm này nên {thông tin từ mô tả} ạ!"
+  - Trả lời tự nhiên: "Dạ, sản phẩm này nên [thông tin từ mô tả] ạ!"
 """
     
     try:
