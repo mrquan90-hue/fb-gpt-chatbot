@@ -789,7 +789,7 @@ def execute_tool(uid, name, args):
                - Chỉ cần trả lời một giá duy nhất
                - Ví dụ: "Dạ, giá sản phẩm là 250.000đ ạ!"
                
-            LUÔN KẾT THÚC BẰNG: """Anh/chị cần em tư vấn thêm gì không ạ?"""
+            LUÔN KẾT THÚC BẰNG: 'Anh/chị cần em tư vấn thêm gì không ạ?'"""
         }, ensure_ascii=False)
     
     elif name == "get_product_basic_info":
