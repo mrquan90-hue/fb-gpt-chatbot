@@ -223,66 +223,98 @@ def extract_ms_from_ad_title(ad_title: str) -> Optional[str]:
     return None
 
 # ============================================
+# HELPER: PHÁT HIỆN FCHAT ECHO VỚI MÃ SẢN PHẨM
+# ============================================
+
+def is_fchat_echo_with_ms(echo_text: str) -> Tuple[bool, Optional[str]]:
+    """
+    Kiểm tra xem echo có phải từ Fchat với mã sản phẩm không
+    ĐẶC ĐIỂM FCHAT: Luôn có #MSxxxxxx trong tin nhắn
+    Trả về: (is_fchat, ms_code)
+    """
+    if not echo_text:
+        return False, None
+    
+    # ĐẶC ĐIỂM FCHAT: Có #MS trong tin nhắn (thường là comment từ user)
+    if "#MS" in echo_text.upper():
+        # Tìm mã sản phẩm với định dạng #MSxxxxxx
+        match = re.search(r'#MS(\d{2,6})', echo_text.upper())
+        if match:
+            ms_num = match.group(1).zfill(6)
+            ms_code = f"MS{ms_num}"
+            print(f"[FCHAT DETECTED] Phát hiện mã sản phẩm từ Fchat: {ms_code}")
+            return True, ms_code
+    
+    # Kiểm tra thêm các dạng khác của Fchat (không có #)
+    fchat_patterns = [
+        r'mã\s*(\d{2,6})',  # "mã 000016"
+        r'ms\s*(\d{2,6})',   # "ms 000016"
+    ]
+    
+    for pattern in fchat_patterns:
+        match = re.search(pattern, echo_text.lower())
+        if match:
+            ms_num = match.group(1).zfill(6)
+            ms_code = f"MS{ms_num}"
+            print(f"[FCHAT PATTERN] Phát hiện mã từ pattern: {ms_code}")
+            return True, ms_code
+    
+    return False, None
+
+# ============================================
 # HELPER: KIỂM TRA ECHO MESSAGE (ĐÃ CẢI THIỆN)
 # ============================================
 
 def is_bot_generated_echo(echo_text: str, app_id: str = "", attachments: list = None) -> bool:
+    # ƯU TIÊN: Nếu có #MS trong tin nhắn => KHÔNG PHẢI BOT (là comment từ Fchat)
+    if echo_text and "#MS" in echo_text.upper():
+        return False
+    
     if app_id in BOT_APP_IDS:
         return True
     
     if echo_text:
-        # Mở rộng danh sách pattern nhận diện tin nhắn bot
-        bot_response_patterns = [
-            "Dạ, phần này trong hệ thống chưa có thông tin ạ",
-            "em sợ nói sai nên không dám khẳng định",
-            "Chào anh/chị! 👋",
-            "Em là trợ lý AI",
-            "📌 [MS",
-            "📝 MÔ TẢ:",
-            "💰 GIÁ SẢN PHẨM:",
-            "📋 Đặt hàng ngay tại đây:",
-            "Dạ em đang gặp chút trục trặc",
-            "Dạ, theo thông tin sản phẩm thì",
-            "Dạ, sản phẩm này được làm từ",
-            "Dạ, với cân nặng",
-            "Dạ, giá bán của sản phẩm",
-            "Dạ, theo thông tin sản phẩm",
-            "Dạ, sản phẩm này",
-            "Anh/chị cần em tư vấn thêm gì",
-            "Nếu anh/chị cần thêm thông tin",
-            "Cảm ơn anh/chị đã quan tâm",
-            "Shop sẽ liên hệ xác nhận",
-            "Đơn hàng đã được tiếp nhận",
-            "🌟 **5 ƯU ĐIỂM NỔI BẬT**",
-            "🛒 ĐƠN HÀNG MỚI",
-            "🎉 Shop đã nhận được đơn hàng",
-            "Dạ, anh/chị có thể đặt hàng bộ sản phẩm",
-            "Dạ, phần này trong hệ thống chưa có",
-            "Anh/chị vui lòng liên hệ shop",
+        echo_text_lower = echo_text.lower()
+        
+        # Các dấu hiệu bot RÕ RÀNG (chỉ những mẫu rất đặc trưng)
+        clear_bot_phrases = [
+            "🌟 **5 ưu điểm nổi bật**",
+            "🛒 đơn hàng mới",
+            "🎉 shop đã nhận được đơn hàng",
+            "dạ, phần này trong hệ thống chưa có thông tin ạ",
+            "dạ em đang gặp chút trục trặc",
+            "💰 giá sản phẩm:",
+            "📝 mô tả:",
+            "📌 [ms",
+            "🛒 đơn hàng mới",
+            "🎉 shop đã nhận được đơn hàng",
         ]
         
-        for pattern in bot_response_patterns:
-            if pattern in echo_text:
+        for phrase in clear_bot_phrases:
+            if phrase in echo_text_lower:
+                print(f"[ECHO BOT PHRASE] Phát hiện cụm bot: {phrase}")
                 return True
         
-        # Thêm check regex cho các mẫu bot thường gặp
+        # Bot format rõ ràng
+        if re.search(r'^\*\*.*\*\*', echo_text) or re.search(r'^\[MS\d+\]', echo_text, re.IGNORECASE):
+            print(f"[ECHO BOT FORMAT] Phát hiện format bot")
+            return True
+        
+        # Tin nhắn quá dài (>300) và có cấu trúc bot
+        if len(echo_text) > 300 and ("dạ," in echo_text_lower or "ạ!" in echo_text_lower):
+            print(f"[ECHO LONG BOT] Tin nhắn dài có cấu trúc bot: {len(echo_text)} chars")
+            return True
+        
+        # Các pattern khác giảm độ nhạy (chỉ nhận diện khi rất rõ)
         bot_patterns_regex = [
-            r"Dạ,.*\d{1,3}[.,]?\d{0,3}\s*đ",  # Giá tiền
-            r"Dạ,.*size\s*[A-Z0-9]+",  # Nhắc đến size
-            r"Dạ,.*màu\s*\w+",  # Nhắc đến màu
-            r"\[\w+\]\s*\w+",  # Format [MS...] Tên sản phẩm
-            r"Dạ,.*\d+\s*ngày",  # Thời gian giao hàng
-            r"Dạ,.*\d+\s*kg",  # Cân nặng
-            r"Dạ,.*\d+\s*cm",  # Kích thước
+            r"dạ,.*\d{1,3}[.,]?\d{0,3}\s*đ.*\d{1,3}[.,]?\d{0,3}\s*đ",  # Nhiều giá tiền (rất có thể là bot)
+            r"dạ,.*\d+\s*cm.*\d+\s*cm",  # Nhiều kích thước
         ]
         
         for pattern in bot_patterns_regex:
-            if re.search(pattern, echo_text, re.IGNORECASE):
+            if re.search(pattern, echo_text_lower):
+                print(f"[ECHO BOT PATTERN] Phát hiện pattern: {pattern}")
                 return True
-        
-        # Check thêm: nếu bắt đầu bằng "Dạ," và có độ dài > 50 ký tự, rất có thể là bot
-        if echo_text.strip().startswith("Dạ,") and len(echo_text) > 50:
-            return True
     
     return False
 
@@ -1519,7 +1551,7 @@ def save_order_to_local_csv(order_data: dict):
         file_path = "orders_backup.csv"
         file_exists = os.path.exists(file_path)
         
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        timestamp = datetime.now().strftime("%Y-%m-d %H:%M:%S")
         order_id = f"ORD{int(time.time())}_{order_data.get('uid', '')[-4:]}"
         
         row_data = {
@@ -1616,7 +1648,7 @@ def api_get_variant_info():
     }
 
 # ============================================
-# WEBHOOK HANDLER (ĐÃ SỬA ĐỂ TRÁNH CẬP NHẬT SAI CONTEXT)
+# WEBHOOK HANDLER (ĐÃ SỬA ĐỂ NHẬN DIỆN FCHAT)
 # ============================================
 
 @app.route("/", methods=["GET"])
@@ -1674,7 +1706,7 @@ def webhook():
                                         update_product_context(sender_id, ms_from_retailer)
                                         print(f"[CATALOG] Lưu retailer_id: {retailer_id} -> MS: {ms_from_retailer}")
 
-            # Xử lý echo message từ Fchat - CẢI THIỆN BẢO VỆ
+            # Xử lý echo message từ Fchat - LOGIC MỚI VỚI FCHAT DETECTION
             if m.get("message", {}).get("is_echo"):
                 recipient_id = m.get("recipient", {}).get("id")
                 if not recipient_id:
@@ -1685,36 +1717,49 @@ def webhook():
                 echo_text = msg.get("text", "")
                 app_id = msg.get("app_id", "")
                 
-                # Debug logging
                 print(f"[ECHO DEBUG] Text: {echo_text[:100]}")
                 print(f"[ECHO DEBUG] App ID: {app_id}")
                 
-                # Kiểm tra xem echo có phải từ bot không
+                # QUAN TRỌNG: Kiểm tra có phải Fchat với mã sản phẩm không (#MS)
+                is_fchat, detected_ms = is_fchat_echo_with_ms(echo_text)
+                
+                if is_fchat and detected_ms:
+                    # Đây là echo từ Fchat với mã sản phẩm => Xử lý ngay
+                    print(f"[FCHAT PROCESS] Xử lý echo Fchat với mã: {detected_ms} cho user: {recipient_id}")
+                    
+                    ctx = USER_CONTEXT[recipient_id]
+                    
+                    # Kiểm tra trùng lặp
+                    if msg_mid:
+                        if "processed_echo_mids" not in ctx:
+                            ctx["processed_echo_mids"] = set()
+                        
+                        if msg_mid in ctx["processed_echo_mids"]:
+                            print(f"[FCHAT DUPLICATE] Bỏ qua echo đã xử lý: {msg_mid}")
+                            continue
+                        
+                        ctx["processed_echo_mids"].add(msg_mid)
+                        if len(ctx["processed_echo_mids"]) > 20:
+                            ctx["processed_echo_mids"] = set(list(ctx["processed_echo_mids"])[-20:])
+                    
+                    # Cập nhật context với mã sản phẩm
+                    ctx["last_ms"] = detected_ms
+                    ctx["has_sent_first_carousel"] = False
+                    ctx["referral_source"] = "fchat_echo"
+                    ctx["real_message_count"] = 0  # Reset counter để áp dụng first message rule
+                    
+                    update_product_context(recipient_id, detected_ms)
+                    print(f"[FCHAT CONTEXT] Đã cập nhật context: {detected_ms} cho user {recipient_id}")
+                    
+                    # KHÔNG gửi carousel ở đây - đợi tin nhắn đầu tiên từ user
+                    continue
+                
+                # Nếu không phải Fchat với mã sản phẩm, kiểm tra bot như bình thường
                 if is_bot_generated_echo(echo_text, app_id):
                     print(f"[ECHO BOT] Bỏ qua echo message từ bot: {echo_text[:50]}...")
                     continue
                 
-                # Kiểm tra trùng lặp
-                if msg_mid:
-                    ctx = USER_CONTEXT[recipient_id]
-                    if "processed_echo_mids" not in ctx:
-                        ctx["processed_echo_mids"] = set()
-                    
-                    if msg_mid in ctx["processed_echo_mids"]:
-                        continue
-                    
-                    now = time.time()
-                    last_echo_time = ctx.get("last_echo_processed_time", 0)
-                    
-                    if now - last_echo_time < 2:
-                        continue
-                    
-                    ctx["last_echo_processed_time"] = now
-                    ctx["processed_echo_mids"].add(msg_mid)
-                    
-                    if len(ctx["processed_echo_mids"]) > 20:
-                        ctx["processed_echo_mids"] = set(list(ctx["processed_echo_mids"])[-20:])
-                
+                # Xử lý echo thông thường (nếu cần)
                 print(f"[ECHO USER] Đang xử lý echo từ bình luận người dùng")
                 load_products()
                 
@@ -1723,26 +1768,11 @@ def webhook():
                 if detected_ms and detected_ms in PRODUCTS:
                     ctx = USER_CONTEXT[recipient_id]
                     
-                    # BẢO VỆ QUAN TRỌNG: Kiểm tra xem echo có từ khóa bot không
+                    # BẢO VỆ: Kiểm tra xem echo có từ khóa bot không
                     bot_keywords = ["Dạ,", "ạ!", "em ", "anh/chị", "shop ", "của em", "tư vấn", "hỗ trợ"]
-                    if any(keyword in echo_text for keyword in bot_keywords) and len(echo_text) > 20:
+                    if any(keyword in echo_text for keyword in bot_keywords) and len(echo_text) > 100:
                         print(f"[ECHO SAFETY] Tin nhắn dài có từ khóa bot, không cập nhật context từ echo")
-                        print(f"[ECHO IGNORE] Bỏ qua echo có chứa mã: {detected_ms} (tin nhắn bot)")
                         continue
-                    
-                    # Chỉ cập nhật nếu user chưa có last_ms hoặc echo ngắn (có thể là comment user)
-                    current_ms = ctx.get("last_ms")
-                    echo_text_clean = echo_text.strip()
-                    
-                    if current_ms and len(echo_text_clean) > 10:
-                        # Giữ nguyên context hiện tại nếu echo dài
-                        print(f"[ECHO CONTEXT GUARD] Giữ nguyên context hiện tại: {current_ms}")
-                        
-                        # Chỉ cập nhật nếu echo ngắn (có thể là comment user)
-                        if len(echo_text_clean) < 30:
-                            print(f"[ECHO SHORT] Tin nhắn ngắn ({len(echo_text_clean)} chars), có thể là comment user, cập nhật context")
-                        else:
-                            continue
                     
                     print(f"[ECHO FCHAT] Phát hiện mã sản phẩm: {detected_ms} cho user: {recipient_id}")
                     
@@ -1758,7 +1788,6 @@ def webhook():
                         update_product_context(recipient_id, detected_ms)
                         
                         print(f"[ECHO CONTEXT] Đã cập nhật context cho user {recipient_id} với MS: {detected_ms}")
-                        print(f"[CONTEXT UPDATED] Đã ghi nhận mã {detected_ms} vào ngữ cảnh")
                         
                     finally:
                         ctx["processing_lock"] = False
@@ -1928,6 +1957,10 @@ Anh/chị quan tâm sản phẩm nào ạ?"""
                     if ctx.get("processing_lock"):
                         print(f"[TEXT LOCKED] User {sender_id} đang được xử lý, bỏ qua text: {text[:50]}...")
                         continue
+                    
+                    # XỬ LÝ ĐẶC BIỆT: Nếu có context từ Fchat và là tin nhắn đầu tiên
+                    if ctx.get("referral_source") == "fchat_echo" and ctx.get("real_message_count", 0) == 0:
+                        ctx["real_message_count"] = 1  # Đánh dấu đây là tin nhắn đầu tiên
                     
                     handle_text(sender_id, text)
                 elif attachments:
@@ -2949,11 +2982,12 @@ if __name__ == "__main__":
     print(f"🔴 Postback Idempotency: Mỗi postback chỉ xử lý 1 lần")
     print("=" * 80)
     
-    print("🔴 CẢI THIỆN BẢO VỆ CONTEXT:")
+    print("🔴 CẢI THIỆN FCHAT DETECTION VỚI #MS:")
     print("=" * 80)
-    print(f"🔴 Hàm is_bot_generated_echo: Mở rộng pattern nhận diện")
-    print(f"🔴 Echo processing: Kiểm tra từ khóa bot, độ dài tin nhắn")
-    print(f"🔴 System prompt: Thêm quy tắc không nhắc mã sản phẩm khác")
+    print(f"🔴 Hàm is_fchat_echo_with_ms: Phát hiện #MSxxxxxx trong echo")
+    print(f"🔴 Hàm is_bot_generated_echo: Ưu tiên #MS => KHÔNG PHẢI BOT")
+    print(f"🔴 Echo processing: Xử lý ưu tiên Fchat echo trước khi kiểm tra bot")
+    print(f"🔴 Context update: Tự động cập nhật MS từ Fchat echo")
     print("=" * 80)
     
     print("🔴 FORM ĐẶT HÀNG CẢI TIẾN:")
