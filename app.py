@@ -693,6 +693,80 @@ def get_product_data_for_gpt(ms: str) -> dict:
     }
 
 # ============================================
+# HÀM TRÍCH XUẤT THÔNG TIN CHÍNH SÁCH TỪ MÔ TẢ
+# ============================================
+
+def extract_policy_info(mo_ta: str, question_type: str) -> str:
+    """
+    Trích xuất thông tin chính sách từ mô tả sản phẩm dựa trên loại câu hỏi
+    """
+    if not mo_ta:
+        return ""
+    
+    mo_ta_lower = mo_ta.lower()
+    result = []
+    
+    # Từ khóa cho các loại câu hỏi
+    keywords = {
+        "shipping": ["ship", "giao hàng", "vận chuyển", "miễn ship", "phí ship", "thời gian giao", "nhận hàng", "phí vận chuyển", "giao", "vận chuyển"],
+        "care": ["bảo quản", "giặt", "ủi", "phơi", "chăm sóc", "vệ sinh", "làm sạch", "giữ gìn"],
+        "usage": ["sử dụng", "hướng dẫn dùng", "cách dùng", "đeo", "mặc", "cách mặc", "cách đeo", "hướng dẫn sử dụng"],
+        "policy": ["đổi trả", "bảo hành", "chính sách", "khuyến mãi", "giảm giá", "ưu đãi", "khuyến mại", "hoàn tiền", "đảm bảo"]
+    }
+    
+    target_keywords = keywords.get(question_type, [])
+    
+    if not target_keywords:
+        return ""
+    
+    # Tách mô tả thành các câu
+    sentences = re.split(r'[.!?]+', mo_ta)
+    
+    for sentence in sentences:
+        sentence_lower = sentence.lower()
+        # Kiểm tra xem câu có chứa từ khóa nào không
+        for keyword in target_keywords:
+            if keyword in sentence_lower and len(sentence.strip()) > 10:
+                # Kiểm tra xem câu đã có trong kết quả chưa
+                if sentence.strip() not in result:
+                    result.append(sentence.strip())
+                break
+    
+    if result:
+        # Giới hạn số lượng câu và làm sạch
+        cleaned_result = []
+        for r in result[:5]:  # Giới hạn 5 câu
+            cleaned = r.strip()
+            if cleaned and len(cleaned) > 5:
+                cleaned_result.append(cleaned)
+        
+        return "\n".join(cleaned_result)
+    return ""
+
+def detect_policy_question_type(text: str) -> Optional[str]:
+    """
+    Tự động phát hiện loại câu hỏi chính sách từ tin nhắn
+    """
+    text_lower = text.lower()
+    
+    shipping_keywords = ["ship", "giao hàng", "vận chuyển", "miễn ship", "phí ship", "thời gian giao", "nhận hàng", "bao lâu thì nhận", "phí vận chuyển"]
+    care_keywords = ["bảo quản", "giặt", "ủi", "phơi", "chăm sóc", "vệ sinh", "làm sạch", "giữ gìn", "giặt như thế nào"]
+    usage_keywords = ["sử dụng", "hướng dẫn dùng", "cách dùng", "đeo", "mặc", "cách mặc", "cách đeo", "hướng dẫn sử dụng", "dùng như thế nào"]
+    policy_keywords = ["đổi trả", "bảo hành", "chính sách", "khuyến mãi", "giảm giá", "ưu đãi", "khuyến mại", "hoàn tiền", "đảm bảo", "giảm giá không"]
+    
+    # Kiểm tra từng loại với độ ưu tiên
+    if any(keyword in text_lower for keyword in shipping_keywords):
+        return "shipping"
+    elif any(keyword in text_lower for keyword in care_keywords):
+        return "care"
+    elif any(keyword in text_lower for keyword in usage_keywords):
+        return "usage"
+    elif any(keyword in text_lower for keyword in policy_keywords):
+        return "policy"
+    
+    return None
+
+# ============================================
 # GPT FUNCTION CALLING TOOLS
 # ============================================
 
@@ -755,6 +829,25 @@ def get_tools_definition():
                     "type": "object",
                     "properties": {"ms": {"type": "string", "description": "Mã sản phẩm"}},
                     "required": ["ms"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_shop_policies",
+                "description": "Lấy thông tin chính sách bán hàng, vận chuyển, hướng dẫn sử dụng và bảo quản từ mô tả sản phẩm",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "ms": {"type": "string", "description": "Mã sản phẩm MSxxxxxx"},
+                        "question_type": {
+                            "type": "string", 
+                            "description": "Loại câu hỏi: 'shipping' (vận chuyển), 'care' (bảo quản), 'usage' (hướng dẫn sử dụng), 'policy' (chính sách chung)",
+                            "enum": ["shipping", "care", "usage", "policy"]
+                        }
+                    },
+                    "required": ["ms", "question_type"]
                 }
             }
         }
@@ -850,6 +943,54 @@ def execute_tool(uid, name, args):
             }, ensure_ascii=False)
         return "Không tìm thấy sản phẩm."
     
+    elif name == "get_shop_policies":
+        ms = args.get("ms", "").upper()
+        question_type = args.get("question_type", "")
+        
+        if ms not in PRODUCTS:
+            return json.dumps({
+                "status": "error",
+                "message": "Không tìm thấy sản phẩm"
+            }, ensure_ascii=False)
+        
+        product = PRODUCTS[ms]
+        mo_ta = product.get("MoTa", "")
+        
+        if not mo_ta:
+            return json.dumps({
+                "status": "success",
+                "policy_info": "",
+                "instructions": "Không tìm thấy thông tin chính sách trong mô tả sản phẩm. Hãy trả lời: 'Dạ, phần này trong hệ thống chưa có thông tin ạ'"
+            }, ensure_ascii=False)
+        
+        # Trích xuất thông tin chính sách liên quan
+        policy_info = extract_policy_info(mo_ta, question_type)
+        
+        if not policy_info:
+            return json.dumps({
+                "status": "success",
+                "policy_info": "",
+                "instructions": "Không tìm thấy thông tin phù hợp trong mô tả. Hãy trả lời: 'Dạ, phần này trong hệ thống chưa có thông tin ạ'"
+            }, ensure_ascii=False)
+        
+        # Tạo câu trả lời mẫu dựa trên loại câu hỏi
+        response_templates = {
+            "shipping": "Dạ, em xin thông tin về chính sách vận chuyển ạ:\n{policy_info}\n\nAnh/chị cần em tư vấn thêm gì không ạ?",
+            "care": "Dạ, em xin hướng dẫn bảo quản ạ:\n{policy_info}\n\nAnh/chị cần em tư vấn thêm gì không ạ?",
+            "usage": "Dạ, em xin hướng dẫn sử dụng ạ:\n{policy_info}\n\nAnh/chị cần em tư vấn thêm gì không ạ?",
+            "policy": "Dạ, em xin thông tin về chính sách ạ:\n{policy_info}\n\nAnh/chị cần em tư vấn thêm gì không ạ?"
+        }
+        
+        template = response_templates.get(question_type, "Dạ, thông tin ạ:\n{policy_info}")
+        formatted_response = template.format(policy_info=policy_info)
+        
+        return json.dumps({
+            "status": "success",
+            "policy_info": policy_info,
+            "formatted_response": formatted_response,
+            "instructions": "HÃY TRẢ LỜI THEO ĐÚNG ĐỊNH DẠNG ĐÃ ĐƯỢC CUNG CẤP. KHÔNG TỰ THÊM BỚT THÔNG TIN."
+        }, ensure_ascii=False)
+    
     return "Tool không xác định."
 
 # ============================================
@@ -917,9 +1058,46 @@ def handle_text_with_function_calling(uid: str, text: str):
     
     fanpage_name = get_fanpage_name_from_api()
     
+    # KIỂM TRA XEM CÓ PHẢI CÂU HỎI CHÍNH SÁCH KHÔNG
+    policy_type = detect_policy_question_type(text)
+    if policy_type and current_ms and current_ms in PRODUCTS:
+        print(f"🔍 [POLICY DETECTED] Phát hiện câu hỏi chính sách: {policy_type} cho sản phẩm {current_ms}")
+        
+        # Gọi tool get_shop_policies trực tiếp
+        try:
+            # Chuẩn bị arguments cho tool
+            tool_args = {
+                "ms": current_ms,
+                "question_type": policy_type
+            }
+            
+            # Gọi tool và nhận kết quả
+            tool_result = execute_tool(uid, "get_shop_policies", tool_args)
+            result_data = json.loads(tool_result)
+            
+            if result_data.get("status") == "success" and result_data.get("formatted_response"):
+                # Gửi câu trả lời đã được định dạng sẵn
+                send_message(uid, result_data["formatted_response"])
+                # Lưu lịch sử hội thoại
+                ctx["conversation_history"].append({"role": "user", "content": text})
+                ctx["conversation_history"].append({"role": "assistant", "content": result_data["formatted_response"]})
+                ctx["conversation_history"] = ctx["conversation_history"][-10:]
+                return
+            else:
+                # Nếu không có thông tin, để GPT xử lý bình thường
+                print(f"⚠️ [NO POLICY INFO] Không tìm thấy thông tin chính sách, chuyển cho GPT xử lý")
+        except Exception as e:
+            print(f"❌ [POLICY ERROR] Lỗi khi xử lý chính sách: {e}")
+    
     system_prompt = f"""Bạn là nhân viên bán hàng của {fanpage_name}.
 
 **SẢN PHẨM ĐANG ĐƯỢC HỎI: {current_ms}**
+
+**QUY TẮC TRẢ LỜI VỀ CHÍNH SÁCH:**
+1. Khi khách hỏi về: "Miễn ship chứ?", "Ship bao nhiêu tiền?", "Thời gian giao hàng là bao lâu?" → LUÔN dùng tool 'get_shop_policies' với question_type='shipping'
+2. Khi khách hỏi về: "Bảo quản thế nào?", "Giặt như thế nào?" → LUÔN dùng tool 'get_shop_policies' với question_type='care'
+3. Khi khách hỏi về: "Hướng dẫn sử dụng?", "Cách dùng?" → LUÔN dùng tool 'get_shop_policies' với question_type='usage'
+4. Khi khách hỏi về: "Có giảm giá không?", "Chính sách đổi trả?" → LUÔN dùng tool 'get_shop_policies' với question_type='policy'
 
 **QUY TẮC TRẢ LỜI VỀ GIÁ:**
 1. Khi khách hỏi về giá → LUÔN dùng tool 'get_product_price_details'
@@ -942,6 +1120,7 @@ def handle_text_with_function_calling(uid: str, text: str):
 3. send_product_images - Cho câu hỏi "xem ảnh"
 4. provide_order_link - Cho câu hỏi "đặt hàng", "mua hàng"
 5. send_product_videos - Cho câu hỏi "xem video"
+6. get_shop_policies - Cho câu hỏi về chính sách vận chuyển, bảo quản, hướng dẫn sử dụng, khuyến mãi
 
 **KHI KHÁCH HỎI:**
 - "giá bao nhiêu", "bao nhiêu tiền" → get_product_price_details
@@ -951,6 +1130,10 @@ def handle_text_with_function_calling(uid: str, text: str):
 - "xem ảnh", "gửi ảnh" → send_product_images
 - "có video không" → send_product_videos
 - "đặt hàng", "mua hàng" → provide_order_link
+- "miễn ship chứ?", "ship bao nhiêu?", "thời gian giao hàng" → get_shop_policies (shipping)
+- "bảo quản thế nào?", "giặt như thế nào?" → get_shop_policies (care)
+- "hướng dẫn sử dụng", "cách dùng" → get_shop_policies (usage)
+- "có giảm giá không?", "chính sách đổi trả" → get_shop_policies (policy)
 """
     
     try:
@@ -2465,11 +2648,12 @@ def health_check():
         },
         "gpt_function_calling": {
             "enabled": True,
-            "tools": ["get_product_price_details", "get_product_basic_info", "send_product_images", "send_product_videos", "provide_order_link"],
+            "tools": ["get_product_price_details", "get_product_basic_info", "send_product_images", "send_product_videos", "provide_order_link", "get_shop_policies"],
             "model": "gpt-4o-mini",
             "first_message_logic": "Carousel 1 sản phẩm",
             "second_message_logic": "GPT Function Calling",
-            "price_analysis": "Thông minh (color_based, size_based, complex_based, single_price)"
+            "price_analysis": "Thông minh (color_based, size_based, complex_based, single_price)",
+            "policy_extraction": "Từ cột Mô tả (shipping, care, usage, policy)"
         },
         "features": {
             "carousel_first_message": True,
@@ -2478,7 +2662,8 @@ def health_check():
             "fchat_echo_processing": True,
             "image_processing": True,
             "order_form": True,
-            "google_sheets_api": True
+            "google_sheets_api": True,
+            "policy_extraction": True
         }
     }, 200
 
@@ -2509,8 +2694,9 @@ if __name__ == "__main__":
     print("=" * 80)
     print(f"🔴 Tin nhắn đầu tiên: Carousel 1 sản phẩm")
     print(f"🔴 Từ tin nhắn thứ 2: GPT Function Calling với CONTEXT PRIORITY")
-    print(f"🔴 Tools: get_product_price_details, get_product_basic_info, send_product_images, provide_order_link")
+    print(f"🔴 Tools: get_product_price_details, get_product_basic_info, send_product_images, provide_order_link, get_shop_policies")
     print(f"🔴 Price Analysis: Thông minh (phân tích theo màu, size, complex)")
+    print(f"🔴 Policy Extraction: Trích xuất từ cột Mô tả (vận chuyển, bảo quản, hướng dẫn, chính sách)")
     print(f"🔴 Context Tracking: Ghi nhớ MS từ echo Fchat, ad_title, catalog")
     print(f"🔴 Real Message Counter: Đếm tin nhắn thật từ user")
     print(f"🔴 Postback Idempotency: Mỗi postback chỉ xử lý 1 lần")
