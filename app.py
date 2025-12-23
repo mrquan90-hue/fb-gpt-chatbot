@@ -749,22 +749,42 @@ def detect_policy_question_type(text: str) -> Optional[str]:
     """
     text_lower = text.lower()
     
-    shipping_keywords = ["ship", "giao hàng", "vận chuyển", "miễn ship", "phí ship", "thời gian giao", "nhận hàng", "bao lâu thì nhận", "phí vận chuyển"]
-    care_keywords = ["bảo quản", "giặt", "ủi", "phơi", "chăm sóc", "vệ sinh", "làm sạch", "giữ gìn", "giặt như thế nào"]
-    usage_keywords = ["sử dụng", "hướng dẫn dùng", "cách dùng", "đeo", "mặc", "cách mặc", "cách đeo", "hướng dẫn sử dụng", "dùng như thế nào"]
-    policy_keywords = ["đổi trả", "bảo hành", "chính sách", "khuyến mãi", "giảm giá", "ưu đãi", "khuyến mại", "hoàn tiền", "đảm bảo", "giảm giá không"]
-    
-    # Kiểm tra từng loại với độ ưu tiên
-    if any(keyword in text_lower for keyword in shipping_keywords):
+    # Ưu tiên phát hiện chính xác
+    if any(keyword in text_lower for keyword in ["miễn ship", "ship bao nhiêu", "phí ship", "có ship không"]):
         return "shipping"
-    elif any(keyword in text_lower for keyword in care_keywords):
+    elif any(keyword in text_lower for keyword in ["thời gian giao", "bao lâu thì nhận", "khi nào nhận"]):
+        return "shipping"
+    elif any(keyword in text_lower for keyword in ["bảo quản", "giặt như nào", "phơi như nào"]):
         return "care"
-    elif any(keyword in text_lower for keyword in usage_keywords):
+    elif any(keyword in text_lower for keyword in ["sử dụng", "cách dùng", "hướng dẫn dùng"]):
         return "usage"
-    elif any(keyword in text_lower for keyword in policy_keywords):
+    elif any(keyword in text_lower for keyword in ["đổi trả", "bảo hành", "khuyến mãi", "giảm giá"]):
         return "policy"
     
-    return None
+    # Phát hiện chung
+    shipping_keywords = ["ship", "giao hàng", "vận chuyển", "nhận hàng", "giao", "vận chuyển"]
+    care_keywords = ["bảo quản", "giặt", "ủi", "phơi", "chăm sóc", "vệ sinh"]
+    usage_keywords = ["sử dụng", "hướng dẫn", "cách dùng", "đeo", "mặc"]
+    policy_keywords = ["đổi trả", "bảo hành", "chính sách", "khuyến mãi", "giảm giá", "ưu đãi"]
+    
+    # Đếm từ khóa xuất hiện
+    shipping_count = sum(1 for kw in shipping_keywords if kw in text_lower)
+    care_count = sum(1 for kw in care_keywords if kw in text_lower)
+    usage_count = sum(1 for kw in usage_keywords if kw in text_lower)
+    policy_count = sum(1 for kw in policy_keywords if kw in text_lower)
+    
+    counts = {
+        "shipping": shipping_count,
+        "care": care_count,
+        "usage": usage_count,
+        "policy": policy_count
+    }
+    
+    # Lấy loại có số lần xuất hiện nhiều nhất
+    max_type = max(counts.items(), key=lambda x: x[1])
+    
+    # Chỉ trả về nếu có ít nhất 1 từ khóa
+    return max_type[0] if max_type[1] > 0 else None
 
 # ============================================
 # GPT FUNCTION CALLING TOOLS
@@ -960,35 +980,121 @@ def execute_tool(uid, name, args):
             return json.dumps({
                 "status": "success",
                 "policy_info": "",
-                "instructions": "Không tìm thấy thông tin chính sách trong mô tả sản phẩm. Hãy trả lời: 'Dạ, phần này trong hệ thống chưa có thông tin ạ'"
+                "instructions": "Không tìm thấy thông tin chính sách trong mô tả sản phẩm. Hãy trả lời ngắn gọn: 'Dạ, phần này trong hệ thống chưa có thông tin ạ'"
             }, ensure_ascii=False)
         
-        # Trích xuất thông tin chính sách liên quan
-        policy_info = extract_policy_info(mo_ta, question_type)
+        # TRÍCH XUẤT THÔNG MINH - CHỈ LẤY THÔNG TIN LIÊN QUAN
+        policy_info = ""
+        mo_ta_lower = mo_ta.lower()
         
+        # Xử lý theo từng loại câu hỏi với regex chính xác hơn
+        if question_type == "shipping":
+            # Tìm thông tin vận chuyển
+            shipping_patterns = [
+                r'(miễn\s*phí\s*ship[^.!?]*[.!?])',
+                r'(miễn\s*ship[^.!?]*[.!?])',
+                r'(phí\s*ship[^.!?]*[.!?])',
+                r'(phí\s*vận\s*chuyển[^.!?]*[.!?])',
+                r'(giao\s*hàng[^.!?]*[.!?])',
+                r'(vận\s*chuyển[^.!?]*[.!?])',
+                r'(thời\s*gian\s*giao[^.!?]*[.!?])',
+                r'(nhận\s*hàng[^.!?]*[.!?])',
+                r'(ship[^.!?]*[.!?])',
+            ]
+            
+            for pattern in shipping_patterns:
+                match = re.search(pattern, mo_ta_lower, re.IGNORECASE)
+                if match:
+                    policy_info = match.group(1).strip()
+                    # Giới hạn độ dài
+                    if len(policy_info) > 200:
+                        policy_info = policy_info[:197] + "..."
+                    break
+        
+        elif question_type == "care":
+            # Tìm thông tin bảo quản
+            care_patterns = [
+                r'(bảo\s*quản[^.!?]*[.!?])',
+                r'(giặt[^.!?]*[.!?])',
+                r'(ủi[^.!?]*[.!?])',
+                r'(phơi[^.!?]*[.!?])',
+                r'(chăm\s*sóc[^.!?]*[.!?])',
+                r'(vệ\s*sinh[^.!?]*[.!?])',
+            ]
+            
+            for pattern in care_patterns:
+                match = re.search(pattern, mo_ta_lower, re.IGNORECASE)
+                if match:
+                    policy_info = match.group(1).strip()
+                    if len(policy_info) > 200:
+                        policy_info = policy_info[:197] + "..."
+                    break
+        
+        elif question_type == "usage":
+            # Tìm thông tin sử dụng
+            usage_patterns = [
+                r'(sử\s*dụng[^.!?]*[.!?])',
+                r'(hướng\s*dẫn[^.!?]*[.!?])',
+                r'(cách\s*dùng[^.!?]*[.!?])',
+                r'(đeo[^.!?]*[.!?])',
+                r'(mặc[^.!?]*[.!?])',
+            ]
+            
+            for pattern in usage_patterns:
+                match = re.search(pattern, mo_ta_lower, re.IGNORECASE)
+                if match:
+                    policy_info = match.group(1).strip()
+                    if len(policy_info) > 200:
+                        policy_info = policy_info[:197] + "..."
+                    break
+        
+        elif question_type == "policy":
+            # Tìm thông tin chính sách chung
+            policy_patterns = [
+                r'(đổi\s*trả[^.!?]*[.!?])',
+                r'(bảo\s*hành[^.!?]*[.!?])',
+                r'(chính\s*sách[^.!?]*[.!?])',
+                r'(khuyến\s*mãi[^.!?]*[.!?])',
+                r'(giảm\s*giá[^.!?]*[.!?])',
+                r'(ưu\s*đãi[^.!?]*[.!?])',
+            ]
+            
+            for pattern in policy_patterns:
+                match = re.search(pattern, mo_ta_lower, re.IGNORECASE)
+                if match:
+                    policy_info = match.group(1).strip()
+                    if len(policy_info) > 200:
+                        policy_info = policy_info[:197] + "..."
+                    break
+        
+        # Nếu không tìm thấy thông tin cụ thể
         if not policy_info:
             return json.dumps({
                 "status": "success",
                 "policy_info": "",
-                "instructions": "Không tìm thấy thông tin phù hợp trong mô tả. Hãy trả lời: 'Dạ, phần này trong hệ thống chưa có thông tin ạ'"
+                "instructions": "TRẢ LỜI NGẮN GỌN: 'Dạ, phần này trong hệ thống chưa có thông tin ạ. Anh/chị vui lòng liên hệ shop để được hỗ trợ chi tiết ạ!'"
             }, ensure_ascii=False)
         
-        # Tạo câu trả lời mẫu dựa trên loại câu hỏi
+        # TẠO CÂU TRẢ LỜI NGẮN GỌN, TRỰC TIẾP
         response_templates = {
-            "shipping": "Dạ, em xin thông tin về chính sách vận chuyển ạ:\n{policy_info}\n\nAnh/chị cần em tư vấn thêm gì không ạ?",
-            "care": "Dạ, em xin hướng dẫn bảo quản ạ:\n{policy_info}\n\nAnh/chị cần em tư vấn thêm gì không ạ?",
-            "usage": "Dạ, em xin hướng dẫn sử dụng ạ:\n{policy_info}\n\nAnh/chị cần em tư vấn thêm gì không ạ?",
-            "policy": "Dạ, em xin thông tin về chính sách ạ:\n{policy_info}\n\nAnh/chị cần em tư vấn thêm gì không ạ?"
+            "shipping": "Dạ, thông tin vận chuyển ạ:\n{policy_info}\n\nAnh/chị cần em tư vấn thêm gì không ạ?",
+            "care": "Dạ, hướng dẫn bảo quản ạ:\n{policy_info}\n\nAnh/chị cần em tư vấn thêm gì không ạ?",
+            "usage": "Dạ, hướng dẫn sử dụng ạ:\n{policy_info}\n\nAnh/chị cần em tư vấn thêm gì không ạ?",
+            "policy": "Dạ, thông tin chính sách ạ:\n{policy_info}\n\nAnh/chị cần em tư vấn thêm gì không ạ?"
         }
         
         template = response_templates.get(question_type, "Dạ, thông tin ạ:\n{policy_info}")
         formatted_response = template.format(policy_info=policy_info)
         
+        # GIỚI HẠN ĐỘ DÀI CUỐI CÙNG
+        if len(formatted_response) > 500:
+            formatted_response = formatted_response[:497] + "..."
+        
         return json.dumps({
             "status": "success",
             "policy_info": policy_info,
             "formatted_response": formatted_response,
-            "instructions": "HÃY TRẢ LỜI THEO ĐÚNG ĐỊNH DẠNG ĐÃ ĐƯỢC CUNG CẤP. KHÔNG TỰ THÊM BỚT THÔNG TIN."
+            "instructions": "HÃY GỬI NGUYÊN VĂN CÂU TRẢ LỜI SAU, KHÔNG THÊM BỚT:\n" + formatted_response
         }, ensure_ascii=False)
     
     return "Tool không xác định."
@@ -1094,10 +1200,10 @@ def handle_text_with_function_calling(uid: str, text: str):
 **SẢN PHẨM ĐANG ĐƯỢC HỎI: {current_ms}**
 
 **QUY TẮC TRẢ LỜI VỀ CHÍNH SÁCH:**
-1. Khi khách hỏi về: "Miễn ship chứ?", "Ship bao nhiêu tiền?", "Thời gian giao hàng là bao lâu?" → LUÔN dùng tool 'get_shop_policies' với question_type='shipping'
-2. Khi khách hỏi về: "Bảo quản thế nào?", "Giặt như thế nào?" → LUÔN dùng tool 'get_shop_policies' với question_type='care'
-3. Khi khách hỏi về: "Hướng dẫn sử dụng?", "Cách dùng?" → LUÔN dùng tool 'get_shop_policies' với question_type='usage'
-4. Khi khách hỏi về: "Có giảm giá không?", "Chính sách đổi trả?" → LUÔN dùng tool 'get_shop_policies' với question_type='policy'
+1. Khi khách hỏi về chính sách → LUÔN dùng tool 'get_shop_policies'
+2. CHỈ trả lời thông tin được cung cấp bởi tool, KHÔNG thêm bất kỳ thông tin nào khác
+3. Câu trả lời phải NGẮN GỌN (tối đa 3 dòng)
+4. Nếu tool trả về "chưa có thông tin" → trả lời: "Dạ, phần này trong hệ thống chưa có thông tin ạ" và đề nghị liên hệ shop
 
 **QUY TẮC TRẢ LỜI VỀ GIÁ:**
 1. Khi khách hỏi về giá → LUÔN dùng tool 'get_product_price_details'
