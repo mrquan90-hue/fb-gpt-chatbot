@@ -974,15 +974,15 @@ def handle_text_with_function_calling(uid: str, text: str):
 
 **VÍ DỤ XỬ LÝ CHÍNH SÁCH:**
 - Khách hỏi: "Có miễn ship không?"
-  → Gọi get_product_basic_info
-  → Đọc mô tả, tìm thông tin về "ship", "vận chuyển", "miễn phí"
-  → Nếu có: "Dạ, theo thông tin sản phẩm thì {trích dẫn thông tin} ạ!"
-  → Nếu không: "Dạ, phần này trong hệ thống chưa có thông tin ạ..."
+  - Gọi get_product_basic_info
+  - Đọc mô tả, tìm thông tin về "ship", "vận chuyển", "miễn phí"
+  - Nếu có: "Dạ, theo thông tin sản phẩm thì {trích dẫn thông tin} ạ!"
+  - Nếu không: "Dạ, phần này trong hệ thống chưa có thông tin ạ..."
 
 - Khách hỏi: "Bảo quản thế nào?"
-  → Gọi get_product_basic_info
-  → Tìm hướng dẫn bảo quản trong mô tả
-  → Trả lời tự nhiên: "Dạ, sản phẩm này nên {thông tin từ mô tả} ạ!"
+  - Gọi get_product_basic_info
+  - Tìm hướng dẫn bảo quản trong mô tả
+  - Trả lời tự nhiên: "Dạ, sản phẩm này nên {thông tin từ mô tả} ạ!"
 """
     
     try:
