@@ -926,7 +926,7 @@ def handle_text_with_function_calling(uid: str, text: str):
 2. Phân tích kết quả từ tool và trả lời theo định dạng:
    - Giá theo màu: Liệt kê từng màu và giá
    - Giá theo size: Liệt kê từng size và giá
-   - Giá phức tạp: Nhóm theo mức giá, liệt kê các màu/size trong mỗi nhóm
+   - Giá phức tạp: Nhóm theo từng mức giá, liệt kê các màu/size trong mỗi nhóm
    - Giá duy nhất: Trả lời một giá duy nhất
 3. LUÔN hỏi khách cần tư vấn thêm gì không sau khi trả lời về giá.
 
@@ -1035,8 +1035,8 @@ def send_single_product_carousel(uid: str, ms: str):
         "buttons": [
             {
                 "type": "postback",
-                "title": "❓ Hỏi GPT",
-                "payload": f"ASK_GPT_{ms}"
+                "title": "🌟 Ưu điểm SP",
+                "payload": f"PRODUCT_HIGHLIGHTS_{ms}"
             },
             {
                 "type": "postback", 
@@ -1152,25 +1152,89 @@ def handle_postback_with_recovery(uid: str, payload: str, postback_id: str = Non
     load_products()
     
     # Xử lý các loại postback
-    if payload.startswith("ASK_GPT_"):
-        ms = payload.replace("ASK_GPT_", "")
+    if payload.startswith("PRODUCT_HIGHLIGHTS_"):
+        ms = payload.replace("PRODUCT_HIGHLIGHTS_", "")
         if ms in PRODUCTS:
             ctx["last_ms"] = ms
             update_product_context(uid, ms)
             
-            # Gửi câu hỏi mẫu để khách chọn
-            quick_replies = [
-                {"content_type": "text", "title": "💰 Giá bao nhiêu?", "payload": "PRICE_QUERY"},
-                {"content_type": "text", "title": "🎨 Màu gì có?", "payload": "COLOR_QUERY"},
-                {"content_type": "text", "title": "📏 Size nào?", "payload": "SIZE_QUERY"},
-                {"content_type": "text", "title": "🧵 Chất liệu gì?", "payload": "MATERIAL_QUERY"},
-                {"content_type": "text", "title": "📦 Còn hàng không?", "payload": "STOCK_QUERY"}
-            ]
+            # Lấy thông tin sản phẩm
+            product = PRODUCTS[ms]
+            mo_ta = product.get("MoTa", "")
+            ten_sp = product.get("Ten", "")
             
-            send_quick_replies(uid, 
-                f"✅ Đã chọn sản phẩm [{ms}]\n\nEm có thể giúp gì cho anh/chị ạ?",
-                quick_replies
-            )
+            if not mo_ta:
+                send_message(uid, f"Dạ sản phẩm [{ms}] {ten_sp} chưa có mô tả chi tiết ạ. Anh/chị có thể hỏi về giá, màu sắc, size hoặc đặt hàng ạ!")
+                return True
+            
+            if not client:
+                send_message(uid, "Dạ chức năng này tạm thời chưa khả dụng ạ. Anh/chị vui lòng thử lại sau!")
+                return True
+            
+            # Gọi GPT để tóm tắt 5 ưu điểm
+            try:
+                system_prompt = """Bạn là một trợ lý bán hàng chuyên nghiệp. 
+Hãy đọc kỹ mô tả sản phẩm và liệt kê 5 ưu điểm nổi bật nhất của sản phẩm đó. 
+Mỗi ưu điểm phải:
+1. Ngắn gọn, rõ ràng (1-2 dòng)
+2. Bắt đầu bằng dấu gạch đầu dòng (-)
+3. Tập trung vào lợi ích cho khách hàng
+4. Chỉ trả lời bằng tiếng Việt
+5. Không thêm bất kỳ lời giải thích nào khác
+
+Định dạng đầu ra:
+- [Ưu điểm 1]
+- [Ưu điểm 2]
+- [Ưu điểm 3]
+- [Ưu điểm 4]
+- [Ưu điểm 5]"""
+                
+                # Giới hạn độ dài của mô tả
+                max_length = 3000
+                if len(mo_ta) > max_length:
+                    mo_ta = mo_ta[:max_length] + "..."
+                
+                user_prompt = f"""Sản phẩm: {ten_sp}
+Mã sản phẩm: {ms}
+
+Mô tả sản phẩm:
+{mo_ta}
+
+Hãy liệt kê 5 ưu điểm nổi bật nhất của sản phẩm này theo định dạng yêu cầu."""
+
+                response = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    temperature=0.3,
+                    max_tokens=500
+                )
+                
+                highlights = response.choices[0].message.content
+                
+                # Đảm bảo định dạng đúng
+                if not highlights.startswith("-"):
+                    # Thêm dấu gạch đầu dòng nếu GPT quên
+                    lines = highlights.strip().split('\n')
+                    formatted_lines = []
+                    for line in lines:
+                        line = line.strip()
+                        if line and not line.startswith('-'):
+                            formatted_lines.append(f"- {line}")
+                        else:
+                            formatted_lines.append(line)
+                    highlights = '\n'.join(formatted_lines)
+                
+                # Gửi cho khách hàng với tiêu đề
+                message = f"🌟 **5 ƯU ĐIỂM NỔI BẬT CỦA SẢN PHẨM [{ms}]** 🌟\n\n{highlights}\n\n---\nAnh/chị cần em tư vấn thêm gì không ạ?"
+                send_message(uid, message)
+                
+            except Exception as e:
+                print(f"Lỗi khi gọi GPT cho ưu điểm sản phẩm: {e}")
+                send_message(uid, "Dạ em chưa thể tóm tắt ưu điểm sản phẩm ngay lúc này. Anh/chị có thể xem mô tả chi tiết hoặc hỏi về thông tin khác ạ!")
+            
             return True
             
     elif payload.startswith("VIEW_IMAGES_"):
