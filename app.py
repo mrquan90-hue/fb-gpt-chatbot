@@ -17,22 +17,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 import requests
 from flask import Flask, request, send_from_directory, jsonify, render_template_string
-
-# ============================================
-# OPENAI CLIENT - TƯƠNG THÍCH V1.x
-# ============================================
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
-try:
-    # Thử import OpenAI SDK v1.x
-    from openai import OpenAI
-    client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
-    print("✅ Đã khởi tạo OpenAI client (SDK v1.x)")
-except ImportError as e:
-    print(f"⚠️ Lỗi import OpenAI: {e}")
-    client = None
-except Exception as e:
-    print(f"⚠️ Lỗi khởi tạo OpenAI client: {e}")
-    client = None
+from openai import OpenAI
 
 # ============================================
 # FLASK APP
