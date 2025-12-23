@@ -1519,7 +1519,7 @@ def save_order_to_local_csv(order_data: dict):
         file_path = "orders_backup.csv"
         file_exists = os.path.exists(file_path)
         
-        timestamp = datetime.now().strftime("%Y-%m%d %H:%M:%S")
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         order_id = f"ORD{int(time.time())}_{order_data.get('uid', '')[-4:]}"
         
         row_data = {
@@ -1556,6 +1556,64 @@ def save_order_to_local_csv(order_data: dict):
         print(f"📁 Đã lưu đơn hàng vào file local backup: {order_id}")
     except Exception as e:
         print(f"❌ Lỗi khi lưu file local backup: {str(e)}")
+
+# ============================================
+# API MỚI: Lấy thông tin biến thể (ảnh, giá)
+# ============================================
+
+@app.route("/api/get-variant-info")
+def api_get_variant_info():
+    ms = (request.args.get("ms") or "").upper()
+    color = request.args.get("color", "").strip()
+    size = request.args.get("size", "").strip()
+    
+    load_products()
+    if ms not in PRODUCTS:
+        return {"error": "not_found"}, 404
+    
+    product = PRODUCTS[ms]
+    
+    # Tìm biến thể phù hợp
+    target_variant = None
+    for variant in product.get("variants", []):
+        variant_color = variant.get("mau", "").strip().lower()
+        variant_size = variant.get("size", "").strip().lower()
+        
+        input_color = color.strip().lower()
+        input_size = size.strip().lower()
+        
+        color_match = (not input_color) or (variant_color == input_color) or (input_color == "mặc định" and not variant_color)
+        size_match = (not input_size) or (variant_size == input_size) or (input_size == "mặc định" and not variant_size)
+        
+        if color_match and size_match:
+            target_variant = variant
+            break
+    
+    # Nếu không tìm thấy biến thể, dùng thông tin chung
+    if target_variant:
+        variant_image = target_variant.get("variant_image", "")
+        variant_price = target_variant.get("gia", 0)
+        variant_price_raw = target_variant.get("gia_raw", "")
+    else:
+        variant_image = ""
+        variant_price = extract_price_int(product.get("Gia", "")) or 0
+        variant_price_raw = product.get("Gia", "")
+    
+    # Nếu không có ảnh biến thể, lấy ảnh đầu tiên của sản phẩm
+    if not variant_image:
+        images_field = product.get("Images", "")
+        urls = parse_image_urls(images_field)
+        variant_image = urls[0] if urls else ""
+    
+    return {
+        "ms": ms,
+        "color": color,
+        "size": size,
+        "image": variant_image,
+        "price": variant_price,
+        "price_raw": variant_price_raw,
+        "found_variant": target_variant is not None
+    }
 
 # ============================================
 # WEBHOOK HANDLER (ĐÃ SỬA ĐỂ TRÁNH CẬP NHẬT SAI CONTEXT)
@@ -1887,7 +1945,7 @@ Anh/chị quan tâm sản phẩm nào ạ?"""
     return "OK", 200
 
 # ============================================
-# ORDER FORM PAGE
+# ORDER FORM PAGE - CẢI TIẾN MỚI
 # ============================================
 
 @app.route("/order-form", methods=["GET"])
@@ -1950,7 +2008,7 @@ def order_form():
     price_str = row.get("Gia", "0")
     price_int = extract_price_int(price_str) or 0
 
-    # Tạo HTML với form địa chỉ
+    # Tạo HTML với form địa chỉ mới
     html = f"""
     <!DOCTYPE html>
     <html>
@@ -1958,6 +2016,7 @@ def order_form():
         <meta charset="utf-8" />
         <title>Đặt hàng - {row.get('Ten','')}</title>
         <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <link href="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/css/select2.min.css" rel="stylesheet" />
         <style>
             * {{
                 margin: 0;
@@ -2094,7 +2153,31 @@ def order_form():
                 background: #fff;
             }}
             
-            .form-control:focus {{
+            .select2-container .select2-selection--single {{
+                height: 46px;
+                border: 2px solid #e1e5e9;
+                border-radius: 10px;
+            }}
+            
+            .select2-container .select2-selection--single .select2-selection__rendered {{
+                line-height: 46px;
+                padding-left: 15px;
+            }}
+            
+            .select2-container--default .select2-selection--single .select2-selection__arrow {{
+                height: 46px;
+            }}
+            
+            .select2-container--default .select2-selection--single {{
+                border: 2px solid #e1e5e9;
+            }}
+            
+            .select2-container--default.select2-container--focus .select2-selection--single {{
+                border-color: #1DB954;
+            }}
+            
+            .form-control:focus,
+            .select2-container--default.select2-container--focus .select2-selection--single {{
                 outline: none;
                 border-color: #1DB954;
                 box-shadow: 0 0 0 3px rgba(29, 185, 84, 0.1);
@@ -2182,6 +2265,13 @@ def order_form():
                 line-height: 1.5;
             }}
             
+            .variant-loading {{
+                text-align: center;
+                padding: 10px;
+                color: #666;
+                font-size: 14px;
+            }}
+            
             @media (max-width: 480px) {{
                 .container {{
                     border-radius: 15px;
@@ -2224,7 +2314,12 @@ def order_form():
                     <div class="product-info">
                         <div class="product-code">Mã: {ms}</div>
                         <h3 class="product-title">{row.get('Ten','')}</h3>
-                        <div class="product-price" id="price-display">{price_int:,.0f} đ</div>
+                        <div class="product-price">
+                            <span id="price-display">{price_int:,.0f} đ</span>
+                            <div id="variant-loading" class="variant-loading" style="display: none;">
+                                <small>Đang cập nhật thông tin biến thể...</small>
+                            </div>
+                        </div>
                     </div>
                 </div>
 
@@ -2233,7 +2328,7 @@ def order_form():
                     <!-- Color Selection -->
                     <div class="form-group">
                         <label for="color">Màu sắc:</label>
-                        <select id="color" class="form-control">
+                        <select id="color" class="form-control" onchange="updateVariantInfo()">
                             {''.join(f"<option value='{c}'>{c}</option>" for c in colors)}
                         </select>
                     </div>
@@ -2241,7 +2336,7 @@ def order_form():
                     <!-- Size Selection -->
                     <div class="form-group">
                         <label for="size">Size:</label>
-                        <select id="size" class="form-control">
+                        <select id="size" class="form-control" onchange="updateVariantInfo()">
                             {''.join(f"<option value='{s}'>{s}</option>" for s in sizes)}
                         </select>
                     </div>
@@ -2249,7 +2344,7 @@ def order_form():
                     <!-- Quantity -->
                     <div class="form-group">
                         <label for="quantity">Số lượng:</label>
-                        <input type="number" id="quantity" class="form-control" value="1" min="1">
+                        <input type="number" id="quantity" class="form-control" value="1" min="1" onchange="updatePriceDisplay()">
                     </div>
 
                     <!-- Total Price -->
@@ -2271,8 +2366,29 @@ def order_form():
 
                     <!-- Address Section -->
                     <div class="form-group">
-                        <label for="address">Địa chỉ nhận hàng:</label>
-                        <input type="text" id="address" class="form-control" placeholder="Số nhà, đường, phường/xã, quận/huyện, tỉnh/thành" required>
+                        <label for="province">Tỉnh/Thành phố:</label>
+                        <select id="province" class="form-control" style="width: 100%;" required>
+                            <option value="">Chọn tỉnh/thành phố</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="district">Quận/Huyện:</label>
+                        <select id="district" class="form-control" style="width: 100%;" required disabled>
+                            <option value="">Chọn quận/huyện</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="ward">Phường/Xã:</label>
+                        <select id="ward" class="form-control" style="width: 100%;" required disabled>
+                            <option value="">Chọn phường/xã</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="addressDetail">Địa chỉ chi tiết:</label>
+                        <input type="text" id="addressDetail" class="form-control" placeholder="Số nhà, tên đường, thôn/xóm..." required>
                     </div>
 
                     <!-- Submit Button -->
@@ -2287,12 +2403,21 @@ def order_form():
             </div>
         </div>
 
+        <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+        <script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
         <script>
             const PRODUCT_MS = "{ms}";
             const PRODUCT_UID = "{uid}";
-            const BASE_PRICE = {price_int};
+            let BASE_PRICE = {price_int};
             const DOMAIN = "{'https://' + DOMAIN if not DOMAIN.startswith('http') else DOMAIN}";
             const API_BASE_URL = "{('/api' if DOMAIN.startswith('http') else 'https://' + DOMAIN + '/api')}";
+            
+            // Biến lưu thông tin địa chỉ
+            let addressData = {{
+                provinces: [],
+                districts: [],
+                wards: []
+            }};
             
             function formatPrice(n) {{
                 return n.toLocaleString('vi-VN') + ' đ';
@@ -2303,7 +2428,147 @@ def order_form():
                 document.getElementById('total-display').innerText = formatPrice(BASE_PRICE * quantity);
             }}
             
+            // Hàm cập nhật thông tin biến thể (ảnh và giá)
+            async function updateVariantInfo() {{
+                const color = document.getElementById('color').value;
+                const size = document.getElementById('size').value;
+                
+                // Hiển thị loading
+                document.getElementById('variant-loading').style.display = 'block';
+                
+                try {{
+                    const response = await fetch(`${{API_BASE_URL}}/get-variant-info?ms=${{PRODUCT_MS}}&color=${{encodeURIComponent(color)}}&size=${{encodeURIComponent(size)}}`);
+                    if (response.ok) {{
+                        const data = await response.json();
+                        
+                        // Cập nhật ảnh sản phẩm
+                        const productImage = document.getElementById('product-image');
+                        if (data.image) {{
+                            productImage.src = data.image;
+                            productImage.style.display = 'block';
+                        }}
+                        
+                        // Cập nhật giá
+                        BASE_PRICE = data.price || {price_int};
+                        document.getElementById('price-display').innerText = formatPrice(BASE_PRICE);
+                        updatePriceDisplay();
+                    }}
+                }} catch (error) {{
+                    console.error('Lỗi khi cập nhật thông tin biến thể:', error);
+                }} finally {{
+                    document.getElementById('variant-loading').style.display = 'none';
+                }}
+            }}
+            
+            // Hàm load danh sách tỉnh/thành
+            async function loadProvinces() {{
+                try {{
+                    const response = await fetch('https://provinces.open-api.vn/api/p/');
+                    addressData.provinces = await response.json();
+                    
+                    const provinceSelect = $('#province');
+                    provinceSelect.empty();
+                    provinceSelect.append('<option value="">Chọn tỉnh/thành phố</option>');
+                    
+                    addressData.provinces.forEach(province => {{
+                        provinceSelect.append(`<option value="${{province.code}}">${{province.name}}</option>`);
+                    }});
+                    
+                    // Khởi tạo Select2
+                    $('#province, #district, #ward').select2({{
+                        width: '100%',
+                        placeholder: 'Chọn...',
+                        allowClear: false
+                    }});
+                    
+                    // Xử lý sự kiện khi chọn tỉnh
+                    provinceSelect.on('change', function() {{
+                        const provinceCode = $(this).val();
+                        if (provinceCode) {{
+                            loadDistricts(provinceCode);
+                        }} else {{
+                            $('#district').val('').trigger('change').prop('disabled', true);
+                            $('#ward').val('').trigger('change').prop('disabled', true);
+                        }}
+                    }});
+                    
+                }} catch (error) {{
+                    console.error('Lỗi khi load tỉnh/thành:', error);
+                    // Fallback: hiển thị input text nếu API lỗi
+                    $('#province').replaceWith('<input type="text" id="province" class="form-control" placeholder="Nhập tỉnh/thành phố" required>');
+                    $('#district').replaceWith('<input type="text" id="district" class="form-control" placeholder="Nhập quận/huyện" required>');
+                    $('#ward').replaceWith('<input type="text" id="ward" class="form-control" placeholder="Nhập phường/xã" required>');
+                }}
+            }}
+            
+            // Hàm load danh sách quận/huyện
+            async function loadDistricts(provinceCode) {{
+                try {{
+                    const response = await fetch(`https://provinces.open-api.vn/api/p/${{provinceCode}}?depth=2`);
+                    const provinceData = await response.json();
+                    
+                    addressData.districts = provinceData.districts || [];
+                    
+                    const districtSelect = $('#district');
+                    districtSelect.empty();
+                    districtSelect.append('<option value="">Chọn quận/huyện</option>');
+                    
+                    addressData.districts.forEach(district => {{
+                        districtSelect.append(`<option value="${{district.code}}">${{district.name}}</option>`);
+                    }});
+                    
+                    districtSelect.prop('disabled', false).trigger('change');
+                    
+                    // Reset ward
+                    $('#ward').empty().append('<option value="">Chọn phường/xã</option>').prop('disabled', true).trigger('change');
+                    
+                    // Xử lý sự kiện khi chọn huyện
+                    districtSelect.on('change', function() {{
+                        const districtCode = $(this).val();
+                        if (districtCode) {{
+                            loadWards(districtCode);
+                        }} else {{
+                            $('#ward').val('').trigger('change').prop('disabled', true);
+                        }}
+                    }});
+                    
+                }} catch (error) {{
+                    console.error('Lỗi khi load quận/huyện:', error);
+                }}
+            }}
+            
+            // Hàm load danh sách phường/xã
+            async function loadWards(districtCode) {{
+                try {{
+                    const response = await fetch(`https://provinces.open-api.vn/api/d/${{districtCode}}?depth=2`);
+                    const districtData = await response.json();
+                    
+                    addressData.wards = districtData.wards || [];
+                    
+                    const wardSelect = $('#ward');
+                    wardSelect.empty();
+                    wardSelect.append('<option value="">Chọn phường/xã</option>');
+                    
+                    addressData.wards.forEach(ward => {{
+                        wardSelect.append(`<option value="${{ward.code}}">${{ward.name}}</option>`);
+                    }});
+                    
+                    wardSelect.prop('disabled', false).trigger('change');
+                    
+                }} catch (error) {{
+                    console.error('Lỗi khi load phường/xã:', error);
+                }}
+            }}
+            
+            // Hàm lấy tên địa chỉ từ mã
+            function getAddressName(code, type) {{
+                const data = addressData[type];
+                const item = data.find(item => item.code == code);
+                return item ? item.name : '';
+            }}
+            
             async function submitOrder() {{
+                // Lấy thông tin từ form
                 const formData = {{
                     ms: PRODUCT_MS,
                     uid: PRODUCT_UID,
@@ -2312,29 +2577,66 @@ def order_form():
                     quantity: parseInt(document.getElementById('quantity').value || '1'),
                     customerName: document.getElementById('customerName').value.trim(),
                     phone: document.getElementById('phone').value.trim(),
-                    address: document.getElementById('address').value.trim()
+                    // Địa chỉ mới
+                    province: $('#province').val(),
+                    district: $('#district').val(),
+                    ward: $('#ward').val(),
+                    addressDetail: document.getElementById('addressDetail').value.trim()
                 }};
                 
+                // Validation
                 if (!formData.customerName) {{
                     alert('Vui lòng nhập họ và tên');
+                    document.getElementById('customerName').focus();
                     return;
                 }}
                 
                 if (!formData.phone) {{
                     alert('Vui lòng nhập số điện thoại');
+                    document.getElementById('phone').focus();
                     return;
                 }}
                 
                 const phoneRegex = /^(0|\+84)(\d{9,10})$/;
                 if (!phoneRegex.test(formData.phone)) {{
-                    alert('Số điện thoại không hợp lệ. Vui lòng nhập số điện thoại 10-11 chữ số');
+                    alert('Số điện thoại không hợp lệ. Vui lòng nhập số điện thoại 10-11 chữ số (ví dụ: 0912345678 hoặc +84912345678)');
+                    document.getElementById('phone').focus();
                     return;
                 }}
                 
-                if (!formData.address) {{
-                    alert('Vui lòng nhập địa chỉ nhận hàng');
+                if (!formData.province) {{
+                    alert('Vui lòng chọn tỉnh/thành phố');
+                    $('#province').select2('open');
                     return;
                 }}
+                
+                if (!formData.district) {{
+                    alert('Vui lòng chọn quận/huyện');
+                    $('#district').select2('open');
+                    return;
+                }}
+                
+                if (!formData.ward) {{
+                    alert('Vui lòng chọn phường/xã');
+                    $('#ward').select2('open');
+                    return;
+                }}
+                
+                if (!formData.addressDetail) {{
+                    alert('Vui lòng nhập địa chỉ chi tiết');
+                    document.getElementById('addressDetail').focus();
+                    return;
+                }}
+                
+                // Ghép địa chỉ đầy đủ
+                const provinceName = getAddressName(formData.province, 'provinces') || '';
+                const districtName = getAddressName(formData.district, 'districts') || '';
+                const wardName = getAddressName(formData.ward, 'wards') || '';
+                
+                formData.fullAddress = `${{formData.addressDetail}}, ${{wardName}}, ${{districtName}}, ${{provinceName}}`;
+                formData.provinceName = provinceName;
+                formData.districtName = districtName;
+                formData.wardName = wardName;
                 
                 const submitBtn = document.getElementById('submitBtn');
                 const originalText = submitBtn.innerHTML;
@@ -2353,9 +2655,11 @@ def order_form():
                     if (response.ok) {{
                         alert('🎉 Đã gửi đơn hàng thành công!\\n\\nShop sẽ liên hệ xác nhận trong 5-10 phút.\\nCảm ơn anh/chị đã đặt hàng! ❤️');
                         
-                        document.getElementById('customerName').value = '';
-                        document.getElementById('phone').value = '';
-                        document.getElementById('address').value = '';
+                        // Reset form
+                        document.getElementById('orderForm').reset();
+                        $('#province, #district, #ward').val('').trigger('change');
+                        $('#district').prop('disabled', true);
+                        $('#ward').prop('disabled', true);
                         
                     }} else {{
                         alert(`❌ ${{data.message || 'Có lỗi xảy ra. Vui lòng thử lại sau'}}`);
@@ -2368,10 +2672,18 @@ def order_form():
                 }}
             }}
             
+            // Khởi tạo khi trang được tải
             document.addEventListener('DOMContentLoaded', function() {{
-                document.getElementById('quantity').addEventListener('input', updatePriceDisplay);
-                updatePriceDisplay();
+                // Load danh sách tỉnh/thành
+                loadProvinces();
                 
+                // Cập nhật giá khi thay đổi số lượng
+                document.getElementById('quantity').addEventListener('input', updatePriceDisplay);
+                
+                // Gọi cập nhật biến thể lần đầu
+                updateVariantInfo();
+                
+                // Focus vào trường tên
                 setTimeout(() => {{
                     document.getElementById('customerName').focus();
                 }}, 500);
@@ -2456,7 +2768,17 @@ def api_submit_order():
     quantity = int(data.get("quantity") or 1)
     customer_name = data.get("customerName") or ""
     phone = data.get("phone") or ""
-    address = data.get("address") or ""
+    
+    # Địa chỉ mới
+    address_detail = data.get("addressDetail") or ""
+    province_name = data.get("provinceName") or ""
+    district_name = data.get("districtName") or ""
+    ward_name = data.get("wardName") or ""
+    full_address = data.get("fullAddress") or ""
+    
+    # Nếu không có full_address, ghép từ các thành phần
+    if not full_address and address_detail:
+        full_address = f"{address_detail}, {ward_name}, {district_name}, {province_name}"
     
     load_products()
     row = PRODUCTS.get(ms)
@@ -2481,7 +2803,7 @@ def api_submit_order():
             f"💰 Thành tiền: {total:,.0f} đ\n"
             f"👤 Người nhận: {customer_name}\n"
             f"📱 SĐT: {phone}\n"
-            f"🏠 Địa chỉ: {address}\n"
+            f"🏠 Địa chỉ: {full_address}\n"
             "────────────────────\n"
             "⏰ Shop sẽ gọi điện xác nhận trong 5-10 phút.\n"
             "🚚 Đơn hàng sẽ được giao bởi ViettelPost\n"
@@ -2499,11 +2821,15 @@ def api_submit_order():
         "quantity": quantity,
         "customer_name": customer_name,
         "phone": phone,
-        "address": address,
+        "address": full_address,
+        "address_detail": address_detail,
+        "province": province_name,
+        "district": district_name,
+        "ward": ward_name,
         "product_name": product_name,
         "unit_price": price_int,
         "total_price": total,
-        "referral_source": ctx.get("referral_source", "direct")
+        "referral_source": ctx.get("referral_source", "direct") if uid else "direct"
     }
     
     write_success = write_order_to_google_sheet_api(order_data)
@@ -2535,7 +2861,7 @@ def api_submit_order():
             "product_name": product_name,
             "customer_name": customer_name,
             "phone": phone,
-            "address": address,
+            "address": full_address,
             "total": total,
             "timestamp": datetime.now().isoformat()
         }
@@ -2628,6 +2954,14 @@ if __name__ == "__main__":
     print(f"🔴 Hàm is_bot_generated_echo: Mở rộng pattern nhận diện")
     print(f"🔴 Echo processing: Kiểm tra từ khóa bot, độ dài tin nhắn")
     print(f"🔴 System prompt: Thêm quy tắc không nhắc mã sản phẩm khác")
+    print("=" * 80)
+    
+    print("🔴 FORM ĐẶT HÀNG CẢI TIẾN:")
+    print("=" * 80)
+    print(f"🔴 Cập nhật ảnh và giá theo biến thể: /api/get-variant-info")
+    print(f"🔴 Địa chỉ theo API: Tỉnh/Huyện/Xã + địa chỉ chi tiết")
+    print(f"🔴 Sử dụng Select2 cho UI tốt hơn")
+    print(f"🔴 Fallback khi API địa chỉ lỗi")
     print("=" * 80)
     
     load_products()
