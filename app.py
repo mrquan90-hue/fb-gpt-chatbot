@@ -2630,12 +2630,32 @@ def order_form():
                     return;
                 }}
                 
-                const phoneRegex = /^(0|\+84)(\d{9,10})$/;
-                if (!phoneRegex.test(formData.phone)) {{
-                    alert('Số điện thoại không hợp lệ. Vui lòng nhập số điện thoại 10-11 chữ số (ví dụ: 0912345678 hoặc +84912345678)');
+                // Chuẩn hóa và validate số điện thoại
+                let normalizedPhone = formData.phone.replace(/\\s/g, '');
+                normalizedPhone = normalizedPhone.replace(/[^\\d+]/g, '');
+                
+                // Thêm số 0 nếu bắt đầu bằng 84 mà không có dấu +
+                if (normalizedPhone.startsWith('84') && normalizedPhone.length === 11) {{
+                    normalizedPhone = '0' + normalizedPhone.substring(2);
+                }}
+                
+                // Thêm số 0 nếu bắt đầu bằng +84
+                if (normalizedPhone.startsWith('+84') && normalizedPhone.length === 12) {{
+                    normalizedPhone = '0' + normalizedPhone.substring(3);
+                }}
+                
+                // Kiểm tra regex - chấp nhận:
+                // 1. 10 số bắt đầu bằng 0: 0982155980
+                // 2. 11 số bắt đầu bằng 84: 84982155980
+                // 3. 12 số bắt đầu bằng +84: +84982155980
+                const phoneRegex = /^(0\\d{{9}}|84\\d{{9}}|\\+84\\d{{9}})$/;
+                if (!phoneRegex.test(normalizedPhone)) {{
+                    alert('Số điện thoại không hợp lệ. Vui lòng nhập số điện thoại 10 chữ số (ví dụ: 0982155980) hoặc số quốc tế (+84982155980)');
                     document.getElementById('phone').focus();
                     return;
                 }}
+                
+                formData.phone = normalizedPhone;
                 
                 if (!formData.province) {{
                     alert('Vui lòng chọn tỉnh/thành phố');
@@ -2686,19 +2706,37 @@ def order_form():
                     const data = await response.json();
                     
                     if (response.ok) {{
-                        alert('🎉 Đã gửi đơn hàng thành công!\\n\\nShop sẽ liên hệ xác nhận trong 5-10 phút.\\nCảm ơn anh/chị đã đặt hàng! ❤️');
+                        // Hiển thị thông báo thành công với chi tiết
+                        const successMessage = `🎉 ĐÃ ĐẶT HÀNG THÀNH CÔNG!
+
+📦 Mã sản phẩm: ${{PRODUCT_MS}}
+👤 Khách hàng: ${{formData.customerName}}
+📱 SĐT: ${{formData.phone}}
+📍 Địa chỉ: ${{formData.fullAddress}}
+💰 Tổng tiền: ${{(BASE_PRICE * formData.quantity).toLocaleString('vi-VN')}} đ
+
+⏰ Shop sẽ liên hệ xác nhận trong 5-10 phút.
+🚚 Giao hàng bởi ViettelPost (COD)
+
+Cảm ơn quý khách đã đặt hàng! ❤️`;
                         
-                        // Reset form
-                        document.getElementById('orderForm').reset();
-                        $('#province, #district, #ward').val('').trigger('change');
-                        $('#district').prop('disabled', true);
-                        $('#ward').prop('disabled', true);
+                        alert(successMessage);
+                        
+                        // Reset form sau 2 giây
+                        setTimeout(() => {{
+                            document.getElementById('orderForm').reset();
+                            $('#province, #district, #ward').val('').trigger('change');
+                            $('#district').prop('disabled', true);
+                            $('#ward').prop('disabled', true);
+                            updatePriceDisplay();
+                        }}, 2000);
                         
                     }} else {{
                         alert(`❌ ${{data.message || 'Có lỗi xảy ra. Vui lòng thử lại sau'}}`);
                     }}
                 }} catch (error) {{
-                    alert('❌ Lỗi kết nối. Vui lòng thử lại sau!');
+                    console.error('Lỗi khi đặt hàng:', error);
+                    alert('❌ Lỗi kết nối. Vui lòng kiểm tra mạng và thử lại!');
                 }} finally {{
                     submitBtn.innerHTML = originalText;
                     submitBtn.disabled = false;
@@ -2813,6 +2851,10 @@ def api_submit_order():
     if not full_address and address_detail:
         full_address = f"{address_detail}, {ward_name}, {district_name}, {province_name}"
     
+    # Kiểm tra dữ liệu bắt buộc
+    if not all([ms, customer_name, phone, full_address]):
+        return {"error": "missing_data", "message": "Vui lòng điền đầy đủ thông tin bắt buộc"}, 400
+    
     load_products()
     row = PRODUCTS.get(ms)
     if not row:
@@ -2824,27 +2866,34 @@ def api_submit_order():
     
     product_name = row.get('Ten', '')
 
-    if uid:
-        ctx = USER_CONTEXT.get(uid, {})
-        referral_source = ctx.get("referral_source", "direct")
-        
-        msg = (
-            "🎉 Shop đã nhận được đơn hàng mới:\n"
-            f"🛍 Sản phẩm: [{ms}] {product_name}\n"
-            f"🎨 Phân loại: {color} / {size}\n"
-            f"📦 Số lượng: {quantity}\n"
-            f"💰 Thành tiền: {total:,.0f} đ\n"
-            f"👤 Người nhận: {customer_name}\n"
-            f"📱 SĐT: {phone}\n"
-            f"🏠 Địa chỉ: {full_address}\n"
-            "────────────────────\n"
-            "⏰ Shop sẽ gọi điện xác nhận trong 5-10 phút.\n"
-            "🚚 Đơn hàng sẽ được giao bởi ViettelPost\n"
-            "💳 Thanh toán khi nhận hàng (COD)\n"
-            "────────────────────\n"
-            "Cảm ơn anh/chị đã đặt hàng! ❤️"
-        )
-        send_message(uid, msg)
+    # Gửi tin nhắn xác nhận cho khách hàng nếu có uid hợp lệ
+    if uid and len(uid) > 5:  # UID Facebook thường dài
+        try:
+            ctx = USER_CONTEXT.get(uid, {})
+            referral_source = ctx.get("referral_source", "direct")
+            
+            msg = (
+                "🎉 Shop đã nhận được đơn hàng mới:\n"
+                f"🛍 Sản phẩm: [{ms}] {product_name}\n"
+                f"🎨 Phân loại: {color} / {size}\n"
+                f"📦 Số lượng: {quantity}\n"
+                f"💰 Thành tiền: {total:,.0f} đ\n"
+                f"👤 Người nhận: {customer_name}\n"
+                f"📱 SĐT: {phone}\n"
+                f"🏠 Địa chỉ: {full_address}\n"
+                "────────────────────\n"
+                "⏰ Shop sẽ gọi điện xác nhận trong 5-10 phút.\n"
+                "🚚 Đơn hàng sẽ được giao bởi ViettelPost\n"
+                "💳 Thanh toán khi nhận hàng (COD)\n"
+                "────────────────────\n"
+                "Cảm ơn anh/chị đã đặt hàng! ❤️"
+            )
+            send_message(uid, msg)
+            print(f"✅ Đã gửi tin nhắn xác nhận cho user {uid}")
+            
+        except Exception as e:
+            print(f"⚠️ Không thể gửi tin nhắn cho user {uid}: {str(e)}")
+            # Vẫn tiếp tục xử lý đơn hàng ngay cả khi không gửi được tin nhắn
     
     order_data = {
         "ms": ms,
@@ -2865,11 +2914,20 @@ def api_submit_order():
         "referral_source": ctx.get("referral_source", "direct") if uid else "direct"
     }
     
-    write_success = write_order_to_google_sheet_api(order_data)
+    # Ghi vào Google Sheets
+    write_success = False
+    if GOOGLE_SHEET_ID and GOOGLE_SHEETS_CREDENTIALS_JSON:
+        write_success = write_order_to_google_sheet_api(order_data)
+        if write_success:
+            print(f"✅ Đã ghi đơn hàng vào Google Sheets: {ms} - {customer_name}")
+        else:
+            print(f"⚠️ Không thể ghi vào Google Sheets, sẽ lưu backup")
     
-    if not write_success:
-        save_order_to_local_csv(order_data)
+    # Luôn lưu backup local
+    save_order_to_local_csv(order_data)
+    print(f"📁 Đã lưu backup đơn hàng local: {ms} - {customer_name}")
     
+    # Gửi thông báo đến Fchat nếu được cấu hình
     if FCHAT_WEBHOOK_URL and FCHAT_TOKEN:
         try:
             fchat_payload = {
@@ -2881,6 +2939,7 @@ def api_submit_order():
                 }
             }
             requests.post(FCHAT_WEBHOOK_URL, json=fchat_payload, timeout=5)
+            print(f"📨 Đã gửi thông báo đến Fchat")
         except Exception as e:
             print(f"⚠️ Không thể gửi notification đến Fchat: {str(e)}")
 
@@ -2996,6 +3055,8 @@ if __name__ == "__main__":
     print(f"🔴 Địa chỉ theo API: Tỉnh/Huyện/Xã + địa chỉ chi tiết")
     print(f"🔴 Sử dụng Select2 cho UI tốt hơn")
     print(f"🔴 Fallback khi API địa chỉ lỗi")
+    print(f"🔴 FIX: Sửa lỗi validate số điện thoại - chấp nhận 0982155980, +84982155980")
+    print(f"🔴 FIX: Thêm xử lý chuẩn hóa số điện thoại tự động")
     print("=" * 80)
     
     load_products()
