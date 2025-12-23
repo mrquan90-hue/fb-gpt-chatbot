@@ -2514,19 +2514,24 @@ def health_check():
     }, 200
 
 # ============================================
+# PORT CONFIGURATION FOR KOYEB/RENDER
+# ============================================
+def get_port():
+    """Get port from environment variable with fallback"""
+    return int(os.environ.get("PORT", 5000))
+
+# ============================================
 # MAIN
 # ============================================
 
 if __name__ == "__main__":
     import os
-    import multiprocessing
     
     print("=" * 80)
     print("🟢 KHỞI ĐỘNG FACEBOOK CHATBOT - GPT FUNCTION CALLING MODE")
     print("=" * 80)
     print(f"🟢 Process ID: {os.getpid()}")
-    print(f"🟢 Worker Mode: SINGLE (optimized for Koyeb)")
-    print(f"🟢 GPT Function Calling: HOÀN CHỈNH")
+    print(f"🟢 Port: {get_port()}")
     print("=" * 80)
     
     print(f"🟢 GPT-4o-mini: {'SẴN SÀNG' if client else 'CHƯA CẤU HÌNH'}")
@@ -2550,4 +2555,7 @@ if __name__ == "__main__":
     
     load_products()
     
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    # Lấy port từ biến môi trường
+    port = get_port()
+    print(f"🟢 Đang khởi động server trên port: {port}")
+    app.run(host="0.0.0.0", port=port, debug=False)
