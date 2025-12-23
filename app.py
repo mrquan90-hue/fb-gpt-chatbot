@@ -1596,8 +1596,9 @@ def webhook():
                         ctx["referral_source"] = "fchat_echo"
                         update_product_context(recipient_id, detected_ms)
                         
-                        ctx["real_message_count"] = 0
-                        print(f"[ECHO RESET COUNTER] Reset real_message_count cho user {recipient_id} từ Fchat echo")
+                        # CHỈ CẬP NHẬT CONTEXT, KHÔNG RESET COUNTER
+                        # ctx["real_message_count"] = 0  # <-- DÒNG NÀY ĐÃ BỊ XÓA
+                        print(f"[ECHO CONTEXT] Đã cập nhật context cho user {recipient_id} với MS: {detected_ms}")
                         
                         print(f"[CONTEXT UPDATED] Đã ghi nhận mã {detected_ms} vào ngữ cảnh")
                         
@@ -1619,8 +1620,15 @@ def webhook():
                 referral_payload = ref.get("ref", "")
                 ctx["referral_payload"] = referral_payload
                 
-                ctx["real_message_count"] = 0
-                print(f"[REFERRAL RESET COUNTER] Reset real_message_count cho user {sender_id}")
+                # Logic reset counter thông minh: chỉ reset nếu user không hoạt động trong 5 phút
+                now = time.time()
+                last_msg_time = ctx.get("last_msg_time", 0)
+                
+                if now - last_msg_time > 300:  # 5 phút không có tin nhắn
+                    ctx["real_message_count"] = 0
+                    print(f"[REFERRAL RESET COUNTER] Reset real_message_count cho user {sender_id} (inactive > 5m)")
+                else:
+                    print(f"[REFERRAL NO RESET] Giữ nguyên counter cho user {sender_id}, last_msg cách đây {int(now - last_msg_time)}s")
                 
                 print(f"[REFERRAL] User {sender_id} từ {ctx['referral_source']} với payload: {referral_payload}")
                 
