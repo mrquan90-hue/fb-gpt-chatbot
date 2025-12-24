@@ -2595,7 +2595,7 @@ def api_get_variant_info():
     }
 
 # ============================================
-# WEBHOOK HANDLER (ĐÃ SỬA ĐỂ NHẬN DIỆN FCHAT)
+# WEBHOOK HANDLER (ĐÃ SỬA ĐỂ NHẬN DIỆN FCHAT VÀ XỬ LÝ ORDER FACEBOOK SHOP)
 # ============================================
 
 @app.route("/", methods=["GET"])
@@ -2746,6 +2746,93 @@ def webhook():
                     print(f"[ECHO FCHAT] Không tìm thấy mã sản phẩm trong echo: {echo_text[:100]}...")
                 
                 continue
+            
+            # Xử lý sự kiện ORDER từ Facebook Shop - PHẦN MỚI THÊM VÀO
+            if "order" in m:
+                order_info = m.get("order", {})
+                products = order_info.get("products", [])
+                
+                print(f"[FACEBOOK SHOP ORDER] Đơn hàng mới từ user {sender_id}: {json.dumps(order_info, ensure_ascii=False)[:500]}")
+                
+                # Trích xuất thông tin đơn hàng
+                order_items = []
+                total_amount = 0
+                
+                for product in products:
+                    retailer_id = product.get("retailer_id", "")
+                    product_name = product.get("name", "")
+                    unit_price = product.get("unit_price", 0)
+                    quantity = product.get("quantity", 1)
+                    currency = product.get("currency", "VND")
+                    
+                    # Trích xuất mã sản phẩm từ retailer_id
+                    ms = extract_ms_from_retailer_id(retailer_id) or "UNKNOWN"
+                    
+                    item_total = unit_price * quantity
+                    total_amount += item_total
+                    
+                    order_items.append({
+                        "ms": ms,
+                        "name": product_name,
+                        "unit_price": unit_price,
+                        "quantity": quantity,
+                        "item_total": item_total,
+                        "retailer_id": retailer_id
+                    })
+                
+                # Gửi tin nhắn xác nhận đơn hàng
+                message_lines = [
+                    "🎊 **ĐƠN HÀNG MỚI TỪ FACEBOOK SHOP**",
+                    "────────────────",
+                    f"👤 Khách hàng: Facebook User",
+                    f"📞 Liên hệ: Qua Messenger",
+                    f"💰 Tổng tiền: {total_amount:,.0f} {currency}",
+                    "────────────────",
+                    "📦 Sản phẩm:"
+                ]
+                
+                for i, item in enumerate(order_items, 1):
+                    message_lines.append(f"{i}. [{item['ms']}] {item['name']}")
+                    message_lines.append(f"   Số lượng: {item['quantity']} × {item['unit_price']:,.0f} = {item['item_total']:,.0f} {currency}")
+                
+                message_lines.extend([
+                    "────────────────",
+                    "⏰ Shop sẽ liên hệ xác nhận trong 5-10 phút.",
+                    "🚚 Giao hàng bởi ViettelPost (COD)",
+                    "────────────────",
+                    "Cảm ơn quý khách đã đặt hàng! ❤️"
+                ])
+                
+                thank_you_msg = "\n".join(message_lines)
+                send_message(sender_id, thank_you_msg)
+                
+                # Cập nhật context với mã sản phẩm đầu tiên (nếu có)
+                if order_items and order_items[0]["ms"] != "UNKNOWN":
+                    ctx = USER_CONTEXT.get(sender_id, {})
+                    ctx["last_ms"] = order_items[0]["ms"]
+                    ctx["referral_source"] = "facebook_shop_order"
+                    update_product_context(sender_id, order_items[0]["ms"])
+                
+                # Ghi log đơn hàng vào hệ thống
+                try:
+                    order_log = {
+                        "user_id": sender_id,
+                        "timestamp": datetime.now().isoformat(),
+                        "order_data": order_info,
+                        "items": order_items,
+                        "total_amount": total_amount,
+                        "source": "facebook_shop"
+                    }
+                    
+                    # Lưu vào file log
+                    with open("facebook_shop_orders.log", "a", encoding="utf-8") as f:
+                        f.write(json.dumps(order_log, ensure_ascii=False) + "\n")
+                    
+                    print(f"[FACEBOOK SHOP ORDER LOG] Đã ghi log đơn hàng từ user {sender_id}")
+                except Exception as e:
+                    print(f"[FACEBOOK SHOP ORDER ERROR] Lỗi khi ghi log: {e}")
+                
+                continue  # Đã xử lý xong sự kiện order
             
             # Xử lý referral
             if m.get("referral"):
@@ -4009,7 +4096,8 @@ def health_check():
             "image_processing": True,
             "order_form": True,
             "google_sheets_api": True,
-            "poscake_webhook": True
+            "poscake_webhook": True,
+            "facebook_shop_order_processing": True  # Thêm tính năng mới
         }
     }, 200
 
@@ -4091,6 +4179,16 @@ if __name__ == "__main__":
     print(f"🔴 Cập nhật tin nhắn phản hồi: hiển thị cả đơn giá và thành tiền tính đúng")
     print(f"🔴 Cải thiện hàm extract_price_int để xử lý nhiều định dạng giá")
     print(f"🔴 Thêm debug log để kiểm tra khi có vấn đề")
+    print("=" * 80)
+    
+    print("🟢 TÍNH NĂNG MỚI: XỬ LÝ ĐƠN HÀNG TỪ FACEBOOK SHOP")
+    print("=" * 80)
+    print(f"🟢 Xử lý sự kiện 'order' từ Facebook Shop")
+    print(f"🟢 Tự động gửi tin nhắn cảm ơn khi có đơn hàng mới")
+    print(f"🟢 Trích xuất mã sản phẩm từ retailer_id")
+    print(f"🟢 Hiển thị chi tiết sản phẩm, số lượng, đơn giá, tổng tiền")
+    print(f"🟢 Log đơn hàng vào file facebook_shop_orders.log")
+    print(f"🟢 Cập nhật context với mã sản phẩm để hỗ trợ tư vấn tiếp theo")
     print("=" * 80)
     
     load_products()
