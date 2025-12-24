@@ -968,20 +968,74 @@ def update_product_context(uid: str, ms: str):
     print(f"[CONTEXT UPDATE] User {uid}: last_ms={ms}, history={ctx['product_history']}")
 
 def detect_ms_from_text(text: str) -> Optional[str]:
+    """Phát hiện mã sản phẩm từ nhiều dạng text khác nhau"""
     if not text: 
         return None
     
-    m = re.search(r"MS(\d{2,6})", text.upper())
+    print(f"[DETECT MS DEBUG] Input text: {text}")
+    
+    # Chuẩn hóa text: lowercase, xóa dấu, xóa khoảng trắng thừa
+    text_norm = normalize_vietnamese(text.lower().strip())
+    
+    # 1. Tìm MS chuẩn: MSxxxxxx (có thể có # ở đầu)
+    m = re.search(r"#?ms(\d{2,6})", text_norm)
     if m: 
         full_ms = "MS" + m.group(1).zfill(6)
-        return full_ms if full_ms in PRODUCTS else None
+        if full_ms in PRODUCTS:
+            print(f"[DETECT MS DEBUG] Tìm thấy MS chuẩn: {full_ms}")
+            return full_ms
     
-    nums = re.findall(r"\b(\d{2,6})\b", text)
-    for n in nums:
-        clean_n = n.lstrip("0")
+    # 2. Tìm pattern "mã số", "mã sản phẩm", "mã"
+    patterns = [
+        r"mã\s*số\s*(\d{1,6})",      # "mã số 39"
+        r"mã\s*sản\s*phẩm\s*(\d{1,6})",  # "mã sản phẩm 39"
+        r"mã\s*(\d{1,6})",           # "mã 39"
+        r"sp\s*(\d{1,6})",           # "sp 39"
+        r"sản\s*phẩm\s*(\d{1,6})",   # "sản phẩm 39"
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, text_norm)
+        if match:
+            num = match.group(1).zfill(6)
+            full_ms = "MS" + num
+            if full_ms in PRODUCTS:
+                print(f"[DETECT MS DEBUG] Tìm thấy qua pattern '{pattern}': {full_ms}")
+                return full_ms
+    
+    # 3. Tìm số đơn lẻ (1-6 chữ số) - ưu tiên số ngắn hơn
+    # Tách tất cả các số từ text
+    all_nums = re.findall(r'\b(\d{1,6})\b', text_norm)
+    
+    # Ưu tiên số có độ dài từ 1-6 chữ số (vì mã sản phẩm thường ngắn)
+    for num in all_nums:
+        # Bỏ các số 0 ở đầu
+        clean_n = num.lstrip("0")
         if clean_n in PRODUCTS_BY_NUMBER: 
-            return PRODUCTS_BY_NUMBER[clean_n]
+            found_ms = PRODUCTS_BY_NUMBER[clean_n]
+            print(f"[DETECT MS DEBUG] Tìm thấy qua số đơn lẻ {num} -> {clean_n}: {found_ms}")
+            return found_ms
     
+    # 4. Tìm các biến thể viết liền: ms39, MS39, Ms39
+    # Loại bỏ tất cả khoảng trắng và tìm pattern MS/ms + số
+    text_no_space = re.sub(r'\s+', '', text_norm)
+    ms_variants = re.findall(r'(?:ms|MS|Ms)(\d{1,6})', text_no_space)
+    for num in ms_variants:
+        full_ms = "MS" + num.zfill(6)
+        if full_ms in PRODUCTS:
+            print(f"[DETECT MS DEBUG] Tìm thấy qua biến thể viết liền: {full_ms}")
+            return full_ms
+    
+    # 5. Tìm số có từ 1-6 chữ số (cho trường hợp "39", "039", "0039")
+    # Kiểm tra xem text có phải chỉ là số không
+    if re.match(r'^\d{1,6}$', text_norm):
+        num = text_norm.lstrip('0')
+        if num and num in PRODUCTS_BY_NUMBER:
+            found_ms = PRODUCTS_BY_NUMBER[num]
+            print(f"[DETECT MS DEBUG] Text chỉ là số: {text_norm} -> {num}: {found_ms}")
+            return found_ms
+    
+    print(f"[DETECT MS DEBUG] Không tìm thấy MS trong text: {text}")
     return None
 
 # ============================================
@@ -1003,8 +1057,22 @@ def handle_text_with_function_calling(uid: str, text: str):
             current_ms = detected_ms
             ctx["last_ms"] = current_ms
             update_product_context(uid, current_ms)
+            print(f"[MS DETECTED] Phát hiện MS từ tin nhắn hiện tại: {current_ms}")
     
-    # ƯU TIÊN 3: Nếu vẫn không có, hỏi lại khách
+    # ƯU TIÊN 3: Nếu vẫn không có, kiểm tra xem tin nhắn có chứa số không
+    if not current_ms or current_ms not in PRODUCTS:
+        # Tìm bất kỳ số nào trong tin nhắn (1-6 chữ số)
+        numbers = re.findall(r'\b(\d{1,6})\b', text)
+        for num in numbers:
+            clean_num = num.lstrip('0')
+            if clean_num and clean_num in PRODUCTS_BY_NUMBER:
+                current_ms = PRODUCTS_BY_NUMBER[clean_num]
+                ctx["last_ms"] = current_ms
+                update_product_context(uid, current_ms)
+                print(f"[MS FALLBACK] Tìm thấy MS từ số trong tin nhắn: {current_ms}")
+                break
+    
+    # ƯU TIÊN 4: Nếu vẫn không có, hỏi lại khách
     if not current_ms or current_ms not in PRODUCTS:
         send_message(uid, "Dạ em chưa biết anh/chị đang hỏi về sản phẩm nào. Vui lòng cho em biết mã sản phẩm (ví dụ: MS000012) ạ!")
         return
@@ -3137,6 +3205,16 @@ if __name__ == "__main__":
     print(f"🔴 Cập nhật tin nhắn phản hồi: hiển thị cả đơn giá và thành tiền tính đúng")
     print(f"🔴 Cải thiện hàm extract_price_int để xử lý nhiều định dạng giá")
     print(f"🔴 Thêm debug log để kiểm tra khi có vấn đề")
+    print("=" * 80)
+    
+    print("🔴 CẢI THIỆN NHẬN DIỆN MÃ SẢN PHẨM TỪ NHIỀU ĐỊNH DẠNG:")
+    print("=" * 80)
+    print(f"🔴 Hàm detect_ms_from_text mới: Nhận diện được 'Mã sản phẩm 39', 'mã 39', 'sản phẩm 39', 'ms39', 'Ms39', 'MS039', 'MS000039'")
+    print(f"🔴 Hỗ trợ nhiều pattern: 'mã số', 'mã sản phẩm', 'sp', 'sản phẩm'")
+    print(f"🔴 Xử lý số đơn lẻ: '39', '039', '0039'")
+    print(f"🔴 Xử lý viết liền: 'ms39', 'MS39', 'Ms39'")
+    print(f"🔴 Thêm debug log để theo dõi quá trình detect")
+    print(f"🔴 Giữ nguyên toàn bộ logic Fchat echo hiện có")
     print("=" * 80)
     
     load_products()
