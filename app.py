@@ -25,7 +25,7 @@ from openai import OpenAI
 app = Flask(__name__)
 
 # ============================================
-# ENV & CONFIG
+# ENV & CONFIG - THÊM POSCAKE
 # ============================================
 PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN", "").strip()
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "").strip()
@@ -35,6 +35,11 @@ DOMAIN = os.getenv("DOMAIN", "").strip() or "fb-gpt-chatbot.onrender.com"
 FANPAGE_NAME = os.getenv("FANPAGE_NAME", "Shop thời trang")
 FCHAT_WEBHOOK_URL = os.getenv("FCHAT_WEBHOOK_URL", "").strip()
 FCHAT_TOKEN = os.getenv("FCHAT_TOKEN", "").strip()
+
+# Cấu hình Poscake Webhook
+POSCAKE_API_KEY = os.getenv("POSCAKE_API_KEY", "").strip()
+POSCAKE_WEBHOOK_SECRET = os.getenv("POSCAKE_WEBHOOK_SECRET", "").strip()
+POSCAKE_STORE_ID = os.getenv("POSCAKE_STORE_ID", "").strip()
 
 # ============================================
 # GOOGLE SHEETS API CONFIGURATION
@@ -125,6 +130,8 @@ USER_CONTEXT = defaultdict(lambda: {
     "idempotent_postbacks": {},
     "processed_message_mids": {},
     "last_processed_text": "",
+    # Thêm trường mới cho Poscake
+    "poscake_orders": []
 })
 
 PRODUCTS = {}
@@ -2266,6 +2273,270 @@ def save_order_to_local_csv(order_data: dict):
         print(f"❌ Lỗi khi lưu file local backup: {str(e)}")
 
 # ============================================
+# POSCAKE WEBHOOK INTEGRATION (PHẦN MỚI)
+# ============================================
+
+def send_order_status_message(recipient_id: str, order_data: dict):
+    """
+    Gửi tin nhắn thông báo trạng thái đơn hàng từ Poscake
+    """
+    try:
+        order_id = order_data.get("order_id", "")
+        order_code = order_data.get("order_code", "")
+        status = order_data.get("status", "")
+        total_amount = order_data.get("total_amount", 0)
+        items = order_data.get("items", [])
+        
+        # Tạo nội dung tin nhắn dựa trên trạng thái
+        status_messages = {
+            "pending": "📦 ĐƠN HÀNG MỚI",
+            "processing": "⚡ ĐANG XỬ LÝ",
+            "shipped": "🚚 ĐÃ GIAO HÀNG",
+            "delivered": "✅ ĐÃ NHẬN HÀNG",
+            "cancelled": "❌ ĐÃ HỦY"
+        }
+        
+        status_text = status_messages.get(status, "📦 CẬP NHẬT ĐƠN HÀNG")
+        
+        # Xây dựng nội dung tin nhắn
+        message = f"""🎊 {status_text}
+────────────────
+📋 Mã đơn hàng: {order_code}
+💰 Tổng tiền: {total_amount:,.0f} đ
+📅 Thời gian: {order_data.get('created_at', '')}
+────────────────"""
+
+        if items:
+            message += "\n📦 Sản phẩm:\n"
+            for i, item in enumerate(items[:5], 1):  # Giới hạn 5 sản phẩm
+                product_name = item.get("product_name", "")
+                quantity = item.get("quantity", 1)
+                price = item.get("price", 0)
+                message += f"{i}. {product_name} x{quantity} - {price:,.0f} đ\n"
+        
+        # Thêm thông báo theo trạng thái
+        if status == "pending":
+            message += "\n⏰ Shop sẽ liên hệ xác nhận trong 5-10 phút."
+        elif status == "processing":
+            message += "\n🔧 Đơn hàng đang được chuẩn bị."
+        elif status == "shipped":
+            shipping_info = order_data.get("shipping_info", {})
+            tracking_code = shipping_info.get("tracking_code", "")
+            carrier = shipping_info.get("carrier", "")
+            if tracking_code:
+                message += f"\n📮 Mã vận đơn: {tracking_code}"
+            if carrier:
+                message += f"\n🚚 Đơn vị vận chuyển: {carrier}"
+        elif status == "delivered":
+            message += "\n✅ Cảm ơn bạn đã mua hàng!"
+        elif status == "cancelled":
+            message += "\n📞 Liên hệ shop để được hỗ trợ."
+
+        message += "\n────────────────\n💬 Cần hỗ trợ thêm? Gửi tin nhắn cho em ạ! ❤️"
+
+        send_message(recipient_id, message)
+        
+        # Nếu có tracking code, gửi thêm nút theo dõi đơn hàng
+        if status == "shipped":
+            tracking_code = order_data.get("shipping_info", {}).get("tracking_code")
+            if tracking_code:
+                quick_replies = [
+                    {
+                        "content_type": "text",
+                        "title": "📍 Theo dõi đơn hàng",
+                        "payload": f"TRACK_ORDER_{tracking_code}"
+                    },
+                    {
+                        "content_type": "text",
+                        "title": "📞 Hỗ trợ",
+                        "payload": "SUPPORT_ORDER"
+                    }
+                ]
+                send_quick_replies(recipient_id, "Bấm để theo dõi đơn hàng:", quick_replies)
+        
+        print(f"[POSCAKE NOTIFY] Đã gửi thông báo đơn hàng {order_code} cho user {recipient_id}")
+        return True
+        
+    except Exception as e:
+        print(f"[POSCAKE NOTIFY ERROR] Lỗi gửi tin nhắn đơn hàng: {e}")
+        return False
+
+def handle_poscake_order_event(event_type: str, data: dict):
+    """Xử lý sự kiện đơn hàng từ Poscake"""
+    order_data = data.get('data', data.get('order', {}))
+    
+    print(f"[POSCAKE ORDER] {event_type}: {order_data.get('code', 'No code')}")
+    
+    # Log chi tiết để debug
+    print(f"[POSCAKE ORDER DETAILS] {json.dumps(order_data, ensure_ascii=False)[:300]}")
+    
+    # Tìm recipient_id từ thông tin khách hàng
+    customer = order_data.get('customer', {})
+    phone = customer.get('phone', '')
+    email = customer.get('email', '')
+    
+    recipient_id = None
+    
+    # Tìm user_id từ số điện thoại trong context
+    for uid, ctx in USER_CONTEXT.items():
+        # Kiểm tra order_data hoặc số điện thoại trong context
+        user_phone = ctx.get("order_data", {}).get("phone", "")
+        if user_phone and user_phone == phone:
+            recipient_id = uid
+            break
+    
+    # Nếu không tìm thấy, thử tìm bằng email
+    if not recipient_id and email:
+        for uid, ctx in USER_CONTEXT.items():
+            user_email = ctx.get("order_data", {}).get("email", "")
+            if user_email and user_email == email:
+                recipient_id = uid
+                break
+    
+    if recipient_id:
+        # Chuẩn bị dữ liệu đơn hàng
+        order_info = {
+            "order_id": order_data.get('id', ''),
+            "order_code": order_data.get('code', ''),
+            "status": event_type.replace('order.', ''),
+            "total_amount": order_data.get('total', 0),
+            "items": order_data.get('items', []),
+            "customer": customer,
+            "created_at": order_data.get('created_at', ''),
+            "updated_at": order_data.get('updated_at', ''),
+            "shipping_info": order_data.get('shipping', {})
+        }
+        
+        # Gửi tin nhắn thông báo
+        send_order_status_message(recipient_id, order_info)
+        
+        # Lưu thông tin đơn hàng vào context
+        if recipient_id in USER_CONTEXT:
+            if "poscake_orders" not in USER_CONTEXT[recipient_id]:
+                USER_CONTEXT[recipient_id]["poscake_orders"] = []
+            
+            # Kiểm tra xem đơn hàng đã tồn tại chưa
+            existing_order = next(
+                (o for o in USER_CONTEXT[recipient_id]["poscake_orders"] 
+                 if o.get("order_id") == order_info["order_id"]), None
+            )
+            
+            if not existing_order:
+                USER_CONTEXT[recipient_id]["poscake_orders"].append(order_info)
+                # Giữ tối đa 10 đơn hàng gần nhất
+                if len(USER_CONTEXT[recipient_id]["poscake_orders"]) > 10:
+                    USER_CONTEXT[recipient_id]["poscake_orders"] = USER_CONTEXT[recipient_id]["poscake_orders"][-10:]
+            else:
+                # Cập nhật trạng thái đơn hàng hiện có
+                existing_order.update(order_info)
+        
+        return jsonify({
+            "status": "success",
+            "event": event_type,
+            "order_code": order_data.get('code'),
+            "message_sent": True,
+            "recipient_id": recipient_id
+        }), 200
+    else:
+        print(f"[POSCAKE ORDER] Không tìm thấy recipient_id cho đơn hàng {order_data.get('code')}")
+        return jsonify({
+            "status": "no_recipient",
+            "event": event_type,
+            "order_code": order_data.get('code'),
+            "message": "Không tìm thấy user tương ứng"
+        }), 200
+
+@app.route("/poscake-webhook", methods=["POST"])
+def poscake_webhook():
+    """
+    Webhook nhận thông báo từ Poscake
+    Poscake sẽ gửi các sự kiện: đơn hàng, sản phẩm, tồn kho
+    """
+    try:
+        # Log headers để debug
+        headers = {k.lower(): v for k, v in request.headers.items()}
+        print(f"[POSCAKE WEBHOOK] Headers nhận được: {headers}")
+        
+        # Lấy signature để xác thực
+        signature = headers.get('x-poscake-signature') or headers.get('x-signature')
+        
+        # Xác thực webhook nếu có secret
+        if POSCAKE_WEBHOOK_SECRET and signature:
+            # Tính toán và so sánh signature
+            payload = request.get_data(as_text=True)
+            expected_signature = hashlib.sha256(
+                f"{payload}{POSCAKE_WEBHOOK_SECRET}".encode()
+            ).hexdigest()
+            
+            if signature != expected_signature:
+                print(f"[POSCAKE WEBHOOK] Invalid signature")
+                return jsonify({"error": "Invalid signature"}), 401
+        
+        # Parse JSON data
+        data = request.get_json()
+        if not data:
+            print("[POSCAKE WEBHOOK] No JSON data received")
+            return jsonify({"error": "No data"}), 400
+        
+        print(f"[POSCAKE WEBHOOK] Data received: {json.dumps(data, ensure_ascii=False)[:500]}")
+        
+        # Xác định loại sự kiện
+        event_type = data.get('event')
+        
+        # Xử lý theo loại sự kiện
+        if event_type and 'order' in event_type:
+            return handle_poscake_order_event(event_type, data)
+        elif event_type and 'product' in event_type:
+            # Xử lý sản phẩm (có thể cập nhật PRODUCTS)
+            print(f"[POSCAKE PRODUCT] Event: {event_type}")
+            return jsonify({"status": "received", "event": event_type}), 200
+        elif event_type and 'inventory' in event_type:
+            # Xử lý tồn kho
+            print(f"[POSCAKE INVENTORY] Event: {event_type}")
+            return jsonify({"status": "received", "event": event_type}), 200
+        else:
+            print(f"[POSCAKE WEBHOOK] Unknown event type: {event_type}")
+            return jsonify({"status": "ignored", "event": event_type}), 200
+            
+    except Exception as e:
+        print(f"[POSCAKE WEBHOOK ERROR] {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": "Internal server error"}), 500
+
+# ============================================
+# TEST WEBHOOK ENDPOINT
+# ============================================
+
+@app.route("/test-poscake-webhook", methods=["GET", "POST"])
+def test_poscake_webhook():
+    """Endpoint để test webhook từ Poscake"""
+    if request.method == "GET":
+        return jsonify({
+            "status": "ready",
+            "message": "Poscake Webhook endpoint is ready",
+            "endpoint": "/poscake-webhook",
+            "instructions": "Configure webhook on Poscake to point to this URL"
+        })
+    
+    # Xử lý POST request (test data)
+    data = request.get_json() or {}
+    
+    print(f"[TEST WEBHOOK] Received data: {json.dumps(data, indent=2)}")
+    
+    # Log headers
+    headers = dict(request.headers)
+    print(f"[TEST WEBHOOK] Headers: {json.dumps(headers, indent=2)}")
+    
+    return jsonify({
+        "status": "received",
+        "message": "Test webhook received successfully",
+        "data_received": data,
+        "headers_received": headers,
+        "timestamp": datetime.now().isoformat()
+    }), 200
+
+# ============================================
 # API MỚI: Lấy thông tin biến thể (ảnh, giá)
 # ============================================
 
@@ -3705,6 +3976,15 @@ def health_check():
             "sheet_id_configured": bool(GOOGLE_SHEET_ID),
             "credentials_configured": bool(GOOGLE_SHEETS_CREDENTIALS_JSON)
         },
+        "poscake_integration": {
+            "api_key_configured": bool(POSCAKE_API_KEY),
+            "webhook_secret_configured": bool(POSCAKE_WEBHOOK_SECRET),
+            "store_id_configured": bool(POSCAKE_STORE_ID),
+            "endpoints": {
+                "webhook": "/poscake-webhook",
+                "test": "/test-poscake-webhook"
+            }
+        },
         "gpt_function_calling": {
             "enabled": True,
             "tools": ["get_product_price_details", "get_product_basic_info", "send_product_images", "send_product_videos", "provide_order_link"],
@@ -3728,7 +4008,8 @@ def health_check():
             "fchat_echo_processing": True,
             "image_processing": True,
             "order_form": True,
-            "google_sheets_api": True
+            "google_sheets_api": True,
+            "poscake_webhook": True
         }
     }, 200
 
@@ -3757,6 +4038,7 @@ if __name__ == "__main__":
     print(f"🟢 Fanpage: {get_fanpage_name_from_api()}")
     print(f"🟢 Domain: {DOMAIN}")
     print(f"🟢 Google Sheets API: {'SẴN SÀNG' if GOOGLE_SHEET_ID and GOOGLE_SHEETS_CREDENTIALS_JSON else 'CHƯA CẤU HÌNH'}")
+    print(f"🟢 Poscake Webhook: {'SẴN SÀNG' if POSCAKE_API_KEY else 'CHƯA CẤU HÌNH'}")
     print(f"🟢 OpenAI Function Calling: {'TÍCH HỢP THÀNH CÔNG' if client else 'CHƯA CẤU HÌNH'}")
     print("=" * 80)
     
@@ -3770,6 +4052,16 @@ if __name__ == "__main__":
     print(f"🔴 Context Tracking: Ghi nhớ MS từ echo Fchat, ad_title, catalog")
     print(f"🔴 Real Message Counter: Đếm tin nhắn thật từ user")
     print(f"🔴 Postback Idempotency: Mỗi postback chỉ xử lý 1 lần")
+    print("=" * 80)
+    
+    print("🟢 CẢI TIẾN MỚI: POSCAKE WEBHOOK INTEGRATION")
+    print("=" * 80)
+    print(f"🟢 Endpoint: /poscake-webhook (POST)")
+    print(f"🟢 Test endpoint: /test-poscake-webhook (GET/POST)")
+    print(f"🟢 Xác thực: Signature verification với POSCAKE_WEBHOOK_SECRET")
+    print(f"🟢 Xử lý sự kiện: order.created, order.updated, order.shipped, order.delivered, order.cancelled")
+    print(f"🟢 Tự động gửi tin nhắn: Thông báo trạng thái đơn hàng cho khách")
+    print(f"🟢 Context lưu trữ: USER_CONTEXT['poscake_orders'] - lưu 10 đơn hàng gần nhất")
     print("=" * 80)
     
     print("🟢 CẢI TIẾN MỚI: XỬ LÝ ẢNH SẢN PHẨM THÔNG MINH VỚI CAROUSEL GỢI Ý")
@@ -3799,16 +4091,6 @@ if __name__ == "__main__":
     print(f"🔴 Cập nhật tin nhắn phản hồi: hiển thị cả đơn giá và thành tiền tính đúng")
     print(f"🔴 Cải thiện hàm extract_price_int để xử lý nhiều định dạng giá")
     print(f"🔴 Thêm debug log để kiểm tra khi có vấn đề")
-    print("=" * 80)
-    
-    print("🔴 CẢI THIỆN NHẬN DIỆN MÃ SẢN PHẨM TỪ NHIỀU ĐỊNH DẠNG:")
-    print("=" * 80)
-    print(f"🔴 Hàm detect_ms_from_text: Chỉ nhận diện khi có TIỀN TỐ (prefix)")
-    print(f"🔴 Hỗ trợ tất cả dạng: 'MS000039', 'mã 39', 'ms39', 'sp39', 'xem mã 39', 'tư vấn sp 39'")
-    print(f"🔴 KHÔNG lấy số đơn lẻ: '3', '39', '039' sẽ không bị nhận diện là MS")
-    print(f"🔴 Ưu tiên tiền tố: ms, mã, sp, ma, san pham, sản phẩm, mã số, mã sản phẩm")
-    print(f"🔴 Thêm debug log để theo dõi quá trình detect")
-    print(f"🔴 Giữ nguyên toàn bộ logic Fchat echo hiện có")
     print("=" * 80)
     
     load_products()
