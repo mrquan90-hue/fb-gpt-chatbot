@@ -223,6 +223,34 @@ def is_emoji_or_sticker_image(image_url: str) -> bool:
     return False
 
 # ============================================
+# HÀM KIỂM TRA ẢNH SẢN PHẨM HỢP LỆ
+# ============================================
+
+def is_valid_product_image(image_url: str) -> bool:
+    """
+    Kiểm tra xem ảnh có phải là ảnh sản phẩm hợp lệ không
+    """
+    if not image_url:
+        return False
+    
+    # Kiểm tra đuôi file ảnh hợp lệ
+    valid_extensions = ['.jpg', '.jpeg', '.png', '.webp', '.gif']
+    image_url_lower = image_url.lower()
+    
+    for ext in valid_extensions:
+        if ext in image_url_lower:
+            return True
+    
+    # Kiểm tra domain ảnh phổ biến
+    valid_domains = ['fbcdn.net', 'scontent.xx', 'cdn.shopify', 'static.nike', 'lzd-img', 'shopee', 'tiki', 'content.pancake.vn']
+    
+    for domain in valid_domains:
+        if domain in image_url_lower:
+            return True
+    
+    return False
+
+# ============================================
 # HÀM PHÂN TÍCH ẢNH BẰNG OPENAI VISION API
 # ============================================
 
@@ -234,57 +262,111 @@ def analyze_image_with_vision_api(image_url: str) -> str:
         return ""
     
     try:
+        # Xử lý URL: cắt bỏ các tham số không cần thiết để tránh lỗi 400
+        # Giữ nguyên URL gốc nhưng đảm bảo nó hợp lệ
+        clean_url = image_url.split('?')[0] if '?' in image_url else image_url
+        
+        # Kiểm tra xem URL có phải Facebook CDN không
+        if 'fbcdn.net' in clean_url:
+            # Thêm tham số cần thiết cho Facebook CDN
+            clean_url = f"{clean_url}?dl=1"
+        
+        print(f"[VISION API] Phân tích ảnh: {clean_url[:100]}...")
+        
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": """Hãy mô tả chi tiết sản phẩm trong ảnh này theo các tiêu chí:
-                        1. Loại sản phẩm (váy, áo, quần, v.v.)
-                        2. Màu sắc chính
-                        3. Chất liệu (nếu có thể nhận biết)
-                        4. Họa tiết, hoa văn
-                        5. Kiểu dáng, thiết kế
-                        6. Đặc điểm nổi bật
-                        
-                        Mô tả ngắn gọn, tập trung vào từ khóa quan trọng."""},
+                        {"type": "text", "text": """Bạn là chuyên gia nhận diện sản phẩm thời trang. Hãy mô tả CHI TIẾT và CHÍNH XÁC sản phẩm trong ảnh theo các tiêu chí:
+
+1. LOẠI SẢN PHẨM (bắt buộc): áo thun, áo sơ mi, váy, quần jeans, áo khoác, đầm, v.v.
+2. MÀU SẮC CHÍNH (bắt buộc): đỏ, xanh, trắng, đen, hồng, tím, v.v.
+3. CHẤT LIỆU (nếu thấy): cotton, linen, jean, lụa, v.v.
+4. HỌA TIẾT: trơn, sọc, caro, hoa, hình in, logo, v.v.
+5. KIỂU DÁNG: cổ tròn, cổ tim, tay dài, tay ngắn, ôm body, rộng, v.v.
+6. ĐẶC ĐIỂM NỔI BẬT: túi, nút, dây kéo, viền, đính đá, v.v.
+7. PHONG CÁCH: casual, công sở, dạo phố, dự tiệc, thể thao, v.v.
+
+MÔ TẢ PHẢI NGẮN GỌN nhưng ĐẦY ĐỦ từ khóa quan trọng. Ưu tiên từ khóa thông dụng trong thời trang."""},
                         {
                             "type": "image_url",
                             "image_url": {
-                                "url": image_url,
-                                "detail": "low"
+                                "url": clean_url,
+                                "detail": "high"  # Tăng độ chi tiết
                             }
                         }
                     ]
                 }
             ],
-            max_tokens=300,
+            max_tokens=500,
             temperature=0.1
         )
         
         return response.choices[0].message.content
     except Exception as e:
         print(f"[VISION API ERROR] Lỗi khi phân tích ảnh: {e}")
+        
+        # Thử fallback với URL gốc nếu clean_url lỗi
+        if clean_url != image_url:
+            try:
+                print(f"[VISION API RETRY] Thử với URL gốc...")
+                response = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "Mô tả ngắn gọn sản phẩm trong ảnh này."},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": image_url,
+                                        "detail": "low"
+                                    }
+                                }
+                            ]
+                        }
+                    ],
+                    max_tokens=200,
+                    temperature=0.1
+                )
+                return response.choices[0].message.content
+            except Exception as e2:
+                print(f"[VISION API RETRY ERROR] Lỗi retry: {e2}")
+        
         return ""
 
 # ============================================
-# HÀM TÌM SẢN PHẨM BẰNG MÔ TẢ ẢNH
+# HÀM TÌM SẢN PHẨM BẰNG MÔ TẢ ẢNH (CẢI TIẾN)
 # ============================================
 
 def find_product_by_image_description(description: str) -> Optional[str]:
     """
-    Tìm sản phẩm phù hợp nhất dựa trên mô tả ảnh
+    Tìm sản phẩm phù hợp nhất dựa trên mô tả ảnh - CẢI TIẾN với từ khóa quan trọng
     """
     load_products()
     
     if not description or not PRODUCTS:
         return None
     
-    # Chuẩn hóa mô tả
+    # Chuẩn hóa mô tả ảnh
     desc_lower = normalize_vietnamese(description.lower())
+    print(f"[IMAGE MATCH] Mô tả ảnh: {desc_lower[:200]}...")
     
-    # Tìm kiếm đơn giản dựa trên từ khóa
+    # Tạo danh sách từ khóa quan trọng từ mô tả ảnh
+    desc_keywords = set()
+    
+    # Thêm từ khóa từ mô tả (loại bỏ từ dừng)
+    stop_words = {'của', 'và', 'là', 'có', 'trong', 'với', 'cho', 'từ', 'này', 'ảnh', 'sản phẩm', 'phẩm', 'chụp', 'nhìn', 'thấy', 'rất', 'một', 'như', 'bởi', 'các', 'được', 'nên', 'khi', 'hoặc', 'nếu', 'thì', 'mà'}
+    
+    words = desc_lower.split()
+    for word in words:
+        if len(word) > 2 and word not in stop_words:
+            desc_keywords.add(word)
+    
+    # Tìm kiếm sản phẩm với điểm số cải tiến
     product_scores = {}
     
     for ms, product in PRODUCTS.items():
@@ -294,38 +376,57 @@ def find_product_by_image_description(description: str) -> Optional[str]:
         ten = normalize_vietnamese(product.get("Ten", "").lower())
         mo_ta = normalize_vietnamese(product.get("MoTa", "").lower())
         mau_sac = normalize_vietnamese(product.get("màu (Thuộc tính)", "").lower())
+        thuoc_tinh = normalize_vietnamese(product.get("Thuộc tính", "").lower())
         
-        # Tính điểm dựa trên từ khóa trùng khớp
-        keywords = []
+        # Tạo bộ từ khóa sản phẩm
+        product_keywords = set()
         
-        # Từ khóa từ tên sản phẩm
-        keywords.extend(ten.split())
+        # Thêm từ khóa từ tên sản phẩm
+        for word in ten.split():
+            if len(word) > 2:
+                product_keywords.add(word)
         
-        # Từ khóa từ mô tả (lấy 20 từ đầu)
-        keywords.extend(mo_ta.split()[:20])
+        # Thêm từ khóa từ mô tả
+        for word in mo_ta.split()[:30]:
+            if len(word) > 2:
+                product_keywords.add(word)
         
-        # Từ khóa màu sắc
+        # Thêm màu sắc
         if mau_sac:
-            keywords.extend(mau_sac.split(','))
+            for color in mau_sac.split(','):
+                color_clean = color.strip().lower()
+                if color_clean:
+                    product_keywords.add(color_clean)
         
-        # Loại bỏ từ trùng và từ quá ngắn
-        keywords = [k.strip() for k in keywords if len(k.strip()) > 2]
-        keywords = list(set(keywords))
+        # Thêm thuộc tính
+        if thuoc_tinh:
+            for attr in thuoc_tinh.split(','):
+                attr_clean = attr.strip().lower()
+                if attr_clean:
+                    product_keywords.add(attr_clean)
         
-        # Tính điểm cho mỗi từ khóa xuất hiện trong mô tả ảnh
-        for keyword in keywords:
-            if keyword in desc_lower:
-                score += 1
+        # Tính điểm: từ khóa trùng nhau
+        common_keywords = desc_keywords.intersection(product_keywords)
+        score = len(common_keywords) * 2  # Trọng số cao hơn
         
-        # Thêm điểm cho độ dài từ khóa (từ dài có trọng số cao hơn)
-        for keyword in keywords:
-            if len(keyword) > 4 and keyword in desc_lower:
-                score += 2
+        # Ưu tiên các từ khóa quan trọng
+        important_keywords = {'áo', 'quần', 'váy', 'đầm', 'áo thun', 'áo sơ mi', 'jeans', 'khoác', 'hoodie', 'sweater'}
+        for keyword in important_keywords:
+            if keyword in desc_lower and keyword in ten.lower():
+                score += 5
+        
+        # Ưu tiên màu sắc trùng khớp
+        if mau_sac:
+            for color in mau_sac.split(','):
+                color_clean = color.strip().lower()
+                if color_clean in desc_lower:
+                    score += 3
         
         if score > 0:
             product_scores[ms] = score
     
     if not product_scores:
+        print("[IMAGE MATCH] Không tìm thấy sản phẩm nào phù hợp")
         return None
     
     # Sắp xếp theo điểm cao nhất
@@ -334,11 +435,15 @@ def find_product_by_image_description(description: str) -> Optional[str]:
     # Lấy sản phẩm có điểm cao nhất
     best_ms, best_score = sorted_products[0]
     
-    # Ngưỡng tối thiểu: cần ít nhất 3 điểm để coi là phù hợp
-    if best_score >= 3:
-        print(f"[IMAGE TEXT MATCH] Tìm thấy {best_ms} với điểm {best_score}")
+    print(f"[IMAGE MATCH SCORES] Điểm cao nhất: {best_ms} với {best_score} điểm")
+    
+    # Ngưỡng tối thiểu: cần ít nhất 4 điểm để coi là phù hợp
+    if best_score >= 4:
+        product_name = PRODUCTS[best_ms].get("Ten", "")
+        print(f"[IMAGE MATCH SUCCESS] Tìm thấy {best_ms} - {product_name}")
         return best_ms
     
+    print(f"[IMAGE MATCH FAIL] Điểm quá thấp: {best_score}")
     return None
 
 # ============================================
@@ -356,6 +461,11 @@ def find_product_by_image(image_url: str) -> Optional[str]:
         print(f"[IMAGE CHECK] Đây là emoji/sticker, bỏ qua")
         return None
     
+    # Bước 1.5: Kiểm tra ảnh có hợp lệ không
+    if not is_valid_product_image(image_url):
+        print(f"[INVALID IMAGE] Ảnh không hợp lệ: {image_url[:100]}")
+        return None
+    
     # Bước 2: Phân tích ảnh để lấy mô tả
     print(f"[IMAGE PROCESS] Đang phân tích ảnh bằng Vision API...")
     image_description = analyze_image_with_vision_api(image_url)
@@ -364,7 +474,7 @@ def find_product_by_image(image_url: str) -> Optional[str]:
         print(f"[IMAGE PROCESS] Không thể phân tích ảnh")
         return None
     
-    print(f"[IMAGE DESCRIPTION] {image_description}")
+    print(f"[IMAGE DESCRIPTION] {image_description[:300]}...")
     
     # Bước 3: Tìm sản phẩm phù hợp với mô tả
     found_ms = find_product_by_image_description(image_description)
@@ -1172,7 +1282,7 @@ def update_product_context(uid: str, ms: str):
     print(f"[CONTEXT UPDATE] User {uid}: last_ms={ms}, history={ctx['product_history']}")
 
 def detect_ms_from_text(text: str) -> Optional[str]:
-    """Phát hiện mã sản phẩm từ nhiều dạng text khác nhau"""
+    """Phát hiện mã sản phẩm từ nhiều dạng text khác nhau - CHỈ khi có tiền tố"""
     if not text: 
         return None
     
@@ -1181,65 +1291,62 @@ def detect_ms_from_text(text: str) -> Optional[str]:
     # Chuẩn hóa text: lowercase, xóa dấu, xóa khoảng trắng thừa
     text_norm = normalize_vietnamese(text.lower().strip())
     
-    # 1. Tìm MS chuẩn: MSxxxxxx (có thể có # ở đầu)
-    m = re.search(r"#?ms(\d{2,6})", text_norm)
-    if m: 
-        full_ms = "MS" + m.group(1).zfill(6)
-        if full_ms in PRODUCTS:
-            print(f"[DETECT MS DEBUG] Tìm thấy MS chuẩn: {full_ms}")
-            return full_ms
-    
-    # 2. Tìm pattern "mã số", "mã sản phẩm", "mã"
-    patterns = [
-        r"mã\s*số\s*(\d{1,6})",      # "mã số 39"
-        r"mã\s*sản\s*phẩm\s*(\d{1,6})",  # "mã sản phẩm 39"
-        r"mã\s*(\d{1,6})",           # "mã 39"
-        r"sp\s*(\d{1,6})",           # "sp 39"
-        r"sản\s*phẩm\s*(\d{1,6})",   # "sản phẩm 39"
+    # Danh sách các tiền tố cần tìm - CHỈ lấy khi có các tiền tố này
+    prefixes = [
+        # Dạng chuẩn & đầy đủ
+        r'ms', r'mã', r'mã số', r'mã sản phẩm', r'sản phẩm', r'sản phẩm số',
+        r'sp',  # Dạng viết tắt
+        # Dạng không dấu
+        r'ma', r'ma so', r'ma san pham', r'san pham', r'san pham so',
+        # Dạng sai chính tả
+        r'mã sp', r'ma sp', r'mã s\.phẩm', r'ma san pham so', 
+        r'mã sp số', r'ma so sp',
+        # Dạng tự nhiên khi khách hỏi (cần có từ khóa)
+        r'xem mã', r'xem sp', r'xem sản phẩm', r'cho xem mã', 
+        r'tư vấn mã', r'tư vấn sp', r'giới thiệu mã', r'giới thiệu sp'
     ]
     
-    for pattern in patterns:
-        match = re.search(pattern, text_norm)
-        if match:
-            num = match.group(1).zfill(6)
-            full_ms = "MS" + num
-            if full_ms in PRODUCTS:
-                print(f"[DETECT MS DEBUG] Tìm thấy qua pattern '{pattern}': {full_ms}")
-                return full_ms
+    # Tạo pattern regex tổng hợp
+    # Format: (tiền tố) + (tùy chọn khoảng trắng) + (số 1-6 chữ số, có thể có số 0 ở đầu)
+    pattern_str = r'(?:' + '|'.join(prefixes) + r')\s*(\d{1,6})'
     
-    # 3. Tìm số đơn lẻ (1-6 chữ số) - ưu tiên số ngắn hơn
-    # Tách tất cả các số từ text
-    all_nums = re.findall(r'\b(\d{1,6})\b', text_norm)
+    # Tìm kiếm với regex
+    match = re.search(pattern_str, text_norm)
     
-    # Ưu tiên số có độ dài từ 1-6 chữ số (vì mã sản phẩm thường ngắn)
-    for num in all_nums:
-        # Bỏ các số 0 ở đầu
+    if match:
+        num = match.group(1)
         clean_n = num.lstrip("0")
-        if clean_n in PRODUCTS_BY_NUMBER: 
+        
+        if clean_n and clean_n in PRODUCTS_BY_NUMBER:
             found_ms = PRODUCTS_BY_NUMBER[clean_n]
-            print(f"[DETECT MS DEBUG] Tìm thấy qua số đơn lẻ {num} -> {clean_n}: {found_ms}")
+            print(f"[DETECT MS DEBUG] Tìm thấy qua tiền tố + số {num}: {found_ms}")
             return found_ms
     
-    # 4. Tìm các biến thể viết liền: ms39, MS39, Ms39
-    # Loại bỏ tất cả khoảng trắng và tìm pattern MS/ms + số
-    text_no_space = re.sub(r'\s+', '', text_norm)
-    ms_variants = re.findall(r'(?:ms|MS|Ms)(\d{1,6})', text_no_space)
-    for num in ms_variants:
-        full_ms = "MS" + num.zfill(6)
+    # THÊM: Tìm MS dạng viết liền hoàn toàn (MSxxxxxx, msxxxxxx, spxxxxxx)
+    # Pattern: (MS|ms|sp) + (1-6 chữ số)
+    direct_pattern = r'\b(ms|sp|ms|sp)(\d{1,6})\b'
+    direct_match = re.search(direct_pattern, text_norm, re.IGNORECASE)
+    
+    if direct_match:
+        num = direct_match.group(2)
+        clean_n = num.lstrip("0")
+        
+        if clean_n and clean_n in PRODUCTS_BY_NUMBER:
+            found_ms = PRODUCTS_BY_NUMBER[clean_n]
+            print(f"[DETECT MS DEBUG] Tìm thấy dạng viết liền: {found_ms}")
+            return found_ms
+    
+    # THÊM: Tìm MS dạng #MSxxxxxx (từ Fchat)
+    fchat_pattern = r'#?ms(\d{2,6})'
+    fchat_match = re.search(fchat_pattern, text_norm, re.IGNORECASE)
+    
+    if fchat_match:
+        full_ms = "MS" + fchat_match.group(1).zfill(6)
         if full_ms in PRODUCTS:
-            print(f"[DETECT MS DEBUG] Tìm thấy qua biến thể viết liền: {full_ms}")
+            print(f"[DETECT MS DEBUG] Tìm thấy MS từ Fchat: {full_ms}")
             return full_ms
     
-    # 5. Tìm số có từ 1-6 chữ số (cho trường hợp "39", "039", "0039")
-    # Kiểm tra xem text có phải chỉ là số không
-    if re.match(r'^\d{1,6}$', text_norm):
-        num = text_norm.lstrip('0')
-        if num and num in PRODUCTS_BY_NUMBER:
-            found_ms = PRODUCTS_BY_NUMBER[num]
-            print(f"[DETECT MS DEBUG] Text chỉ là số: {text_norm} -> {num}: {found_ms}")
-            return found_ms
-    
-    print(f"[DETECT MS DEBUG] Không tìm thấy MS trong text: {text}")
+    print(f"[DETECT MS DEBUG] Không tìm thấy MS trong text (chỉ tìm với tiền tố): {text}")
     return None
 
 # ============================================
@@ -1265,15 +1372,15 @@ def handle_text_with_function_calling(uid: str, text: str):
     
     # ƯU TIÊN 3: Nếu vẫn không có, kiểm tra xem tin nhắn có chứa số không
     if not current_ms or current_ms not in PRODUCTS:
-        # Tìm bất kỳ số nào trong tin nhắn (1-6 chữ số)
-        numbers = re.findall(r'\b(\d{1,6})\b', text)
+        # Tìm bất kỳ số nào trong tin nhắn (1-6 chữ số) với TIỀN TỐ
+        numbers = re.findall(r'\b(?:ms|mã|sp|ma|san pham)\s*(\d{1,6})\b', text_norm, re.IGNORECASE)
         for num in numbers:
             clean_num = num.lstrip('0')
             if clean_num and clean_num in PRODUCTS_BY_NUMBER:
                 current_ms = PRODUCTS_BY_NUMBER[clean_num]
                 ctx["last_ms"] = current_ms
                 update_product_context(uid, current_ms)
-                print(f"[MS FALLBACK] Tìm thấy MS từ số trong tin nhắn: {current_ms}")
+                print(f"[MS FALLBACK] Tìm thấy MS từ tiền tố + số: {current_ms}")
                 break
     
     # ƯU TIÊN 4: Nếu vẫn không có, hỏi lại khách
@@ -1774,8 +1881,13 @@ def handle_image(uid: str, image_url: str):
     # BƯỚC 1: Kiểm tra xem có phải emoji/sticker không
     if is_emoji_or_sticker_image(image_url):
         print(f"[EMOJI DETECTED] Bỏ qua ảnh emoji/sticker: {image_url[:100]}")
-        # Gửi tin nhắn nhẹ nhàng, không tìm kiếm sản phẩm
         send_message(uid, "😊 Em đã nhận được biểu tượng cảm xúc của anh/chị! Nếu anh/chị muốn xem sản phẩm, vui lòng gửi ảnh thật của sản phẩm hoặc mã sản phẩm ạ!")
+        return
+    
+    # BƯỚC 1.5: Kiểm tra ảnh có hợp lệ không
+    if not is_valid_product_image(image_url):
+        print(f"[INVALID IMAGE] Ảnh không hợp lệ: {image_url[:100]}")
+        send_message(uid, "❌ Ảnh này không rõ hoặc không phải ảnh sản phẩm. Vui lòng gửi ảnh rõ hơn hoặc mã sản phẩm ạ!")
         return
     
     # BƯỚC 2: Thông báo đang xử lý ảnh
@@ -3486,10 +3598,10 @@ if __name__ == "__main__":
     
     print("🔴 CẢI THIỆN NHẬN DIỆN MÃ SẢN PHẨM TỪ NHIỀU ĐỊNH DẠNG:")
     print("=" * 80)
-    print(f"🔴 Hàm detect_ms_from_text mới: Nhận diện được 'Mã sản phẩm 39', 'mã 39', 'sản phẩm 39', 'ms39', 'Ms39', 'MS039', 'MS000039'")
-    print(f"🔴 Hỗ trợ nhiều pattern: 'mã số', 'mã sản phẩm', 'sp', 'sản phẩm'")
-    print(f"🔴 Xử lý số đơn lẻ: '39', '039', '0039'")
-    print(f"🔴 Xử lý viết liền: 'ms39', 'MS39', 'Ms39'")
+    print(f"🔴 Hàm detect_ms_from_text mới: Chỉ nhận diện khi có TIỀN TỐ (prefix)")
+    print(f"🔴 Hỗ trợ tất cả dạng: 'MS000039', 'mã 39', 'ms39', 'sp39', 'xem mã 39', 'tư vấn sp 39'")
+    print(f"🔴 KHÔNG lấy số đơn lẻ: '3', '39', '039' sẽ không bị nhận diện là MS")
+    print(f"🔴 Ưu tiên tiền tố: ms, mã, sp, ma, san pham, sản phẩm, mã số, mã sản phẩm")
     print(f"🔴 Thêm debug log để theo dõi quá trình detect")
     print(f"🔴 Giữ nguyên toàn bộ logic Fchat echo hiện có")
     print("=" * 80)
