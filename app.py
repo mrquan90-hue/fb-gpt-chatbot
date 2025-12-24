@@ -223,56 +223,107 @@ def is_emoji_or_sticker_image(image_url: str) -> bool:
     return False
 
 # ============================================
-# HÀM KIỂM TRA ẢNH SẢN PHẨM HỢP LỆ
+# HÀM KIỂM TRA ẢNH SẢN PHẨM HỢP LỆ (CẢI TIẾN)
 # ============================================
 
 def is_valid_product_image(image_url: str) -> bool:
     """
     Kiểm tra xem ảnh có phải là ảnh sản phẩm hợp lệ không
+    Cải tiến để chấp nhận nhiều định dạng URL hơn
     """
     if not image_url:
         return False
     
-    # Kiểm tra đuôi file ảnh hợp lệ
-    valid_extensions = ['.jpg', '.jpeg', '.png', '.webp', '.gif']
     image_url_lower = image_url.lower()
+    
+    # Kiểm tra đuôi file ảnh hợp lệ
+    valid_extensions = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.tiff']
     
     for ext in valid_extensions:
         if ext in image_url_lower:
             return True
     
-    # Kiểm tra domain ảnh phổ biến
-    valid_domains = ['fbcdn.net', 'scontent.xx', 'cdn.shopify', 'static.nike', 'lzd-img', 'shopee', 'tiki', 'content.pancake.vn']
+    # Kiểm tra domain ảnh phổ biến (bao gồm cả Facebook)
+    valid_domains = [
+        'fbcdn.net', 'scontent.xx', 'scontent.fhan', 'cdn.shopify', 
+        'static.nike', 'lzd-img', 'shopee', 'tiki', 'content.pancake.vn',
+        'instagram.com', 'cloudinary.com', 'images.unsplash.com',
+        'graph.facebook.com', 'facebook.com'
+    ]
     
     for domain in valid_domains:
         if domain in image_url_lower:
             return True
     
+    # Kiểm tra pattern URL chứa thông tin ảnh
+    image_patterns = [
+        r'\.(jpg|jpeg|png|webp|gif)(\?|$)',
+        r'/photos/',
+        r'/images/',
+        r'/img/',
+        r'/picture/',
+        r'/media/',
+        r'/upload/'
+    ]
+    
+    for pattern in image_patterns:
+        if re.search(pattern, image_url_lower):
+            return True
+    
     return False
 
 # ============================================
-# HÀM PHÂN TÍCH ẢNH BẰNG OPENAI VISION API
+# HÀM TẢI ẢNH VỀ SERVER VÀ CHUYỂN THÀNH BASE64
+# ============================================
+
+def download_image_to_base64(image_url: str) -> Optional[str]:
+    """
+    Tải ảnh từ URL và chuyển thành chuỗi base64.
+    Trả về None nếu không tải được.
+    """
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'image/webp,image/*,*/*;q=0.8',
+            'Accept-Language': 'vi,en-US;q=0.9,en;q=0.8',
+            'Referer': 'https://www.facebook.com/'
+        }
+        
+        # Thử tải với timeout ngắn
+        response = requests.get(image_url, headers=headers, timeout=5)
+        
+        if response.status_code == 200:
+            # Kiểm tra content type có phải là ảnh không
+            content_type = response.headers.get('content-type', '').lower()
+            if 'image' in content_type:
+                image_data = response.content
+                base64_str = base64.b64encode(image_data).decode('utf-8')
+                return base64_str
+            else:
+                print(f"[IMAGE DOWNLOAD] Không phải ảnh: {content_type}")
+        else:
+            print(f"[IMAGE DOWNLOAD] Lỗi HTTP: {response.status_code}")
+    except Exception as e:
+        print(f"[IMAGE DOWNLOAD] Lỗi khi tải ảnh: {e}")
+    return None
+
+# ============================================
+# HÀM PHÂN TÍCH ẢNH BẰNG OPENAI VISION API (CẢI TIẾN)
 # ============================================
 
 def analyze_image_with_vision_api(image_url: str) -> str:
     """
     Phân tích ảnh bằng OpenAI Vision API và trả về mô tả text
+    Sử dụng base64 để tránh lỗi URL không tải được
     """
     if not client:
         return ""
     
+    print(f"[VISION API] Đang phân tích ảnh: {image_url[:100]}...")
+    
     try:
-        # Xử lý URL: cắt bỏ các tham số không cần thiết để tránh lỗi 400
-        # Giữ nguyên URL gốc nhưng đảm bảo nó hợp lệ
-        clean_url = image_url.split('?')[0] if '?' in image_url else image_url
-        
-        # Kiểm tra xem URL có phải Facebook CDN không
-        if 'fbcdn.net' in clean_url:
-            # Thêm tham số cần thiết cho Facebook CDN
-            clean_url = f"{clean_url}?dl=1"
-        
-        print(f"[VISION API] Phân tích ảnh: {clean_url[:100]}...")
-        
+        # THỬ 1: Dùng URL trực tiếp (nhanh nhất)
+        print(f"[VISION API] Thử dùng URL trực tiếp...")
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
@@ -293,8 +344,8 @@ MÔ TẢ PHẢI NGẮN GỌN nhưng ĐẦY ĐỦ từ khóa quan trọng. Ưu ti
                         {
                             "type": "image_url",
                             "image_url": {
-                                "url": clean_url,
-                                "detail": "high"  # Tăng độ chi tiết
+                                "url": image_url,
+                                "detail": "auto"
                             }
                         }
                     ]
@@ -306,45 +357,180 @@ MÔ TẢ PHẢI NGẮN GỌN nhưng ĐẦY ĐỦ từ khóa quan trọng. Ưu ti
         
         return response.choices[0].message.content
     except Exception as e:
-        print(f"[VISION API ERROR] Lỗi khi phân tích ảnh: {e}")
+        print(f"[VISION API URL ERROR] Lỗi khi dùng URL: {e}")
         
-        # Thử fallback với URL gốc nếu clean_url lỗi
-        if clean_url != image_url:
+        # THỬ 2: Tải ảnh về và dùng base64
+        print(f"[VISION API] Đang tải ảnh về để chuyển base64...")
+        base64_image = download_image_to_base64(image_url)
+        
+        if base64_image:
             try:
-                print(f"[VISION API RETRY] Thử với URL gốc...")
+                print(f"[VISION API] Thử dùng base64...")
                 response = client.chat.completions.create(
                     model="gpt-4o-mini",
                     messages=[
                         {
                             "role": "user",
                             "content": [
-                                {"type": "text", "text": "Mô tả ngắn gọn sản phẩm trong ảnh này."},
+                                {"type": "text", "text": """Mô tả chi tiết sản phẩm trong ảnh, tập trung vào loại sản phẩm, màu sắc, chất liệu, họa tiết và phong cách."""},
                                 {
                                     "type": "image_url",
                                     "image_url": {
-                                        "url": image_url,
-                                        "detail": "low"
+                                        "url": f"data:image/jpeg;base64,{base64_image}"
                                     }
                                 }
                             ]
                         }
                     ],
-                    max_tokens=200,
+                    max_tokens=400,
                     temperature=0.1
                 )
                 return response.choices[0].message.content
             except Exception as e2:
-                print(f"[VISION API RETRY ERROR] Lỗi retry: {e2}")
+                print(f"[VISION API BASE64 ERROR] Lỗi khi dùng base64: {e2}")
         
-        return ""
+        # THỬ 3: Dùng URL đơn giản hóa
+        try:
+            print(f"[VISION API] Thử dùng URL đơn giản hóa...")
+            # Lấy phần base URL không có tham số phức tạp
+            simple_url = image_url.split('?')[0]
+            if 'fbcdn.net' in simple_url:
+                simple_url = simple_url + '?dl=1'
+            
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Mô tả ngắn sản phẩm trong ảnh."},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": simple_url,
+                                    "detail": "low"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                max_tokens=300,
+                temperature=0.1
+            )
+            return response.choices[0].message.content
+        except Exception as e3:
+            print(f"[VISION API SIMPLE URL ERROR] Lỗi cuối cùng: {e3}")
+    
+    return ""
 
 # ============================================
-# HÀM TÌM SẢN PHẨM BẰNG MÔ TẢ ẢNH (CẢI TIẾN)
+# HÀM TRÍCH XUẤT TỪ KHÓA TỪ MÔ TẢ
 # ============================================
 
-def find_product_by_image_description(description: str) -> Optional[str]:
+def extract_keywords_from_description(description: str) -> set:
+    """Trích xuất từ khóa quan trọng từ mô tả"""
+    stop_words = {'của', 'và', 'là', 'có', 'trong', 'với', 'cho', 'từ', 'này', 'ảnh', 
+                  'sản phẩm', 'phẩm', 'chụp', 'nhìn', 'thấy', 'rất', 'một', 'như', 
+                  'bởi', 'các', 'được', 'nên', 'khi', 'hoặc', 'nếu', 'thì', 'mà'}
+    
+    # Từ khóa quan trọng trong thời trang
+    fashion_keywords = {
+        'áo', 'quần', 'váy', 'đầm', 'áo thun', 'áo sơ mi', 'jeans', 'khoác', 
+        'hoodie', 'sweater', 'jacket', 'blazer', 'cardigan', 'polo', 'tank top',
+        'shorts', 'skirt', 'jumpsuit', 'romper', 'leggings', 'jogger'
+    }
+    
+    keywords = set()
+    words = description.split()
+    
+    for word in words:
+        word = word.strip('.,!?;:()[]{}"\'').lower()
+        if len(word) > 2 and word not in stop_words:
+            keywords.add(word)
+    
+    # Thêm các từ khóa ghép (2-3 từ)
+    for i in range(len(words) - 1):
+        bigram = f"{words[i]} {words[i+1]}"
+        if any(keyword in bigram for keyword in fashion_keywords):
+            keywords.add(bigram)
+    
+    return keywords
+
+# ============================================
+# HÀM TÍNH ĐIỂM TƯƠNG ĐỒNG SẢN PHẨM
+# ============================================
+
+def calculate_product_similarity_score(ms: str, product: dict, desc_lower: str, desc_keywords: set) -> float:
+    """Tính điểm tương đồng giữa sản phẩm và mô tả ảnh"""
+    score = 0
+    
+    # Lấy thông tin sản phẩm
+    ten = normalize_vietnamese(product.get("Ten", "").lower())
+    mo_ta = normalize_vietnamese(product.get("MoTa", "").lower())
+    mau_sac = normalize_vietnamese(product.get("màu (Thuộc tính)", "").lower())
+    thuoc_tinh = normalize_vietnamese(product.get("Thuộc tính", "").lower())
+    
+    # Tạo bộ từ khóa sản phẩm
+    product_keywords = set()
+    
+    # Thêm từ khóa từ tên sản phẩm
+    for word in ten.split():
+        if len(word) > 1:
+            product_keywords.add(word)
+    
+    # Thêm từ khóa từ mô tả
+    for word in mo_ta.split()[:50]:
+        word = word.strip('.,!?;:()[]{}"\'').lower()
+        if len(word) > 1:
+            product_keywords.add(word)
+    
+    # Thêm màu sắc
+    if mau_sac:
+        for color in mau_sac.split(','):
+            color_clean = color.strip().lower()
+            if color_clean:
+                product_keywords.add(color_clean)
+    
+    # Thêm thuộc tính
+    if thuoc_tinh:
+        for attr in thuoc_tinh.split(','):
+            attr_clean = attr.strip().lower()
+            if attr_clean:
+                product_keywords.add(attr_clean)
+    
+    # Tính điểm: từ khóa trùng nhau
+    common_keywords = desc_keywords.intersection(product_keywords)
+    score += len(common_keywords) * 3  # Trọng số cao cho từ khóa trùng
+    
+    # Ưu tiên các từ khóa quan trọng (loại sản phẩm)
+    fashion_keywords = {'áo', 'quần', 'váy', 'đầm', 'áo thun', 'áo sơ mi', 'jeans', 
+                       'khoác', 'hoodie', 'sweater', 'jacket', 'blazer'}
+    
+    for keyword in fashion_keywords:
+        if keyword in desc_lower and keyword in ten.lower():
+            score += 8  # Trọng số rất cao cho loại sản phẩm trùng
+    
+    # Ưu tiên màu sắc trùng khớp
+    if mau_sac:
+        for color in mau_sac.split(','):
+            color_clean = color.strip().lower()
+            if color_clean in desc_lower:
+                score += 5  # Trọng số cao cho màu sắc trùng
+    
+    # Kiểm tra xem tên sản phẩm có trong mô tả ảnh không
+    for word in ten.split():
+        if len(word) > 3 and word in desc_lower:
+            score += 4
+    
+    return score
+
+# ============================================
+# HÀM TÌM SẢN PHẨM BẰNG MÔ TẢ ẢNH (CẢI TIẾN NÂNG CAO)
+# ============================================
+
+def find_product_by_image_description_enhanced(description: str) -> Optional[str]:
     """
-    Tìm sản phẩm phù hợp nhất dựa trên mô tả ảnh - CẢI TIẾN với từ khóa quan trọng
+    Tìm sản phẩm phù hợp nhất dựa trên mô tả ảnh - CẢI TIẾN NÂNG CAO
     """
     load_products()
     
@@ -353,74 +539,16 @@ def find_product_by_image_description(description: str) -> Optional[str]:
     
     # Chuẩn hóa mô tả ảnh
     desc_lower = normalize_vietnamese(description.lower())
-    print(f"[IMAGE MATCH] Mô tả ảnh: {desc_lower[:200]}...")
+    print(f"[IMAGE MATCH ENHANCED] Mô tả ảnh: {desc_lower[:200]}...")
     
     # Tạo danh sách từ khóa quan trọng từ mô tả ảnh
-    desc_keywords = set()
-    
-    # Thêm từ khóa từ mô tả (loại bỏ từ dừng)
-    stop_words = {'của', 'và', 'là', 'có', 'trong', 'với', 'cho', 'từ', 'này', 'ảnh', 'sản phẩm', 'phẩm', 'chụp', 'nhìn', 'thấy', 'rất', 'một', 'như', 'bởi', 'các', 'được', 'nên', 'khi', 'hoặc', 'nếu', 'thì', 'mà'}
-    
-    words = desc_lower.split()
-    for word in words:
-        if len(word) > 2 and word not in stop_words:
-            desc_keywords.add(word)
+    desc_keywords = extract_keywords_from_description(desc_lower)
     
     # Tìm kiếm sản phẩm với điểm số cải tiến
     product_scores = {}
     
     for ms, product in PRODUCTS.items():
-        score = 0
-        
-        # Lấy thông tin sản phẩm
-        ten = normalize_vietnamese(product.get("Ten", "").lower())
-        mo_ta = normalize_vietnamese(product.get("MoTa", "").lower())
-        mau_sac = normalize_vietnamese(product.get("màu (Thuộc tính)", "").lower())
-        thuoc_tinh = normalize_vietnamese(product.get("Thuộc tính", "").lower())
-        
-        # Tạo bộ từ khóa sản phẩm
-        product_keywords = set()
-        
-        # Thêm từ khóa từ tên sản phẩm
-        for word in ten.split():
-            if len(word) > 2:
-                product_keywords.add(word)
-        
-        # Thêm từ khóa từ mô tả
-        for word in mo_ta.split()[:30]:
-            if len(word) > 2:
-                product_keywords.add(word)
-        
-        # Thêm màu sắc
-        if mau_sac:
-            for color in mau_sac.split(','):
-                color_clean = color.strip().lower()
-                if color_clean:
-                    product_keywords.add(color_clean)
-        
-        # Thêm thuộc tính
-        if thuoc_tinh:
-            for attr in thuoc_tinh.split(','):
-                attr_clean = attr.strip().lower()
-                if attr_clean:
-                    product_keywords.add(attr_clean)
-        
-        # Tính điểm: từ khóa trùng nhau
-        common_keywords = desc_keywords.intersection(product_keywords)
-        score = len(common_keywords) * 2  # Trọng số cao hơn
-        
-        # Ưu tiên các từ khóa quan trọng
-        important_keywords = {'áo', 'quần', 'váy', 'đầm', 'áo thun', 'áo sơ mi', 'jeans', 'khoác', 'hoodie', 'sweater'}
-        for keyword in important_keywords:
-            if keyword in desc_lower and keyword in ten.lower():
-                score += 5
-        
-        # Ưu tiên màu sắc trùng khớp
-        if mau_sac:
-            for color in mau_sac.split(','):
-                color_clean = color.strip().lower()
-                if color_clean in desc_lower:
-                    score += 3
+        score = calculate_product_similarity_score(ms, product, desc_lower, desc_keywords)
         
         if score > 0:
             product_scores[ms] = score
@@ -437,8 +565,8 @@ def find_product_by_image_description(description: str) -> Optional[str]:
     
     print(f"[IMAGE MATCH SCORES] Điểm cao nhất: {best_ms} với {best_score} điểm")
     
-    # Ngưỡng tối thiểu: cần ít nhất 4 điểm để coi là phù hợp
-    if best_score >= 4:
+    # Ngưỡng tối thiểu: cần ít nhất 5 điểm để coi là phù hợp
+    if best_score >= 5:
         product_name = PRODUCTS[best_ms].get("Ten", "")
         print(f"[IMAGE MATCH SUCCESS] Tìm thấy {best_ms} - {product_name}")
         return best_ms
@@ -447,7 +575,74 @@ def find_product_by_image_description(description: str) -> Optional[str]:
     return None
 
 # ============================================
-# HÀM TÌM SẢN PHẨM TỪ ẢNH
+# HÀM GỬI CAROUSEL GỢI Ý SẢN PHẨM
+# ============================================
+
+def send_suggestion_carousel(uid: str, suggestion_count: int = 3):
+    """
+    Gửi carousel gợi ý các sản phẩm phổ biến
+    """
+    load_products()
+    
+    if not PRODUCTS:
+        send_message(uid, "Hiện tại chưa có sản phẩm nào trong hệ thống.")
+        return False
+    
+    # Lấy danh sách sản phẩm (ưu tiên sản phẩm có ảnh)
+    valid_products = []
+    for ms, product in PRODUCTS.items():
+        images_field = product.get("Images", "")
+        urls = parse_image_urls(images_field)
+        if urls:  # Chỉ lấy sản phẩm có ảnh
+            valid_products.append(ms)
+    
+    # Nếu không đủ sản phẩm có ảnh, lấy tất cả
+    if len(valid_products) < suggestion_count:
+        valid_products = list(PRODUCTS.keys())
+    
+    # Lấy ngẫu nhiên hoặc lấy sản phẩm đầu tiên
+    suggestion_products = valid_products[:suggestion_count]
+    
+    elements = []
+    for ms in suggestion_products:
+        product = PRODUCTS[ms]
+        images_field = product.get("Images", "")
+        urls = parse_image_urls(images_field)
+        image_url = urls[0] if urls else ""
+        
+        gia_int = extract_price_int(product.get("Gia", "")) or 0
+        
+        element = {
+            "title": f"[{ms}] {product.get('Ten', '')}",
+            "image_url": image_url,
+            "subtitle": f"💰 Giá: {gia_int:,.0f} đ",
+            "buttons": [
+                {
+                    "type": "postback",
+                    "title": "🌟 Ưu điểm SP",
+                    "payload": f"PRODUCT_HIGHLIGHTS_{ms}"
+                },
+                {
+                    "type": "postback", 
+                    "title": "🖼️ Xem ảnh",
+                    "payload": f"VIEW_IMAGES_{ms}"
+                },
+                {
+                    "type": "web_url",
+                    "url": f"{DOMAIN}/order-form?ms={ms}&uid={uid}",
+                    "title": "🛒 Đặt ngay"
+                }
+            ]
+        }
+        elements.append(element)
+    
+    if elements:
+        send_carousel_template(uid, elements)
+        return True
+    return False
+
+# ============================================
+# HÀM TÌM SẢN PHẨM TỪ ẢNH (CẢI TIẾN MỚI)
 # ============================================
 
 def find_product_by_image(image_url: str) -> Optional[str]:
@@ -477,7 +672,7 @@ def find_product_by_image(image_url: str) -> Optional[str]:
     print(f"[IMAGE DESCRIPTION] {image_description[:300]}...")
     
     # Bước 3: Tìm sản phẩm phù hợp với mô tả
-    found_ms = find_product_by_image_description(image_description)
+    found_ms = find_product_by_image_description_enhanced(image_description)
     
     if found_ms:
         print(f"[IMAGE MATCH] Tìm thấy sản phẩm {found_ms} từ ảnh")
@@ -1863,11 +2058,11 @@ def handle_text(uid: str, text: str):
         ctx["processing_lock"] = False
 
 # ============================================
-# HANDLE IMAGE - CẢI TIẾN MỚI VỚI OPENAI VISION API
+# HANDLE IMAGE - CẢI TIẾN VỚI CAROUSEL GỢI Ý
 # ============================================
 
 def handle_image(uid: str, image_url: str):
-    """Xử lý ảnh sản phẩm với công nghệ AI thông minh"""
+    """Xử lý ảnh sản phẩm với công nghệ AI thông minh và carousel gợi ý"""
     ctx = USER_CONTEXT[uid]
     
     now = time.time()
@@ -1911,7 +2106,7 @@ def handle_image(uid: str, image_url: str):
         product_name = PRODUCTS[found_ms].get("Ten", "")
         send_message(uid, f"✅ Em đã tìm thấy sản phẩm phù hợp với ảnh!\n\n📦 **[{found_ms}] {product_name}**")
         
-        # Gửi carousel sản phẩm
+        # Gửi carousel sản phẩm đã tìm thấy
         send_single_product_carousel(uid, found_ms)
         
         # Gửi quick reply để hỏi thêm thông tin
@@ -1938,16 +2133,23 @@ def handle_image(uid: str, image_url: str):
     else:
         print(f"[IMAGE PRODUCT NOT FOUND] Không tìm thấy sản phẩm từ ảnh")
         
-        # Gửi yêu cầu mã sản phẩm
+        # Gửi thông báo không tìm thấy
         send_message(uid, "❌ Em chưa tìm thấy sản phẩm phù hợp với ảnh này. Có thể anh/chị chụp ảnh chưa rõ hoặc sản phẩm chưa có trong hệ thống.")
         
-        # Gợi ý một số sản phẩm phổ biến
-        popular_products = list(PRODUCTS.keys())[:3]
-        if popular_products:
-            send_message(uid, "Dưới đây là một số sản phẩm gợi ý:")
-            for ms in popular_products:
-                product = PRODUCTS[ms]
-                send_message(uid, f"📦 [{ms}] {product.get('Ten', '')}")
+        # Gợi ý một số sản phẩm bằng CAROUSEL thay vì text
+        send_message(uid, "Dưới đây là một số sản phẩm gợi ý cho anh/chị ạ:")
+        
+        # Gửi carousel gợi ý 3 sản phẩm
+        carousel_sent = send_suggestion_carousel(uid, 3)
+        
+        # Nếu không gửi được carousel, gửi text backup
+        if not carousel_sent:
+            # Gợi ý một số sản phẩm phổ biến
+            popular_products = list(PRODUCTS.keys())[:3]
+            if popular_products:
+                for ms in popular_products:
+                    product = PRODUCTS[ms]
+                    send_message(uid, f"📦 [{ms}] {product.get('Ten', '')}")
         
         send_message(uid, "Vui lòng gửi mã sản phẩm chính xác (ví dụ: MS000004) để em tư vấn chi tiết ạ!")
 
@@ -3514,9 +3716,10 @@ def health_check():
         },
         "image_processing": {
             "enabled": True,
-            "technology": "OpenAI Vision API",
+            "technology": "OpenAI Vision API (3 phương pháp fallback: URL trực tiếp, base64, URL đơn giản)",
             "emoji_detection": True,
-            "product_matching": "Text-based similarity matching"
+            "product_matching": "Text-based similarity matching nâng cao với trọng số",
+            "suggestion_carousel": "Carousel 3 sản phẩm gợi ý khi không tìm thấy từ ảnh"
         },
         "features": {
             "carousel_first_message": True,
@@ -3569,13 +3772,15 @@ if __name__ == "__main__":
     print(f"🔴 Postback Idempotency: Mỗi postback chỉ xử lý 1 lần")
     print("=" * 80)
     
-    print("🟢 CẢI TIẾN MỚI: XỬ LÝ ẢNH SẢN PHẨM THÔNG MINH")
+    print("🟢 CẢI TIẾN MỚI: XỬ LÝ ẢNH SẢN PHẨM THÔNG MINH VỚI CAROUSEL GỢI Ý")
     print("=" * 80)
+    print(f"🟢 Vision API cải tiến: 3 phương pháp fallback (URL trực tiếp, base64, URL đơn giản)")
     print(f"🟢 Phát hiện emoji/sticker: Loại bỏ ảnh emoji/sticker (dựa trên URL pattern)")
-    print(f"🟢 OpenAI Vision API: Phân tích ảnh sản phẩm để lấy mô tả chi tiết")
-    print(f"🟢 Text matching: So khớp mô tả ảnh với tên/mô tả sản phẩm trong database")
-    print(f"🟢 Thông minh: Tự động tìm sản phẩm phù hợp nhất với ảnh khách gửi")
-    print(f"🟢 Fallback: Nếu không tìm thấy, yêu cầu mã sản phẩm và gợi ý sản phẩm phổ biến")
+    print(f"🟢 Kiểm tra ảnh hợp lệ: Mở rộng domain và pattern chấp nhận")
+    print(f"🟢 Matching nâng cao: Trích xuất từ khóa thông minh, tính điểm tương đồng với trọng số hợp lý")
+    print(f"🟢 Carousel gợi ý: Gửi carousel 3 sản phẩm khi không tìm thấy từ ảnh")
+    print(f"🟢 Xử lý lỗi: Tải ảnh về server khi Facebook CDN lỗi")
+    print(f"🟢 Context cập nhật: Reset counter để áp dụng first message rule khi tìm thấy sản phẩm từ ảnh")
     print("=" * 80)
     
     print("🔴 FORM ĐẶT HÀNG CẢI TIẾN:")
@@ -3598,7 +3803,7 @@ if __name__ == "__main__":
     
     print("🔴 CẢI THIỆN NHẬN DIỆN MÃ SẢN PHẨM TỪ NHIỀU ĐỊNH DẠNG:")
     print("=" * 80)
-    print(f"🔴 Hàm detect_ms_from_text mới: Chỉ nhận diện khi có TIỀN TỐ (prefix)")
+    print(f"🔴 Hàm detect_ms_from_text: Chỉ nhận diện khi có TIỀN TỐ (prefix)")
     print(f"🔴 Hỗ trợ tất cả dạng: 'MS000039', 'mã 39', 'ms39', 'sp39', 'xem mã 39', 'tư vấn sp 39'")
     print(f"🔴 KHÔNG lấy số đơn lẻ: '3', '39', '039' sẽ không bị nhận diện là MS")
     print(f"🔴 Ưu tiên tiền tố: ms, mã, sp, ma, san pham, sản phẩm, mã số, mã sản phẩm")
