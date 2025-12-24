@@ -462,12 +462,37 @@ def parse_image_urls(raw: str):
 def extract_price_int(price_str: str):
     if not price_str:
         return None
-    m = re.search(r"(\d[\d.,]*)", str(price_str))
-    if not m:
+    
+    # Loại bỏ ký tự không phải số, dấu chấm, dấu phẩy
+    cleaned = re.sub(r'[^\d.,]', '', str(price_str))
+    
+    if not cleaned:
         return None
-    cleaned = m.group(1).replace(".", "").replace(",", "")
+    
+    # Xử lý các định dạng giá phổ biến
+    # 1. Định dạng Việt Nam: 1.000.000
+    if cleaned.count('.') > 1 and cleaned.count(',') <= 1:
+        # Giả sử dấu chấm là phân cách nghìn, dấu phẩy là thập phân
+        cleaned = cleaned.replace('.', '')
+        if ',' in cleaned:
+            cleaned = cleaned.replace(',', '.')
+    
+    # 2. Định dạng quốc tế: 1,000,000.00
+    elif cleaned.count(',') > 1 and cleaned.count('.') <= 1:
+        # Giả sử dấu phẩy là phân cách nghìn, dấu chấm là thập phân
+        cleaned = cleaned.replace(',', '')
+    
+    # 3. Định dạng hỗn hợp
+    else:
+        # Giữ lại số cuối cùng trước dấu phẩy hoặc chấm
+        cleaned = cleaned.replace(',', '').replace('.', '')
+    
     try:
-        return int(cleaned)
+        # Lấy phần nguyên nếu có dấu thập phân
+        if '.' in cleaned:
+            cleaned = cleaned.split('.')[0]
+        
+        return int(float(cleaned)) if cleaned else None
     except Exception:
         return None
 
@@ -2608,6 +2633,7 @@ def order_form():
                     color: document.getElementById('color').value,
                     size: document.getElementById('size').value,
                     quantity: parseInt(document.getElementById('quantity').value || '1'),
+                    unitPrice: BASE_PRICE,  // Thêm giá đơn vị để tính toán chính xác
                     customerName: document.getElementById('customerName').value.trim(),
                     phone: document.getElementById('phone').value.trim(),
                     // Địa chỉ mới
@@ -2707,13 +2733,16 @@ def order_form():
                     
                     if (response.ok) {{
                         // Hiển thị thông báo thành công với chi tiết
+                        const total = BASE_PRICE * formData.quantity;
                         const successMessage = `🎉 ĐÃ ĐẶT HÀNG THÀNH CÔNG!
 
 📦 Mã sản phẩm: ${{PRODUCT_MS}}
 👤 Khách hàng: ${{formData.customerName}}
 📱 SĐT: ${{formData.phone}}
 📍 Địa chỉ: ${{formData.fullAddress}}
-💰 Tổng tiền: ${{(BASE_PRICE * formData.quantity).toLocaleString('vi-VN')}} đ
+💰 Đơn giá: ${{BASE_PRICE.toLocaleString('vi-VN')}} đ
+📦 Số lượng: ${{formData.quantity}}
+💰 Tổng tiền: ${{total.toLocaleString('vi-VN')}} đ
 
 ⏰ Shop sẽ liên hệ xác nhận trong 5-10 phút.
 🚚 Giao hàng bởi ViettelPost (COD)
@@ -2840,16 +2869,15 @@ def api_submit_order():
     customer_name = data.get("customerName") or ""
     phone = data.get("phone") or ""
     
+    # Debug log
+    print(f"[ORDER DEBUG] MS: {ms}, Color: {color}, Size: {size}")
+    
     # Địa chỉ mới
     address_detail = data.get("addressDetail") or ""
     province_name = data.get("provinceName") or ""
     district_name = data.get("districtName") or ""
     ward_name = data.get("wardName") or ""
     full_address = data.get("fullAddress") or ""
-    
-    # Nếu không có full_address, ghép từ các thành phần
-    if not full_address and address_detail:
-        full_address = f"{address_detail}, {ward_name}, {district_name}, {province_name}"
     
     # Kiểm tra dữ liệu bắt buộc
     if not all([ms, customer_name, phone, full_address]):
@@ -2860,11 +2888,49 @@ def api_submit_order():
     if not row:
         return {"error": "not_found", "message": "Sản phẩm không tồn tại"}, 404
 
-    price_str = row.get("Gia", "0")
-    price_int = extract_price_int(price_str) or 0
-    total = price_int * quantity
+    # QUAN TRỌNG: Tìm giá đúng của biến thể (màu + size)
+    unit_price = 0
+    variant_found = False
+    
+    # Debug: Log các biến thể có sẵn
+    print(f"[ORDER DEBUG] Tìm biến thể với màu='{color}', size='{size}'")
+    
+    # Tìm biến thể phù hợp trong danh sách variants
+    for idx, variant in enumerate(row.get("variants", [])):
+        variant_color = variant.get("mau", "").strip().lower()
+        variant_size = variant.get("size", "").strip().lower()
+        
+        input_color = color.strip().lower()
+        input_size = size.strip().lower()
+        
+        # So khớp màu và size
+        color_match = (not input_color) or (variant_color == input_color) or (input_color == "mặc định" and not variant_color)
+        size_match = (not input_size) or (variant_size == input_size) or (input_size == "mặc định" and not variant_size)
+        
+        if color_match and size_match:
+            variant_found = True
+            # Ưu tiên lấy giá số (gia) trước, nếu không có thì lấy giá dạng chuỗi (gia_raw)
+            if variant.get("gia"):
+                unit_price = variant.get("gia", 0)
+            else:
+                # Nếu không có gia dạng số, thử chuyển đổi từ gia_raw
+                gia_raw = variant.get("gia_raw", "")
+                if gia_raw:
+                    unit_price = extract_price_int(gia_raw) or 0
+            print(f"[ORDER DEBUG] Biến thể {idx} phù hợp: màu='{variant_color}', size='{variant_size}', giá={unit_price}")
+            break
+    
+    # Nếu không tìm thấy biến thể phù hợp, lấy giá chung của sản phẩm
+    if not variant_found or unit_price == 0:
+        price_str = row.get("Gia", "0")
+        unit_price = extract_price_int(price_str) or 0
+        print(f"[ORDER DEBUG] Không tìm thấy biến thể phù hợp, sử dụng giá chung: {unit_price}")
+    
+    total = unit_price * quantity
     
     product_name = row.get('Ten', '')
+    
+    print(f"[ORDER DEBUG] Biến thể tìm thấy: {variant_found}, Đơn giá: {unit_price}, Tổng tiền: {total}")
 
     # Gửi tin nhắn xác nhận cho khách hàng nếu có uid hợp lệ
     if uid and len(uid) > 5:  # UID Facebook thường dài
@@ -2872,10 +2938,12 @@ def api_submit_order():
             ctx = USER_CONTEXT.get(uid, {})
             referral_source = ctx.get("referral_source", "direct")
             
+            # Tin nhắn với giá đúng của biến thể
             msg = (
                 "🎉 Shop đã nhận được đơn hàng mới:\n"
                 f"🛍 Sản phẩm: [{ms}] {product_name}\n"
                 f"🎨 Phân loại: {color} / {size}\n"
+                f"💰 Đơn giá: {unit_price:,.0f} đ\n"
                 f"📦 Số lượng: {quantity}\n"
                 f"💰 Thành tiền: {total:,.0f} đ\n"
                 f"👤 Người nhận: {customer_name}\n"
@@ -2909,9 +2977,10 @@ def api_submit_order():
         "district": district_name,
         "ward": ward_name,
         "product_name": product_name,
-        "unit_price": price_int,
+        "unit_price": unit_price,  # Lưu giá của biến thể
         "total_price": total,
-        "referral_source": ctx.get("referral_source", "direct") if uid else "direct"
+        "referral_source": ctx.get("referral_source", "direct") if uid else "direct",
+        "variant_found": variant_found  # Đánh dấu đã tìm thấy biến thể
     }
     
     # Ghi vào Google Sheets
@@ -2932,7 +3001,7 @@ def api_submit_order():
         try:
             fchat_payload = {
                 "token": FCHAT_TOKEN,
-                "message": f"🛒 ĐƠN HÀNG MỚI\nMã: {ms}\nKH: {customer_name}\nSĐT: {phone}\nTổng: {total:,.0f}đ",
+                "message": f"🛒 ĐƠN HÀNG MỚI\nMã: {ms}\nKH: {customer_name}\nSĐT: {phone}\nĐơn giá: {unit_price:,.0f}đ\nSố lượng: {quantity}\nTổng: {total:,.0f}đ",
                 "metadata": {
                     "order_data": order_data,
                     "timestamp": datetime.now().isoformat()
@@ -2951,10 +3020,13 @@ def api_submit_order():
             "order_id": f"ORD{int(time.time())}_{uid[-4:] if uid else '0000'}",
             "product_code": ms,
             "product_name": product_name,
+            "variant": f"{color} / {size}",
+            "unit_price": unit_price,
+            "quantity": quantity,
+            "total": total,
             "customer_name": customer_name,
             "phone": phone,
             "address": full_address,
-            "total": total,
             "timestamp": datetime.now().isoformat()
         }
     }
@@ -3057,6 +3129,14 @@ if __name__ == "__main__":
     print(f"🔴 Fallback khi API địa chỉ lỗi")
     print(f"🔴 FIX: Sửa lỗi validate số điện thoại - chấp nhận 0982155980, +84982155980")
     print(f"🔴 FIX: Thêm xử lý chuẩn hóa số điện thoại tự động")
+    print("=" * 80)
+    
+    print("🔴 FIX THÀNH TIỀN TRONG TIN NHẮN PHẢN HỒI:")
+    print("=" * 80)
+    print(f"🔴 Tìm giá đúng của biến thể (màu + size) trong hàm api_submit_order")
+    print(f"🔴 Cập nhật tin nhắn phản hồi: hiển thị cả đơn giá và thành tiền tính đúng")
+    print(f"🔴 Cải thiện hàm extract_price_int để xử lý nhiều định dạng giá")
+    print(f"🔴 Thêm debug log để kiểm tra khi có vấn đề")
     print("=" * 80)
     
     load_products()
