@@ -173,6 +173,210 @@ def get_fanpage_name_from_api():
         return FANPAGE_NAME_CACHE
 
 # ============================================
+# HÀM PHÁT HIỆN EMOJI/STICKER
+# ============================================
+
+def is_emoji_or_sticker_image(image_url: str) -> bool:
+    """
+    Phát hiện ảnh emoji/sticker dựa trên URL
+    """
+    if not image_url:
+        return True
+    
+    image_url_lower = image_url.lower()
+    
+    # Kiểm tra từ khóa đặc trưng của emoji/sticker Facebook
+    emoji_keywords = [
+        'emoji', 'sticker', 'stickers', 'stickerpack',
+        'facebook.com/images/stickers/',
+        'fbcdn.net/images/emoji.php',
+        'graph.facebook.com/sticker',
+        'scontent.xx.fbcdn.net/v/t39.1997-6/',  # Đường dẫn sticker Facebook
+        'cdn.jsdelivr.net/emojione/assets',  # Emojione
+        'twemoji.maxcdn.com',  # Twemoji
+        'noto-website-2.storage.googleapis.com',  # Noto Emoji
+    ]
+    
+    for keyword in emoji_keywords:
+        if keyword in image_url_lower:
+            return True
+    
+    # Kiểm tra đuôi file - emoji thường là SVG hoặc định dạng đặc biệt
+    emoji_extensions = ['.svg', '.svgs', '.svgz', '.gif', '.apng', '.webp']
+    
+    for ext in emoji_extensions:
+        if image_url_lower.endswith(ext):
+            return True
+    
+    # Kiểm tra pattern URL đặc biệt
+    emoji_patterns = [
+        r'emoji_\d+\.(png|jpg|gif)',
+        r'sticker_\d+\.(png|jpg|gif)',
+        r'emoji/[\w\-]+\.(png|jpg|gif)',
+        r'stickers/[\w\-]+\.(png|jpg|gif)',
+    ]
+    
+    for pattern in emoji_patterns:
+        if re.search(pattern, image_url_lower):
+            return True
+    
+    return False
+
+# ============================================
+# HÀM PHÂN TÍCH ẢNH BẰNG OPENAI VISION API
+# ============================================
+
+def analyze_image_with_vision_api(image_url: str) -> str:
+    """
+    Phân tích ảnh bằng OpenAI Vision API và trả về mô tả text
+    """
+    if not client:
+        return ""
+    
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": """Hãy mô tả chi tiết sản phẩm trong ảnh này theo các tiêu chí:
+                        1. Loại sản phẩm (váy, áo, quần, v.v.)
+                        2. Màu sắc chính
+                        3. Chất liệu (nếu có thể nhận biết)
+                        4. Họa tiết, hoa văn
+                        5. Kiểu dáng, thiết kế
+                        6. Đặc điểm nổi bật
+                        
+                        Mô tả ngắn gọn, tập trung vào từ khóa quan trọng."""},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": image_url,
+                                "detail": "low"
+                            }
+                        }
+                    ]
+                }
+            ],
+            max_tokens=300,
+            temperature=0.1
+        )
+        
+        return response.choices[0].message.content
+    except Exception as e:
+        print(f"[VISION API ERROR] Lỗi khi phân tích ảnh: {e}")
+        return ""
+
+# ============================================
+# HÀM TÌM SẢN PHẨM BẰNG MÔ TẢ ẢNH
+# ============================================
+
+def find_product_by_image_description(description: str) -> Optional[str]:
+    """
+    Tìm sản phẩm phù hợp nhất dựa trên mô tả ảnh
+    """
+    load_products()
+    
+    if not description or not PRODUCTS:
+        return None
+    
+    # Chuẩn hóa mô tả
+    desc_lower = normalize_vietnamese(description.lower())
+    
+    # Tìm kiếm đơn giản dựa trên từ khóa
+    product_scores = {}
+    
+    for ms, product in PRODUCTS.items():
+        score = 0
+        
+        # Lấy thông tin sản phẩm
+        ten = normalize_vietnamese(product.get("Ten", "").lower())
+        mo_ta = normalize_vietnamese(product.get("MoTa", "").lower())
+        mau_sac = normalize_vietnamese(product.get("màu (Thuộc tính)", "").lower())
+        
+        # Tính điểm dựa trên từ khóa trùng khớp
+        keywords = []
+        
+        # Từ khóa từ tên sản phẩm
+        keywords.extend(ten.split())
+        
+        # Từ khóa từ mô tả (lấy 20 từ đầu)
+        keywords.extend(mo_ta.split()[:20])
+        
+        # Từ khóa màu sắc
+        if mau_sac:
+            keywords.extend(mau_sac.split(','))
+        
+        # Loại bỏ từ trùng và từ quá ngắn
+        keywords = [k.strip() for k in keywords if len(k.strip()) > 2]
+        keywords = list(set(keywords))
+        
+        # Tính điểm cho mỗi từ khóa xuất hiện trong mô tả ảnh
+        for keyword in keywords:
+            if keyword in desc_lower:
+                score += 1
+        
+        # Thêm điểm cho độ dài từ khóa (từ dài có trọng số cao hơn)
+        for keyword in keywords:
+            if len(keyword) > 4 and keyword in desc_lower:
+                score += 2
+        
+        if score > 0:
+            product_scores[ms] = score
+    
+    if not product_scores:
+        return None
+    
+    # Sắp xếp theo điểm cao nhất
+    sorted_products = sorted(product_scores.items(), key=lambda x: x[1], reverse=True)
+    
+    # Lấy sản phẩm có điểm cao nhất
+    best_ms, best_score = sorted_products[0]
+    
+    # Ngưỡng tối thiểu: cần ít nhất 3 điểm để coi là phù hợp
+    if best_score >= 3:
+        print(f"[IMAGE TEXT MATCH] Tìm thấy {best_ms} với điểm {best_score}")
+        return best_ms
+    
+    return None
+
+# ============================================
+# HÀM TÌM SẢN PHẨM TỪ ẢNH
+# ============================================
+
+def find_product_by_image(image_url: str) -> Optional[str]:
+    """
+    Tìm sản phẩm từ ảnh bằng cách sử dụng Vision API để lấy mô tả,
+    sau đó so khớp mô tả với tên và mô tả sản phẩm trong database.
+    Trả về mã sản phẩm (MS) nếu tìm thấy, ngược lại trả về None.
+    """
+    # Bước 1: Kiểm tra xem có phải emoji/sticker không
+    if is_emoji_or_sticker_image(image_url):
+        print(f"[IMAGE CHECK] Đây là emoji/sticker, bỏ qua")
+        return None
+    
+    # Bước 2: Phân tích ảnh để lấy mô tả
+    print(f"[IMAGE PROCESS] Đang phân tích ảnh bằng Vision API...")
+    image_description = analyze_image_with_vision_api(image_url)
+    
+    if not image_description:
+        print(f"[IMAGE PROCESS] Không thể phân tích ảnh")
+        return None
+    
+    print(f"[IMAGE DESCRIPTION] {image_description}")
+    
+    # Bước 3: Tìm sản phẩm phù hợp với mô tả
+    found_ms = find_product_by_image_description(image_description)
+    
+    if found_ms:
+        print(f"[IMAGE MATCH] Tìm thấy sản phẩm {found_ms} từ ảnh")
+        return found_ms
+    
+    print(f"[IMAGE MATCH] Không tìm thấy sản phẩm phù hợp")
+    return None
+
+# ============================================
 # HELPER: TRÍCH XUẤT MÃ SẢN PHẨM
 # ============================================
 
@@ -1552,11 +1756,11 @@ def handle_text(uid: str, text: str):
         ctx["processing_lock"] = False
 
 # ============================================
-# HANDLE IMAGE
+# HANDLE IMAGE - CẢI TIẾN MỚI VỚI OPENAI VISION API
 # ============================================
 
 def handle_image(uid: str, image_url: str):
-    """Xử lý ảnh sản phẩm"""
+    """Xử lý ảnh sản phẩm với công nghệ AI thông minh"""
     ctx = USER_CONTEXT[uid]
     
     now = time.time()
@@ -1567,8 +1771,73 @@ def handle_image(uid: str, image_url: str):
     
     ctx["last_image_time"] = now
     
-    send_message(uid, "🖼️ Em đã nhận được ảnh sản phẩm!")
-    send_message(uid, "Để em tư vấn chính xác, anh/chị vui lòng gửi mã sản phẩm hoặc mô tả sản phẩm ạ!")
+    # BƯỚC 1: Kiểm tra xem có phải emoji/sticker không
+    if is_emoji_or_sticker_image(image_url):
+        print(f"[EMOJI DETECTED] Bỏ qua ảnh emoji/sticker: {image_url[:100]}")
+        # Gửi tin nhắn nhẹ nhàng, không tìm kiếm sản phẩm
+        send_message(uid, "😊 Em đã nhận được biểu tượng cảm xúc của anh/chị! Nếu anh/chị muốn xem sản phẩm, vui lòng gửi ảnh thật của sản phẩm hoặc mã sản phẩm ạ!")
+        return
+    
+    # BƯỚC 2: Thông báo đang xử lý ảnh
+    send_message(uid, "🔍 Em đang phân tích ảnh sản phẩm bằng AI, vui lòng đợi một chút ạ...")
+    
+    # BƯỚC 3: Tìm sản phẩm bằng OpenAI Vision API
+    found_ms = find_product_by_image(image_url)
+    
+    # BƯỚC 4: Xử lý kết quả
+    if found_ms:
+        print(f"[IMAGE PRODUCT FOUND] Tìm thấy sản phẩm {found_ms} từ ảnh")
+        
+        # Cập nhật context
+        ctx["last_ms"] = found_ms
+        ctx["has_sent_first_carousel"] = False
+        ctx["referral_source"] = "image_search"
+        ctx["real_message_count"] = 0  # Reset counter để áp dụng first message rule
+        update_product_context(uid, found_ms)
+        
+        # Gửi thông báo tìm thấy
+        product_name = PRODUCTS[found_ms].get("Ten", "")
+        send_message(uid, f"✅ Em đã tìm thấy sản phẩm phù hợp với ảnh!\n\n📦 **[{found_ms}] {product_name}**")
+        
+        # Gửi carousel sản phẩm
+        send_single_product_carousel(uid, found_ms)
+        
+        # Gửi quick reply để hỏi thêm thông tin
+        quick_replies = [
+            {
+                "content_type": "text",
+                "title": "💰 Giá bao nhiêu?",
+                "payload": f"PRICE_{found_ms}"
+            },
+            {
+                "content_type": "text",
+                "title": "🎨 Màu gì có?",
+                "payload": f"COLOR_{found_ms}"
+            },
+            {
+                "content_type": "text",
+                "title": "📏 Size nào?",
+                "payload": f"SIZE_{found_ms}"
+            }
+        ]
+        
+        send_quick_replies(uid, "Anh/chị muốn hỏi thêm thông tin gì về sản phẩm này ạ?", quick_replies)
+        
+    else:
+        print(f"[IMAGE PRODUCT NOT FOUND] Không tìm thấy sản phẩm từ ảnh")
+        
+        # Gửi yêu cầu mã sản phẩm
+        send_message(uid, "❌ Em chưa tìm thấy sản phẩm phù hợp với ảnh này. Có thể anh/chị chụp ảnh chưa rõ hoặc sản phẩm chưa có trong hệ thống.")
+        
+        # Gợi ý một số sản phẩm phổ biến
+        popular_products = list(PRODUCTS.keys())[:3]
+        if popular_products:
+            send_message(uid, "Dưới đây là một số sản phẩm gợi ý:")
+            for ms in popular_products:
+                product = PRODUCTS[ms]
+                send_message(uid, f"📦 [{ms}] {product.get('Ten', '')}")
+        
+        send_message(uid, "Vui lòng gửi mã sản phẩm chính xác (ví dụ: MS000004) để em tư vấn chi tiết ạ!")
 
 # ============================================
 # GOOGLE SHEETS API FUNCTIONS
@@ -1772,6 +2041,10 @@ def webhook():
             sender_id = m.get("sender", {}).get("id")
             if not sender_id:
                 continue
+            
+            # Bỏ qua delivery/read events sớm
+            if m.get("delivery") or m.get("read"):
+                continue
 
             # Xử lý attachment template từ catalog
             if "message" in m and "attachments" in m["message"]:
@@ -1887,9 +2160,6 @@ def webhook():
                 else:
                     print(f"[ECHO FCHAT] Không tìm thấy mã sản phẩm trong echo: {echo_text[:100]}...")
                 
-                continue
-            
-            if m.get("delivery") or m.get("read"):
                 continue
             
             # Xử lý referral
@@ -3130,6 +3400,12 @@ def health_check():
             "price_analysis": "Thông minh (color_based, size_based, complex_based, single_price)",
             "policy_handling": "GPT tự đọc mô tả sản phẩm (không dùng tool riêng, không dùng từ khóa)"
         },
+        "image_processing": {
+            "enabled": True,
+            "technology": "OpenAI Vision API",
+            "emoji_detection": True,
+            "product_matching": "Text-based similarity matching"
+        },
         "features": {
             "carousel_first_message": True,
             "catalog_support": True,
@@ -3181,12 +3457,13 @@ if __name__ == "__main__":
     print(f"🔴 Postback Idempotency: Mỗi postback chỉ xử lý 1 lần")
     print("=" * 80)
     
-    print("🔴 CẢI THIỆN FCHAT DETECTION VỚI #MS:")
+    print("🟢 CẢI TIẾN MỚI: XỬ LÝ ẢNH SẢN PHẨM THÔNG MINH")
     print("=" * 80)
-    print(f"🔴 Hàm is_fchat_echo_with_ms: Phát hiện #MSxxxxxx trong echo")
-    print(f"🔴 Hàm is_bot_generated_echo: Ưu tiên #MS => KHÔNG PHẢI BOT")
-    print(f"🔴 Echo processing: Xử lý ưu tiên Fchat echo trước khi kiểm tra bot")
-    print(f"🔴 Context update: Tự động cập nhật MS từ Fchat echo")
+    print(f"🟢 Phát hiện emoji/sticker: Loại bỏ ảnh emoji/sticker (dựa trên URL pattern)")
+    print(f"🟢 OpenAI Vision API: Phân tích ảnh sản phẩm để lấy mô tả chi tiết")
+    print(f"🟢 Text matching: So khớp mô tả ảnh với tên/mô tả sản phẩm trong database")
+    print(f"🟢 Thông minh: Tự động tìm sản phẩm phù hợp nhất với ảnh khách gửi")
+    print(f"🟢 Fallback: Nếu không tìm thấy, yêu cầu mã sản phẩm và gợi ý sản phẩm phổ biến")
     print("=" * 80)
     
     print("🔴 FORM ĐẶT HÀNG CẢI TIẾN:")
