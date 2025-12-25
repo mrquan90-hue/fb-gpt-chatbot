@@ -2747,7 +2747,7 @@ def webhook():
                 
                 continue
             
-            # Xử lý sự kiện ORDER từ Facebook Shop - PHẦN MỚI THÊM VÀO
+            # Xử lý sự kiện ORDER từ Facebook Shop - ĐÃ SỬA: KHÔNG GỬI TIN NHẮN
             if "order" in m:
                 order_info = m.get("order", {})
                 products = order_info.get("products", [])
@@ -2780,31 +2780,9 @@ def webhook():
                         "retailer_id": retailer_id
                     })
                 
-                # Gửi tin nhắn xác nhận đơn hàng
-                message_lines = [
-                    "🎊 **ĐƠN HÀNG MỚI TỪ FACEBOOK SHOP**",
-                    "────────────────",
-                    f"👤 Khách hàng: Facebook User",
-                    f"📞 Liên hệ: Qua Messenger",
-                    f"💰 Tổng tiền: {total_amount:,.0f} {currency}",
-                    "────────────────",
-                    "📦 Sản phẩm:"
-                ]
-                
-                for i, item in enumerate(order_items, 1):
-                    message_lines.append(f"{i}. [{item['ms']}] {item['name']}")
-                    message_lines.append(f"   Số lượng: {item['quantity']} × {item['unit_price']:,.0f} = {item['item_total']:,.0f} {currency}")
-                
-                message_lines.extend([
-                    "────────────────",
-                    "⏰ Shop sẽ liên hệ xác nhận trong 5-10 phút.",
-                    "🚚 Giao hàng bởi ViettelPost (COD)",
-                    "────────────────",
-                    "Cảm ơn quý khách đã đặt hàng! ❤️"
-                ])
-                
-                thank_you_msg = "\n".join(message_lines)
-                send_message(sender_id, thank_you_msg)
+                # KHÔNG GỬI TIN NHẮN CHO ĐƠN HÀNG TỪ FACEBOOK SHOP
+                # Chỉ cập nhật context và ghi log
+                print(f"[FACEBOOK SHOP ORDER] Không gửi tin nhắn cho đơn hàng từ Facebook Shop, user {sender_id}")
                 
                 # Cập nhật context với mã sản phẩm đầu tiên (nếu có)
                 if order_items and order_items[0]["ms"] != "UNKNOWN":
@@ -4184,7 +4162,7 @@ if __name__ == "__main__":
     print("🟢 TÍNH NĂNG MỚI: XỬ LÝ ĐƠN HÀNG TỪ FACEBOOK SHOP")
     print("=" * 80)
     print(f"🟢 Xử lý sự kiện 'order' từ Facebook Shop")
-    print(f"🟢 Tự động gửi tin nhắn cảm ơn khi có đơn hàng mới")
+    print(f"🟢 KHÔNG gửi tin nhắn cảm ơn khi có đơn hàng mới từ Facebook Shop")
     print(f"🟢 Trích xuất mã sản phẩm từ retailer_id")
     print(f"🟢 Hiển thị chi tiết sản phẩm, số lượng, đơn giá, tổng tiền")
     print(f"🟢 Log đơn hàng vào file facebook_shop_orders.log")
