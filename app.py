@@ -27,7 +27,7 @@ from openai import OpenAI
 app = Flask(__name__)
 
 # ============================================
-# ENV & CONFIG - THÊM POSCAKE
+# ENV & CONFIG - THÊM POSCAKE VÀ PAGE_ID
 # ============================================
 PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN", "").strip()
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "").strip()
@@ -42,6 +42,9 @@ FCHAT_TOKEN = os.getenv("FCHAT_TOKEN", "").strip()
 POSCAKE_API_KEY = os.getenv("POSCAKE_API_KEY", "").strip()
 POSCAKE_WEBHOOK_SECRET = os.getenv("POSCAKE_WEBHOOK_SECRET", "").strip()
 POSCAKE_STORE_ID = os.getenv("POSCAKE_STORE_ID", "").strip()
+
+# Page ID để xác định comment từ page
+PAGE_ID = os.getenv("PAGE_ID", "516937221685203").strip()
 
 # ============================================
 # GOOGLE SHEETS API CONFIGURATION
@@ -889,6 +892,210 @@ def is_bot_generated_echo(echo_text: str, app_id: str = "", attachments: list = 
                 return True
     
     return False
+
+# ============================================
+# HÀM LẤY NỘI DUNG BÀI VIẾT TỪ POST_ID
+# ============================================
+
+def get_post_content_from_facebook(post_id: str) -> Optional[dict]:
+    """
+    Lấy nội dung bài viết từ Facebook Graph API
+    Trả về dict chứa message và các thông tin khác
+    """
+    if not PAGE_ACCESS_TOKEN or not post_id:
+        print(f"[GET POST CONTENT] Thiếu token hoặc post_id")
+        return None
+    
+    try:
+        # Graph API endpoint để lấy nội dung bài viết
+        url = f"https://graph.facebook.com/v12.0/{post_id}"
+        params = {
+            'fields': 'id,message,created_time,permalink_url',
+            'access_token': PAGE_ACCESS_TOKEN
+        }
+        
+        response = requests.get(url, params=params, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            print(f"[GET POST CONTENT] Đã lấy nội dung bài viết {post_id}")
+            return data
+        else:
+            print(f"[GET POST CONTENT] Lỗi API {response.status_code}: {response.text}")
+            return None
+            
+    except Exception as e:
+        print(f"[GET POST CONTENT] Exception: {e}")
+        return None
+
+# ============================================
+# HÀM TRÍCH XUẤT MS TỪ BÀI VIẾT (TỐI ƯU)
+# ============================================
+
+def extract_ms_from_post_content(post_data: dict) -> Optional[str]:
+    """
+    Trích xuất mã sản phẩm từ nội dung bài viết
+    """
+    if not post_data:
+        return None
+    
+    message = post_data.get('message', '')
+    post_id = post_data.get('id', '')
+    
+    print(f"[EXTRACT MS FROM POST] Đang phân tích bài viết {post_id}: {message[:100]}...")
+    
+    if not message:
+        return None
+    
+    # Phương pháp 1: Tìm MSxxxxxx trực tiếp
+    ms_patterns = [
+        r'\[(MS\d{6})\]',  # [MS000046]
+        r'\b(MS\d{6})\b',  # MS000046
+        r'#(MS\d{6})',     # #MS000046
+        r'Mã\s*:\s*(MS\d{6})',  # Mã: MS000046
+        r'SP\s*:\s*(MS\d{6})',  # SP: MS000046
+    ]
+    
+    for pattern in ms_patterns:
+        matches = re.findall(pattern, message, re.IGNORECASE)
+        if matches:
+            ms = matches[0].upper()
+            if ms in PRODUCTS:
+                print(f"[EXTRACT MS FROM POST] Tìm thấy {ms} qua pattern {pattern}")
+                return ms
+    
+    # Phương pháp 2: Tìm số 6 chữ số
+    six_digit_numbers = re.findall(r'\b(\d{6})\b', message)
+    for num in six_digit_numbers:
+        # Thử với MS đầy đủ
+        full_ms = f"MS{num}"
+        if full_ms in PRODUCTS:
+            print(f"[EXTRACT MS FROM POST] Tìm thấy số 6 chữ số {num} -> {full_ms}")
+            return full_ms
+        
+        # Thử với số không có leading zeros
+        clean_num = num.lstrip('0')
+        if clean_num and clean_num in PRODUCTS_BY_NUMBER:
+            ms = PRODUCTS_BY_NUMBER[clean_num]
+            print(f"[EXTRACT MS FROM POST] Tìm thấy số rút gọn {num} -> {ms}")
+            return ms
+    
+    # Phương pháp 3: Tìm số 2-5 chữ số
+    short_numbers = re.findall(r'\b(\d{2,5})\b', message)
+    for num in short_numbers:
+        clean_num = num.lstrip('0')
+        if clean_num and clean_num in PRODUCTS_BY_NUMBER:
+            ms = PRODUCTS_BY_NUMBER[clean_num]
+            print(f"[EXTRACT MS FROM POST] Tìm thấy số ngắn {num} -> {ms}")
+            return ms
+    
+    print(f"[EXTRACT MS FROM POST] Không tìm thấy MS trong bài viết")
+    return None
+
+# ============================================
+# HÀM XỬ LÝ COMMENT TỪ FEED (HOÀN CHỈNH)
+# ============================================
+
+def handle_feed_comment(change_data: dict):
+    """
+    Xử lý comment từ feed với logic:
+    1. Lấy post_id từ comment
+    2. Lấy nội dung bài viết gốc
+    3. Trích xuất MS từ caption
+    4. Cập nhật context cho user
+    """
+    try:
+        # 1. Lấy thông tin cơ bản
+        from_user = change_data.get("from", {})
+        user_id = from_user.get("id")
+        user_name = from_user.get("name", "")
+        message_text = change_data.get("message", "")
+        post_id = change_data.get("post_id", "")
+        
+        if not user_id or not post_id:
+            print(f"[FEED COMMENT] Thiếu user_id hoặc post_id")
+            return None
+        
+        print(f"[FEED COMMENT] User {user_id} ({user_name}) comment: '{message_text}' trên post {post_id}")
+        
+        # 2. Kiểm tra xem có phải comment từ page không (bỏ qua)
+        if PAGE_ID and user_id == PAGE_ID:
+            print(f"[FEED COMMENT] Bỏ qua comment từ chính page")
+            return None
+        
+        # 3. Lấy nội dung bài viết gốc
+        post_data = get_post_content_from_facebook(post_id)
+        
+        if not post_data:
+            print(f"[FEED COMMENT] Không lấy được nội dung bài viết {post_id}")
+            return None
+        
+        # 4. Trích xuất MS từ caption bài viết
+        detected_ms = extract_ms_from_post_content(post_data)
+        
+        if not detected_ms:
+            print(f"[FEED COMMENT] Không tìm thấy MS trong bài viết {post_id}")
+            return None
+        
+        # 5. Kiểm tra MS có tồn tại trong database
+        load_products()
+        if detected_ms not in PRODUCTS:
+            print(f"[FEED COMMENT] MS {detected_ms} không tồn tại trong database")
+            return None
+        
+        # 6. Cập nhật context cho user (RESET COUNTER để áp dụng first message rule)
+        print(f"[FEED COMMENT MS] Phát hiện MS {detected_ms} từ post {post_id} cho user {user_id}")
+        
+        # Lấy tên sản phẩm (loại bỏ mã nếu có trong tên)
+        product = PRODUCTS[detected_ms]
+        product_name = product.get('Ten', '')
+        if f"[{detected_ms}]" in product_name or detected_ms in product_name:
+            product_name = product_name.replace(f"[{detected_ms}]", "").replace(detected_ms, "").strip()
+        
+        # Gọi hàm cập nhật context mới (reset counter)
+        update_context_with_new_ms(user_id, detected_ms, "feed_comment")
+        
+        # Lưu thêm thông tin về bài viết vào context
+        ctx = USER_CONTEXT[user_id]
+        ctx["source_post_id"] = post_id
+        ctx["source_post_content"] = post_data.get('message', '')[:300]
+        ctx["source_post_url"] = post_data.get('permalink_url', '')
+        
+        # 7. Gửi tin nhắn tự động cho user (tùy chọn)
+        # Chỉ gửi nếu user chưa nhắn tin trước đó
+        if ctx.get("real_message_count", 0) == 0:
+            try:
+                # Gửi tin nhắn giới thiệu sản phẩm
+                intro_message = f"""Chào {user_name}! 👋 
+
+Em thấy bạn đã bình luận trên bài viết của shop.
+
+📦 **{product_name}**
+📌 Mã sản phẩm: {detected_ms}
+
+Để em tư vấn chi tiết về sản phẩm này, bạn vui lòng:
+• Gửi "giá bao nhiêu" để xem giá
+• Gửi "xem ảnh" để xem hình ảnh thực tế  
+• Gửi "đặt hàng" để mua sản phẩm
+
+Hoặc hỏi bất kỳ thông tin gì bạn cần ạ! 😊"""
+                
+                send_message(user_id, intro_message)
+                print(f"[FEED COMMENT AUTO REPLY] Đã gửi tin nhắn tự động cho user {user_id}")
+                
+                # Tăng counter để không gửi lại lần nữa
+                ctx["real_message_count"] = 1
+                
+            except Exception as e:
+                print(f"[FEED COMMENT AUTO REPLY ERROR] Lỗi gửi tin nhắn: {e}")
+        
+        return detected_ms
+        
+    except Exception as e:
+        print(f"[FEED COMMENT ERROR] Lỗi xử lý comment: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 # ============================================
 # HELPER: SEND MESSAGE
@@ -2682,6 +2889,43 @@ def test_poscake_webhook():
     }), 200
 
 # ============================================
+# TEST FEED COMMENT ENDPOINT
+# ============================================
+
+@app.route("/test-feed-comment", methods=["GET"])
+def test_feed_comment():
+    """Test endpoint cho feed comment processing"""
+    post_id = request.args.get("post_id", "516937221685203_1775049683320893")
+    
+    # Test hàm get_post_content_from_facebook
+    post_data = get_post_content_from_facebook(post_id)
+    
+    if not post_data:
+        return jsonify({
+            "status": "error",
+            "message": "Không lấy được nội dung bài viết",
+            "post_id": post_id
+        }), 400
+    
+    # Test hàm extract_ms_from_post_content
+    detected_ms = extract_ms_from_post_content(post_data)
+    
+    # Test context update
+    test_user_id = "test_user_123"
+    if detected_ms:
+        update_context_with_new_ms(test_user_id, detected_ms, "test_feed_comment")
+    
+    return jsonify({
+        "status": "success",
+        "post_id": post_id,
+        "post_content_preview": post_data.get('message', '')[:200] + "..." if post_data.get('message') else "No message",
+        "detected_ms": detected_ms,
+        "ms_exists": detected_ms in PRODUCTS if detected_ms else False,
+        "context_updated": detected_ms is not None,
+        "test_user_context": USER_CONTEXT.get(test_user_id, {})
+    })
+
+# ============================================
 # API MỚI: Lấy thông tin biến thể (ảnh, giá)
 # ============================================
 
@@ -2766,6 +3010,25 @@ def webhook():
 
     entry = data.get("entry", [])
     for e in entry:
+        # Xử lý feed changes (comment trên bài viết)
+        if "changes" in e:
+            changes = e.get("changes", [])
+            for change in changes:
+                value = change.get("value", {})
+                field = change.get("field")
+                
+                if field == "feed":
+                    print(f"[FEED EVENT] Nhận sự kiện feed")
+                    
+                    # Kiểm tra xem có phải comment không (có message và post_id)
+                    if "message" in value and "post_id" in value:
+                        print(f"[FEED COMMENT] Đang xử lý comment từ feed...")
+                        
+                        # Gọi hàm xử lý comment
+                        handle_feed_comment(value)
+                    
+                    continue
+        
         messaging = e.get("messaging", [])
         for m in messaging:
             sender_id = m.get("sender", {}).get("id")
@@ -4197,6 +4460,13 @@ def health_check():
     
     total_variants = sum(len(p['variants']) for p in PRODUCTS.values())
     
+    # Kiểm tra feed comment capability
+    feed_comment_test = "Ready"
+    if PAGE_ACCESS_TOKEN and PAGE_ID:
+        feed_comment_test = "✅ Sẵn sàng"
+    else:
+        feed_comment_test = "⚠️ Cần cấu hình PAGE_ACCESS_TOKEN và PAGE_ID"
+    
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
@@ -4205,6 +4475,8 @@ def health_check():
         "openai_configured": bool(client),
         "facebook_configured": bool(PAGE_ACCESS_TOKEN),
         "fanpage_name": current_fanpage_name,
+        "page_id": PAGE_ID,
+        "feed_comment_processing": feed_comment_test,
         "google_sheets_integration": {
             "sheet_id_configured": bool(GOOGLE_SHEET_ID),
             "credentials_configured": bool(GOOGLE_SHEETS_CREDENTIALS_JSON)
@@ -4234,6 +4506,17 @@ def health_check():
             "product_matching": "Text-based similarity matching nâng cao với trọng số",
             "suggestion_carousel": "Carousel 3 sản phẩm gợi ý khi không tìm thấy từ ảnh"
         },
+        "feed_comment_processing": {
+            "enabled": True,
+            "logic": "Lấy MS từ caption bài viết khi user comment",
+            "capabilities": [
+                "Detect MS từ bài viết gốc",
+                "Auto reply với thông tin sản phẩm",
+                "Cập nhật context cho user",
+                "Reset counter để áp dụng first message rule"
+            ],
+            "required_permissions": "pages_read_engagement, pages_messaging"
+        },
         "features": {
             "carousel_first_message": True,
             "catalog_support": True,
@@ -4249,7 +4532,8 @@ def health_check():
             "optimized_form_loading": True,
             "address_api_cache": True,
             "lazy_image_loading": True,
-            "gzip_compression": True
+            "gzip_compression": True,
+            "feed_comment_processing": True  # TÍNH NĂNG MỚI
         }
     }, 200
 
@@ -4290,10 +4574,20 @@ if __name__ == "__main__":
     
     print(f"🟢 GPT-4o-mini: {'SẴN SÀNG' if client else 'CHƯA CẤU HÌNH'}")
     print(f"🟢 Fanpage: {get_fanpage_name_from_api()}")
+    print(f"🟢 Page ID: {PAGE_ID}")
     print(f"🟢 Domain: {DOMAIN}")
     print(f"🟢 Google Sheets API: {'SẴN SÀNG' if GOOGLE_SHEET_ID and GOOGLE_SHEETS_CREDENTIALS_JSON else 'CHƯA CẤU HÌNH'}")
     print(f"🟢 Poscake Webhook: {'SẴN SÀNG' if POSCAKE_API_KEY else 'CHƯA CẤU HÌNH'}")
     print(f"🟢 OpenAI Function Calling: {'TÍCH HỢP THÀNH CÔNG' if client else 'CHƯA CẤU HÌNH'}")
+    print("=" * 80)
+    
+    print("🔴 CẢI TIẾN MỚI: XỬ LÝ COMMENT TỪ FEED (LẤY MS TỪ CAPTION BÀI VIẾT)")
+    print("=" * 80)
+    print(f"🔴 1. Feed Comment Processing: Tự động phát hiện MS khi user comment")
+    print(f"🔴 2. Logic: Lấy post_id → Lấy nội dung bài viết → Trích xuất MS từ caption")
+    print(f"🔴 3. Auto Reply: Gửi tin nhắn giới thiệu sản phẩm khi user comment lần đầu")
+    print(f"🔴 4. Context Update: Reset counter để áp dụng first message rule")
+    print(f"🔴 5. Test Endpoint: /test-feed-comment?post_id=...")
     print("=" * 80)
     
     print("🔴 CẢI TIẾN MỚI: TỐI ƯU TỐC ĐỘ LOAD TRANG FORM ĐẶT HÀNG")
