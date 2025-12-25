@@ -798,45 +798,6 @@ def extract_ms_from_ad_title(ad_title: str) -> Optional[str]:
     return None
 
 # ============================================
-# HELPER: PHÁT HIỆN FCHAT ECHO VỚI MÃ SẢN PHẨM
-# ============================================
-
-def is_fchat_echo_with_ms(echo_text: str) -> Tuple[bool, Optional[str]]:
-    """
-    Kiểm tra xem echo có phải từ Fchat với mã sản phẩm không
-    ĐẶC ĐIỂM FCHAT: Luôn có #MSxxxxxx trong tin nhắn
-    Trả về: (is_fchat, ms_code)
-    """
-    if not echo_text:
-        return False, None
-    
-    # ĐẶC ĐIỂM FCHAT: Có #MS trong tin nhắn (thường là comment từ user)
-    if "#MS" in echo_text.upper():
-        # Tìm mã sản phẩm với định dạng #MSxxxxxx
-        match = re.search(r'#MS(\d{2,6})', echo_text.upper())
-        if match:
-            ms_num = match.group(1).zfill(6)
-            ms_code = f"MS{ms_num}"
-            print(f"[FCHAT DETECTED] Phát hiện mã sản phẩm từ Fchat: {ms_code}")
-            return True, ms_code
-    
-    # Kiểm tra thêm các dạng khác của Fchat (không có #)
-    fchat_patterns = [
-        r'mã\s*(\d{2,6})',  # "mã 000016"
-        r'ms\s*(\d{2,6})',   # "ms 000016"
-    ]
-    
-    for pattern in fchat_patterns:
-        match = re.search(pattern, echo_text.lower())
-        if match:
-            ms_num = match.group(1).zfill(6)
-            ms_code = f"MS{ms_num}"
-            print(f"[FCHAT PATTERN] Phát hiện mã từ pattern: {ms_code}")
-            return True, ms_code
-    
-    return False, None
-
-# ============================================
 # HELPER: KIỂM TRA ECHO MESSAGE (ĐÃ CẢI THIỆN)
 # ============================================
 
@@ -929,12 +890,12 @@ def get_post_content_from_facebook(post_id: str) -> Optional[dict]:
         return None
 
 # ============================================
-# HÀM TRÍCH XUẤT MS TỪ BÀI VIẾT (TỐI ƯU)
+# HÀM TRÍCH XUẤT MS TỪ BÀI VIẾT (TỐI ƯU - ĐÃ CẢI THIỆN)
 # ============================================
 
 def extract_ms_from_post_content(post_data: dict) -> Optional[str]:
     """
-    Trích xuất mã sản phẩm từ nội dung bài viết
+    Trích xuất mã sản phẩm từ nội dung bài viết - CẢI THIỆN ĐỂ BẮT [MSxxxxxx]
     """
     if not post_data:
         return None
@@ -947,24 +908,57 @@ def extract_ms_from_post_content(post_data: dict) -> Optional[str]:
     if not message:
         return None
     
-    # Phương pháp 1: Tìm MSxxxxxx trực tiếp
-    ms_patterns = [
-        r'\[(MS\d{6})\]',  # [MS000046]
-        r'\b(MS\d{6})\b',  # MS000046
-        r'#(MS\d{6})',     # #MS000046
-        r'Mã\s*:\s*(MS\d{6})',  # Mã: MS000046
-        r'SP\s*:\s*(MS\d{6})',  # SP: MS000046
+    # PHƯƠNG PHÁP 1: Tìm MS trong dấu ngoặc vuông [MSxxxxxx] - TRƯỜNG HỢP ĐẶC BIỆT
+    bracket_patterns = [
+        r'\[(MS\d{2,6})\]',  # [MS000034] - CHÍNH XÁC TRƯỜNG HỢP TRONG LOG
+        r'\[MS\s*(\d{2,6})\]',  # [MS 000034] với khoảng trắng
     ]
     
-    for pattern in ms_patterns:
+    for pattern in bracket_patterns:
         matches = re.findall(pattern, message, re.IGNORECASE)
-        if matches:
-            ms = matches[0].upper()
-            if ms in PRODUCTS:
-                print(f"[EXTRACT MS FROM POST] Tìm thấy {ms} qua pattern {pattern}")
-                return ms
+        for match in matches:
+            # match là số (2-6 chữ số)
+            num_part = match.lstrip('0')
+            if not num_part:  # nếu toàn là số 0
+                num_part = '0'
+            full_ms = f"MS{num_part.zfill(6)}"
+            if full_ms in PRODUCTS:
+                print(f"[EXTRACT MS FROM POST] Tìm thấy {full_ms} qua bracket pattern {pattern}")
+                return full_ms
     
-    # Phương pháp 2: Tìm số 6 chữ số
+    # PHƯƠNG PHÁP 2: Tìm MSxxxxxx trực tiếp (có thể có khoảng trắng)
+    ms_patterns = [
+        (r'\[(MS\d{6})\]', True),  # [MS000046] -> đủ 6 số
+        (r'\b(MS\d{6})\b', True),  # MS000046
+        (r'#(MS\d{6})', True),     # #MS000046
+        (r'Mã\s*:\s*(MS\d{6})', True),  # Mã: MS000046
+        (r'SP\s*:\s*(MS\d{6})', True),  # SP: MS000046
+        (r'MS\s*(\d{6})', False),  # MS 000046 -> chỉ có số
+        (r'mã\s*(\d{6})', False),  # mã 000046 -> chỉ có số
+        (r'MS\s*(\d{2,5})\b', False),  # MS 34 -> 2-5 chữ số
+        (r'mã\s*(\d{2,5})\b', False),  # mã 34 -> 2-5 chữ số
+    ]
+    
+    for pattern, is_full_ms in ms_patterns:
+        matches = re.findall(pattern, message, re.IGNORECASE)
+        for match in matches:
+            if isinstance(match, tuple):
+                match = match[0]
+            if is_full_ms:
+                # match là MSxxxxxx đầy đủ
+                full_ms = match.upper()
+            else:
+                # match chỉ là số
+                num_part = str(match).lstrip('0')
+                if not num_part:
+                    num_part = '0'
+                full_ms = f"MS{num_part.zfill(6)}"
+            
+            if full_ms in PRODUCTS:
+                print(f"[EXTRACT MS FROM POST] Tìm thấy {full_ms} qua pattern {pattern}")
+                return full_ms
+    
+    # PHƯƠNG PHÁP 3: Tìm số 6 chữ số
     six_digit_numbers = re.findall(r'\b(\d{6})\b', message)
     for num in six_digit_numbers:
         # Thử với MS đầy đủ
@@ -980,7 +974,7 @@ def extract_ms_from_post_content(post_data: dict) -> Optional[str]:
             print(f"[EXTRACT MS FROM POST] Tìm thấy số rút gọn {num} -> {ms}")
             return ms
     
-    # Phương pháp 3: Tìm số 2-5 chữ số
+    # PHƯƠNG PHÁP 4: Tìm số 2-5 chữ số
     short_numbers = re.findall(r'\b(\d{2,5})\b', message)
     for num in short_numbers:
         clean_num = num.lstrip('0')
@@ -993,7 +987,7 @@ def extract_ms_from_post_content(post_data: dict) -> Optional[str]:
     return None
 
 # ============================================
-# HÀM XỬ LÝ COMMENT TỪ FEED (HOÀN CHỈNH)
+# HÀM XỬ LÝ COMMENT TỪ FEED (HOÀN CHỈNH - ĐÃ CẢI THIỆN)
 # ============================================
 
 def handle_feed_comment(change_data: dict):
@@ -1030,11 +1024,19 @@ def handle_feed_comment(change_data: dict):
             print(f"[FEED COMMENT] Không lấy được nội dung bài viết {post_id}")
             return None
         
-        # 4. Trích xuất MS từ caption bài viết
+        # LOG CHI TIẾT ĐỂ DEBUG
+        post_message = post_data.get('message', '')
+        print(f"[FEED COMMENT DEBUG] Nội dung bài viết ({len(post_message)} ký tự):")
+        print(f"[FEED COMMENT DEBUG] {post_message[:500]}")
+        
+        # 4. Trích xuất MS từ caption bài viết (DÙNG HÀM ĐÃ CẢI THIỆN)
         detected_ms = extract_ms_from_post_content(post_data)
         
         if not detected_ms:
             print(f"[FEED COMMENT] Không tìm thấy MS trong bài viết {post_id}")
+            # Thử tìm thủ công
+            if '[MS' in post_message:
+                print(f"[FEED COMMENT MANUAL] Phát hiện [MS trong bài viết, cần kiểm tra pattern")
             return None
         
         # 5. Kiểm tra MS có tồn tại trong database
@@ -1800,16 +1802,6 @@ def detect_ms_from_text(text: str) -> Optional[str]:
             found_ms = PRODUCTS_BY_NUMBER[clean_n]
             print(f"[DETECT MS DEBUG] Tìm thấy dạng viết liền: {found_ms}")
             return found_ms
-    
-    # THÊM: Tìm MS dạng #MSxxxxxx (từ Fchat)
-    fchat_pattern = r'#?ms(\d{2,6})'
-    fchat_match = re.search(fchat_pattern, text_norm, re.IGNORECASE)
-    
-    if fchat_match:
-        full_ms = "MS" + fchat_match.group(1).zfill(6)
-        if full_ms in PRODUCTS:
-            print(f"[DETECT MS DEBUG] Tìm thấy MS từ Fchat: {full_ms}")
-            return full_ms
     
     print(f"[DETECT MS DEBUG] Không tìm thấy MS trong text (chỉ tìm với tiền tố): {text}")
     return None
@@ -2984,7 +2976,7 @@ def api_get_variant_info():
     }
 
 # ============================================
-# WEBHOOK HANDLER (ĐÃ SỬA ĐỂ NHẬN DIỆN FCHAT VÀ XỬ LÝ ORDER FACEBOOK SHOP)
+# WEBHOOK HANDLER (ĐÃ SỬA ĐỂ XÓA LOGIC FCHAT ECHO)
 # ============================================
 
 @app.route("/", methods=["GET"])
@@ -3024,7 +3016,7 @@ def webhook():
                     if "message" in value and "post_id" in value:
                         print(f"[FEED COMMENT] Đang xử lý comment từ feed...")
                         
-                        # Gọi hàm xử lý comment
+                        # Gọi hàm xử lý comment (ĐÃ CẢI THIỆN)
                         handle_feed_comment(value)
                     
                     continue
@@ -3063,71 +3055,22 @@ def webhook():
                                         update_context_with_new_ms(sender_id, ms_from_retailer, "catalog")
                                         print(f"[CATALOG] Đã cập nhật MS mới từ catalog: {ms_from_retailer}")
 
-            # Xử lý echo message từ Fchat - LOGIC MỚI VỚI FCHAT DETECTION
+            # XỬ LÝ ECHO MESSAGE - CHỈ BỎ QUA ECHO TỪ BOT, KHÔNG XỬ LÝ FCHAT
             if m.get("message", {}).get("is_echo"):
                 recipient_id = m.get("recipient", {}).get("id")
                 if not recipient_id:
                     continue
                 
                 msg = m["message"]
-                msg_mid = msg.get("mid")
                 echo_text = msg.get("text", "")
                 app_id = msg.get("app_id", "")
                 
-                print(f"[ECHO DEBUG] Text: {echo_text[:100]}")
-                print(f"[ECHO DEBUG] App ID: {app_id}")
-                
-                # QUAN TRỌNG: Kiểm tra có phải Fchat với mã sản phẩm không (#MS)
-                is_fchat, detected_ms = is_fchat_echo_with_ms(echo_text)
-                
-                if is_fchat and detected_ms:
-                    # Đây là echo từ Fchat với mã sản phẩm => Xử lý ngay
-                    print(f"[FCHAT PROCESS] Xử lý echo Fchat với mã: {detected_ms} cho user: {recipient_id}")
-                    
-                    # SỬ DỤNG HÀM MỚI ĐỂ CẬP NHẬT MS VÀ RESET COUNTER
-                    update_context_with_new_ms(recipient_id, detected_ms, "fchat_echo")
-                    
-                    # KHÔNG gửi carousel ở đây - đợi tin nhắn đầu tiên từ user
-                    continue
-                
-                # Nếu không phải Fchat với mã sản phẩm, kiểm tra bot như bình thường
+                # CHỈ KIỂM TRA NẾU LÀ BOT GENERATED ECHO - KHÔNG XỬ LÝ FCHAT
                 if is_bot_generated_echo(echo_text, app_id):
                     print(f"[ECHO BOT] Bỏ qua echo message từ bot: {echo_text[:50]}...")
-                    continue
-                
-                # Xử lý echo thông thường (nếu cần)
-                print(f"[ECHO USER] Đang xử lý echo từ bình luận người dùng")
-                load_products()
-                
-                detected_ms = detect_ms_from_text(echo_text)
-                
-                if detected_ms and detected_ms in PRODUCTS:
-                    ctx = USER_CONTEXT[recipient_id]
-                    
-                    # BẢO VỆ: Kiểm tra xem echo có từ khóa bot không
-                    bot_keywords = ["Dạ,", "ạ!", "em ", "anh/chị", "shop ", "của em", "tư vấn", "hỗ trợ"]
-                    if any(keyword in echo_text for keyword in bot_keywords) and len(echo_text) > 100:
-                        print(f"[ECHO SAFETY] Tin nhắn dài có từ khóa bot, không cập nhật context từ echo")
-                        continue
-                    
-                    print(f"[ECHO FCHAT] Phát hiện mã sản phẩm: {detected_ms} cho user: {recipient_id}")
-                    
-                    if ctx.get("processing_lock"):
-                        continue
-                    
-                    ctx["processing_lock"] = True
-                    
-                    try:
-                        # SỬ DỤNG HÀM MỚI ĐỂ CẬP NHẬT MS VÀ RESET COUNTER
-                        update_context_with_new_ms(recipient_id, detected_ms, "fchat_echo")
-                        
-                        print(f"[ECHO CONTEXT] Đã cập nhật context cho user {recipient_id} với MS: {detected_ms}")
-                        
-                    finally:
-                        ctx["processing_lock"] = False
                 else:
-                    print(f"[ECHO FCHAT] Không tìm thấy mã sản phẩm trong echo: {echo_text[:100]}...")
-                
+                    # Echo từ người dùng (comment) - đã xử lý qua feed, bỏ qua
+                    print(f"[ECHO USER] Bỏ qua echo từ người dùng (đã xử lý qua feed): {echo_text[:50]}...")
                 continue
             
             # Xử lý sự kiện ORDER từ Facebook Shop - ĐÃ SỬA: KHÔNG GỬI TIN NHẮN
@@ -3350,10 +3293,6 @@ Anh/chị quan tâm sản phẩm nào ạ?"""
                     if ctx.get("processing_lock"):
                         print(f"[TEXT LOCKED] User {sender_id} đang được xử lý, bỏ qua text: {text[:50]}...")
                         continue
-                    
-                    # XỬ LÝ ĐẶC BIỆT: Nếu có context từ Fchat và là tin nhắn đầu tiên
-                    if ctx.get("referral_source") == "fchat_echo" and ctx.get("real_message_count", 0) == 0:
-                        ctx["real_message_count"] = 1  # Đánh dấu đây là tin nhắn đầu tiên
                     
                     handle_text(sender_id, text)
                 elif attachments:
@@ -4521,7 +4460,7 @@ def health_check():
             "carousel_first_message": True,
             "catalog_support": True,
             "ads_referral_processing": True,
-            "fchat_echo_processing": True,
+            "fchat_echo_processing": False,  # ĐÃ TẮT
             "image_processing": True,
             "order_form": True,
             "google_sheets_api": True,
@@ -4655,6 +4594,13 @@ if __name__ == "__main__":
     print(f"🟢 Hiển thị chi tiết sản phẩm, số lượng, đơn giá, tổng tiền")
     print(f"🟢 Log đơn hàng vào file facebook_shop_orders.log")
     print(f"🟢 Cập nhật context với mã sản phẩm để hỗ trợ tư vấn tiếp theo")
+    print("=" * 80)
+    
+    print("🔴 TẮT TÍNH NĂNG: GHI NHẬN MS TỪ ECHO FCHAT")
+    print("=" * 80)
+    print(f"🔴 Đã xóa logic xử lý Fchat echo trong webhook handler")
+    print(f"🔴 Chỉ xử lý echo từ bot (bỏ qua)")
+    print(f"🔴 Echo từ người dùng (comment) đã được xử lý qua feed")
     print("=" * 80)
     
     load_products()
