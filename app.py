@@ -180,6 +180,52 @@ def get_fanpage_name_from_api():
         return FANPAGE_NAME_CACHE
 
 # ============================================
+# HÀM CẬP NHẬT CONTEXT VỚI MS MỚI VÀ RESET COUNTER
+# ============================================
+
+def update_context_with_new_ms(uid: str, new_ms: str, source: str = "unknown"):
+    """
+    Cập nhật context với MS mới và reset counter để đảm bảo bot gửi carousel
+    cho sản phẩm mới khi user gửi tin nhắn đầu tiên
+    """
+    if not new_ms or new_ms not in PRODUCTS:
+        return False
+    
+    ctx = USER_CONTEXT[uid]
+    
+    # Lấy MS cũ để so sánh
+    old_ms = ctx.get("last_ms")
+    
+    # Nếu MS mới khác với MS cũ, reset counter
+    if old_ms != new_ms:
+        print(f"[CONTEXT UPDATE] User {uid}: Chuyển từ {old_ms} sang {new_ms} (nguồn: {source})")
+        
+        # Reset counter để bot gửi carousel cho sản phẩm mới
+        ctx["real_message_count"] = 0
+        ctx["has_sent_first_carousel"] = False
+        ctx["last_msg_time"] = 0  # Reset thời gian tin nhắn cuối
+        ctx["last_processed_text"] = ""  # Reset text đã xử lý
+    
+    # Cập nhật MS mới
+    ctx["last_ms"] = new_ms
+    ctx["referral_source"] = source
+    
+    # Gọi hàm update_product_context cũ
+    if "product_history" not in ctx:
+        ctx["product_history"] = []
+    
+    if not ctx["product_history"] or ctx["product_history"][0] != new_ms:
+        if new_ms in ctx["product_history"]:
+            ctx["product_history"].remove(new_ms)
+        ctx["product_history"].insert(0, new_ms)
+    
+    if len(ctx["product_history"]) > 5:
+        ctx["product_history"] = ctx["product_history"][:5]
+    
+    print(f"[CONTEXT UPDATE] Đã cập nhật MS {new_ms} cho user {uid} (nguồn: {source}, real_message_count: {ctx['real_message_count']})")
+    return True
+
+# ============================================
 # HÀM PHÁT HIỆN EMOJI/STICKER
 # ============================================
 
@@ -619,8 +665,16 @@ def send_suggestion_carousel(uid: str, suggestion_count: int = 3):
         
         gia_int = extract_price_int(product.get("Gia", "")) or 0
         
+        # LẤY TÊN SẢN PHẨM (KHÔNG BAO GỒM MÃ SẢN PHẨM)
+        product_name = product.get('Ten', '')
+        
+        # KIỂM TRA NẾU TÊN ĐÃ CHỨA MÃ SẢN PHẨM, CHỈ GIỮ TÊN
+        if f"[{ms}]" in product_name or ms in product_name:
+            # Xóa mã sản phẩm khỏi tên
+            product_name = product_name.replace(f"[{ms}]", "").replace(ms, "").strip()
+        
         element = {
-            "title": f"[{ms}] {product.get('Ten', '')}",
+            "title": product_name,  # CHỈ HIỂN THỊ TÊN SẢN PHẨM
             "image_url": image_url,
             "subtitle": f"💰 Giá: {gia_int:,.0f} đ",
             "buttons": [
@@ -1563,25 +1617,38 @@ def handle_text_with_function_calling(uid: str, text: str):
     # ƯU TIÊN 1: Lấy MS từ context (echo Fchat, ad_title, catalog...)
     current_ms = ctx.get("last_ms")
     
-    # ƯU TIÊN 2: Nếu không có trong context, tìm trong tin nhắn
-    if not current_ms:
-        detected_ms = detect_ms_from_text(text)
-        if detected_ms and detected_ms in PRODUCTS:
+    # ƯU TIÊN 2: Nếu phát hiện MS từ text (có tiền tố) thì cập nhật, bất kể có current_ms hay không
+    detected_ms = detect_ms_from_text(text)
+    if detected_ms and detected_ms in PRODUCTS:
+        # Nếu MS mới khác MS cũ, hoặc chưa có MS, thì cập nhật
+        if detected_ms != current_ms:
             current_ms = detected_ms
-            ctx["last_ms"] = current_ms
-            update_product_context(uid, current_ms)
+            # SỬ DỤNG HÀM MỚI ĐỂ CẬP NHẬT MS VÀ RESET COUNTER
+            update_context_with_new_ms(uid, current_ms, "text_detection")
             print(f"[MS DETECTED] Phát hiện MS từ tin nhắn hiện tại: {current_ms}")
     
     # ƯU TIÊN 3: Nếu vẫn không có, kiểm tra xem tin nhắn có chứa số không
     if not current_ms or current_ms not in PRODUCTS:
         # Tìm bất kỳ số nào trong tin nhắn (1-6 chữ số) với TIỀN TỐ
+        text_norm = normalize_vietnamese(text.lower())
         numbers = re.findall(r'\b(?:ms|mã|sp|ma|san pham)\s*(\d{1,6})\b', text_norm, re.IGNORECASE)
         for num in numbers:
             clean_num = num.lstrip('0')
             if clean_num and clean_num in PRODUCTS_BY_NUMBER:
                 current_ms = PRODUCTS_BY_NUMBER[clean_num]
                 ctx["last_ms"] = current_ms
-                update_product_context(uid, current_ms)
+                # Gọi hàm cập nhật context
+                if "product_history" not in ctx:
+                    ctx["product_history"] = []
+                
+                if not ctx["product_history"] or ctx["product_history"][0] != current_ms:
+                    if current_ms in ctx["product_history"]:
+                        ctx["product_history"].remove(current_ms)
+                    ctx["product_history"].insert(0, current_ms)
+                
+                if len(ctx["product_history"]) > 5:
+                    ctx["product_history"] = ctx["product_history"][:5]
+                
                 print(f"[MS FALLBACK] Tìm thấy MS từ tiền tố + số: {current_ms}")
                 break
     
@@ -1741,8 +1808,16 @@ def send_single_product_carousel(uid: str, ms: str):
     gia_raw = product.get("Gia", "")
     gia_int = extract_price_int(gia_raw) or 0
     
+    # LẤY TÊN SẢN PHẨM (KHÔNG BAO GỒM MÃ SẢN PHẨM)
+    product_name = product.get('Ten', '')
+    
+    # KIỂM TRA NẾU TÊN ĐÃ CHỨA MÃ SẢN PHẨM, CHỈ GIỮ TÊN
+    if f"[{ms}]" in product_name or ms in product_name:
+        # Xóa mã sản phẩm khỏi tên
+        product_name = product_name.replace(f"[{ms}]", "").replace(ms, "").strip()
+    
     element = {
-        "title": f"[{ms}] {product.get('Ten', '')}",
+        "title": product_name,  # CHỈ HIỂN THỊ TÊN SẢN PHẨM
         "image_url": image_url,
         "subtitle": f"💰 Giá: {gia_int:,.0f} đ",
         "buttons": [
@@ -1768,7 +1843,19 @@ def send_single_product_carousel(uid: str, ms: str):
     
     ctx = USER_CONTEXT[uid]
     ctx["last_ms"] = ms
-    update_product_context(uid, ms)
+    
+    # Gọi hàm update_product_context cũ để duy trì tính năng cũ
+    if "product_history" not in ctx:
+        ctx["product_history"] = []
+    
+    if not ctx["product_history"] or ctx["product_history"][0] != ms:
+        if ms in ctx["product_history"]:
+            ctx["product_history"].remove(ms)
+        ctx["product_history"].insert(0, ms)
+    
+    if len(ctx["product_history"]) > 5:
+        ctx["product_history"] = ctx["product_history"][:5]
+    
     ctx["has_sent_first_carousel"] = True
     
     print(f"✅ [SINGLE CAROUSEL] Đã gửi carousel 1 sản phẩm {ms} cho user {uid}")
@@ -1869,7 +1956,17 @@ def handle_postback_with_recovery(uid: str, payload: str, postback_id: str = Non
         ms = payload.replace("PRODUCT_HIGHLIGHTS_", "")
         if ms in PRODUCTS:
             ctx["last_ms"] = ms
-            update_product_context(uid, ms)
+            # Gọi hàm update_product_context cũ
+            if "product_history" not in ctx:
+                ctx["product_history"] = []
+            
+            if not ctx["product_history"] or ctx["product_history"][0] != ms:
+                if ms in ctx["product_history"]:
+                    ctx["product_history"].remove(ms)
+                ctx["product_history"].insert(0, ms)
+            
+            if len(ctx["product_history"]) > 5:
+                ctx["product_history"] = ctx["product_history"][:5]
             
             # Lấy thông tin sản phẩm
             product = PRODUCTS[ms]
@@ -1954,7 +2051,17 @@ Hãy liệt kê 5 ưu điểm nổi bật nhất của sản phẩm này theo đ
         ms = payload.replace("VIEW_IMAGES_", "")
         if ms in PRODUCTS:
             ctx["last_ms"] = ms
-            update_product_context(uid, ms)
+            # Gọi hàm update_product_context cũ
+            if "product_history" not in ctx:
+                ctx["product_history"] = []
+            
+            if not ctx["product_history"] or ctx["product_history"][0] != ms:
+                if ms in ctx["product_history"]:
+                    ctx["product_history"].remove(ms)
+                ctx["product_history"].insert(0, ms)
+            
+            if len(ctx["product_history"]) > 5:
+                ctx["product_history"] = ctx["product_history"][:5]
             
             # Gọi GPT để xử lý việc gửi ảnh
             handle_text_with_function_calling(uid, "gửi ảnh sản phẩm cho tôi xem")
@@ -1991,7 +2098,7 @@ Vui lòng gửi mã sản phẩm (ví dụ: MS123456) hoặc mô tả sản ph�
 # ============================================
 
 def handle_text(uid: str, text: str):
-    """Xử lý tin nhắn văn bản với logic: tin nhắn 1 → carousel, từ tin nhắn 2 → GPT"""
+    """Xử lý tin nhắn văn bản với logic: chưa gửi carousel → carousel, đã gửi → GPT"""
     if not text or len(text.strip()) == 0:
         return
     
@@ -2029,13 +2136,13 @@ def handle_text(uid: str, text: str):
         print(f"[MESSAGE COUNT] User {uid}: tin nhắn thứ {message_count}")
         
         # QUY TẮC QUAN TRỌNG:
-        # 1. Tin nhắn đầu tiên (real_message_count == 1): Gửi carousel, KHÔNG GPT
-        # 2. Từ tin nhắn thứ 2 trở đi: LUÔN dùng GPT Function Calling
+        # 1. Nếu chưa gửi carousel cho sản phẩm hiện tại (has_sent_first_carousel = False): Gửi carousel, KHÔNG GPT
+        # 2. Nếu đã gửi carousel rồi: LUÔN dùng GPT Function Calling
         last_ms = ctx.get("last_ms")
         
-        if message_count == 1 and last_ms and last_ms in PRODUCTS:
-            print(f"🚨 [FIRST REAL MESSAGE] Tin nhắn THẬT đầu tiên từ user {uid}")
-            print(f"🚨 [FIRST MESSAGE RULE] BỎ QUA nội dung '{text[:50]}...', gửi carousel cho {last_ms}")
+        if not ctx.get("has_sent_first_carousel") and last_ms and last_ms in PRODUCTS:
+            print(f"🚨 [FIRST CAROUSEL FOR PRODUCT] Chưa gửi carousel cho sản phẩm {last_ms}")
+            print(f"🚨 [FIRST CAROUSEL RULE] BỎ QUA nội dung '{text[:50]}...', gửi carousel cho {last_ms}")
             
             # GỬI CAROUSEL CHO SẢN PHẨM ĐÃ ĐƯỢC XÁC ĐỊNH
             send_single_product_carousel(uid, last_ms)
@@ -2102,16 +2209,16 @@ def handle_image(uid: str, image_url: str):
     if found_ms:
         print(f"[IMAGE PRODUCT FOUND] Tìm thấy sản phẩm {found_ms} từ ảnh")
         
-        # Cập nhật context
-        ctx["last_ms"] = found_ms
-        ctx["has_sent_first_carousel"] = False
-        ctx["referral_source"] = "image_search"
-        ctx["real_message_count"] = 0  # Reset counter để áp dụng first message rule
-        update_product_context(uid, found_ms)
+        # SỬ DỤNG HÀM MỚI ĐỂ CẬP NHẬT MS VÀ RESET COUNTER
+        update_context_with_new_ms(uid, found_ms, "image_search")
         
         # Gửi thông báo tìm thấy
+        # LẤY TÊN SẢN PHẨM (KHÔNG BAO GỒM MÃ SẢN PHẨM)
         product_name = PRODUCTS[found_ms].get("Ten", "")
-        send_message(uid, f"✅ Em đã tìm thấy sản phẩm phù hợp với ảnh!\n\n📦 **[{found_ms}] {product_name}**")
+        if f"[{found_ms}]" in product_name or found_ms in product_name:
+            product_name = product_name.replace(f"[{found_ms}]", "").replace(found_ms, "").strip()
+        
+        send_message(uid, f"✅ Em đã tìm thấy sản phẩm phù hợp với ảnh!\n\n📦 **{product_name}**")
         
         # Gửi carousel sản phẩm đã tìm thấy
         send_single_product_carousel(uid, found_ms)
@@ -2156,7 +2263,11 @@ def handle_image(uid: str, image_url: str):
             if popular_products:
                 for ms in popular_products:
                     product = PRODUCTS[ms]
-                    send_message(uid, f"📦 [{ms}] {product.get('Ten', '')}")
+                    # Lấy tên sản phẩm (không bao gồm mã sản phẩm)
+                    product_name = product.get('Ten', '')
+                    if f"[{ms}]" in product_name or ms in product_name:
+                        product_name = product_name.replace(f"[{ms}]", "").replace(ms, "").strip()
+                    send_message(uid, f"📦 {product_name}")
         
         send_message(uid, "Vui lòng gửi mã sản phẩm chính xác (ví dụ: MS000004) để em tư vấn chi tiết ạ!")
 
@@ -2651,11 +2762,9 @@ def webhook():
                                     
                                     ms_from_retailer = extract_ms_from_retailer_id(retailer_id)
                                     if ms_from_retailer:
-                                        ctx["last_ms"] = ms_from_retailer
-                                        ctx["referral_source"] = "catalog"
-                                        ctx["has_sent_first_carousel"] = False
-                                        update_product_context(sender_id, ms_from_retailer)
-                                        print(f"[CATALOG] Lưu retailer_id: {retailer_id} -> MS: {ms_from_retailer}")
+                                        # SỬ DỤNG HÀM MỚI ĐỂ CẬP NHẬT MS VÀ RESET COUNTER
+                                        update_context_with_new_ms(sender_id, ms_from_retailer, "catalog")
+                                        print(f"[CATALOG] Đã cập nhật MS mới từ catalog: {ms_from_retailer}")
 
             # Xử lý echo message từ Fchat - LOGIC MỚI VỚI FCHAT DETECTION
             if m.get("message", {}).get("is_echo"):
@@ -2678,29 +2787,8 @@ def webhook():
                     # Đây là echo từ Fchat với mã sản phẩm => Xử lý ngay
                     print(f"[FCHAT PROCESS] Xử lý echo Fchat với mã: {detected_ms} cho user: {recipient_id}")
                     
-                    ctx = USER_CONTEXT[recipient_id]
-                    
-                    # Kiểm tra trùng lặp
-                    if msg_mid:
-                        if "processed_echo_mids" not in ctx:
-                            ctx["processed_echo_mids"] = set()
-                        
-                        if msg_mid in ctx["processed_echo_mids"]:
-                            print(f"[FCHAT DUPLICATE] Bỏ qua echo đã xử lý: {msg_mid}")
-                            continue
-                        
-                        ctx["processed_echo_mids"].add(msg_mid)
-                        if len(ctx["processed_echo_mids"]) > 20:
-                            ctx["processed_echo_mids"] = set(list(ctx["processed_echo_mids"])[-20:])
-                    
-                    # Cập nhật context với mã sản phẩm
-                    ctx["last_ms"] = detected_ms
-                    ctx["has_sent_first_carousel"] = False
-                    ctx["referral_source"] = "fchat_echo"
-                    ctx["real_message_count"] = 0  # Reset counter để áp dụng first message rule
-                    
-                    update_product_context(recipient_id, detected_ms)
-                    print(f"[FCHAT CONTEXT] Đã cập nhật context: {detected_ms} cho user {recipient_id}")
+                    # SỬ DỤNG HÀM MỚI ĐỂ CẬP NHẬT MS VÀ RESET COUNTER
+                    update_context_with_new_ms(recipient_id, detected_ms, "fchat_echo")
                     
                     # KHÔNG gửi carousel ở đây - đợi tin nhắn đầu tiên từ user
                     continue
@@ -2733,10 +2821,8 @@ def webhook():
                     ctx["processing_lock"] = True
                     
                     try:
-                        ctx["last_ms"] = detected_ms
-                        ctx["has_sent_first_carousel"] = False
-                        ctx["referral_source"] = "fchat_echo"
-                        update_product_context(recipient_id, detected_ms)
+                        # SỬ DỤNG HÀM MỚI ĐỂ CẬP NHẬT MS VÀ RESET COUNTER
+                        update_context_with_new_ms(recipient_id, detected_ms, "fchat_echo")
                         
                         print(f"[ECHO CONTEXT] Đã cập nhật context cho user {recipient_id} với MS: {detected_ms}")
                         
@@ -2782,14 +2868,15 @@ def webhook():
                 
                 # KHÔNG GỬI TIN NHẮN CHO ĐƠN HÀNG TỪ FACEBOOK SHOP
                 # Chỉ cập nhật context và ghi log
-                print(f"[FACEBOOK SHOP ORDER] Không gửi tin nhắn cho đơn hàng từ Facebook Shop, user {sender_id}")
                 
-                # Cập nhật context với mã sản phẩm đầu tiên (nếu có)
+                # Cập nhật context với mã sản phẩm đầu tiên (nếu có) và RESET COUNTER
                 if order_items and order_items[0]["ms"] != "UNKNOWN":
-                    ctx = USER_CONTEXT.get(sender_id, {})
-                    ctx["last_ms"] = order_items[0]["ms"]
-                    ctx["referral_source"] = "facebook_shop_order"
-                    update_product_context(sender_id, order_items[0]["ms"])
+                    new_ms = order_items[0]["ms"]
+                    
+                    # SỬ DỤNG HÀM MỚI ĐỂ CẬP NHẬT MS VÀ RESET COUNTER
+                    update_context_with_new_ms(sender_id, new_ms, "facebook_shop_order")
+                    
+                    print(f"[FACEBOOK SHOP ORDER] Đã cập nhật MS mới {new_ms} từ đơn hàng Facebook Shop")
                 
                 # Ghi log đơn hàng vào hệ thống
                 try:
@@ -2844,10 +2931,8 @@ def webhook():
                     if ms_from_ad and ms_from_ad in PRODUCTS:
                         print(f"[ADS PRODUCT] Xác định sản phẩm từ ad_title: {ms_from_ad}")
                         
-                        ctx["last_ms"] = ms_from_ad
-                        ctx["has_sent_first_carousel"] = False
-                        ctx["referral_source"] = "ADS"
-                        update_product_context(sender_id, ms_from_ad)
+                        # SỬ DỤNG HÀM MỚI ĐỂ CẬP NHẬT MS VÀ RESET COUNTER
+                        update_context_with_new_ms(sender_id, ms_from_ad, "ADS")
                         
                         welcome_msg = f"""Chào anh/chị! 👋 
 Em là trợ lý AI của {get_fanpage_name_from_api()}.
@@ -2862,10 +2947,9 @@ Em thấy anh/chị quan tâm đến sản phẩm **[{ms_from_ad}]** từ quản
                         detected_ms = detect_ms_from_text(referral_payload)
                         if detected_ms and detected_ms in PRODUCTS:
                             print(f"[ADS REFERRAL] Nhận diện mã từ payload: {detected_ms}")
-                            ctx["last_ms"] = detected_ms
-                            ctx["has_sent_first_carousel"] = False
-                            ctx["referral_source"] = "ADS"
-                            update_product_context(sender_id, detected_ms)
+                            
+                            # SỬ DỤNG HÀM MỚI ĐỂ CẬP NHẬT MS VÀ RESET COUNTER
+                            update_context_with_new_ms(sender_id, detected_ms, "ADS")
                             
                             welcome_msg = f"""Chào anh/chị! 👋 
 Em là trợ lý AI của {get_fanpage_name_from_api()}.
@@ -2889,9 +2973,8 @@ Em thấy anh/chị quan tâm đến sản phẩm **[{detected_ms}]**.
                     if detected_ms and detected_ms in PRODUCTS:
                         print(f"[REFERRAL AUTO] Nhận diện mã sản phẩm từ referral: {detected_ms}")
                         
-                        ctx["last_ms"] = detected_ms
-                        ctx["has_sent_first_carousel"] = False
-                        update_product_context(sender_id, detected_ms)
+                        # SỬ DỤNG HÀM MỚI ĐỂ CẬP NHẬT MS VÀ RESET COUNTER
+                        update_context_with_new_ms(sender_id, detected_ms, "referral")
                         
                         welcome_msg = f"""Chào anh/chị! 👋 
 Em là trợ lý AI của {FANPAGE_NAME}.
@@ -3916,7 +3999,13 @@ def api_submit_order():
     
     total = unit_price * quantity
     
+    # LẤY TÊN SẢN PHẨM (KHÔNG BAO GỒM MÃ SẢN PHẨM)
     product_name = row.get('Ten', '')
+    
+    # KIỂM TRA NẾU TÊN ĐÃ CHỨA MÃ SẢN PHẨM, CHỈ GIỮ TÊN
+    if f"[{ms}]" in product_name or ms in product_name:
+        # Xóa mã sản phẩm khỏi tên
+        product_name = product_name.replace(f"[{ms}]", "").replace(ms, "").strip()
     
     print(f"[ORDER DEBUG] Biến thể tìm thấy: {variant_found}, Đơn giá: {unit_price}, Tổng tiền: {total}")
 
@@ -3926,10 +4015,10 @@ def api_submit_order():
             ctx = USER_CONTEXT.get(uid, {})
             referral_source = ctx.get("referral_source", "direct")
             
-            # Tin nhắn với giá đúng của biến thể
+            # Tin nhắn với giá đúng của biến thể (KHÔNG HIỂN THỊ MÃ SẢN PHẨM 2 LẦN)
             msg = (
                 "🎉 Shop đã nhận được đơn hàng mới:\n"
-                f"🛍 Sản phẩm: [{ms}] {product_name}\n"
+                f"🛍 Sản phẩm: {product_name}\n"  # CHỈ HIỂN THỊ TÊN SẢN PHẨM
                 f"🎨 Phân loại: {color} / {size}\n"
                 f"💰 Đơn giá: {unit_price:,.0f} đ\n"
                 f"📦 Số lượng: {quantity}\n"
@@ -4054,8 +4143,8 @@ def health_check():
             "enabled": True,
             "tools": ["get_product_price_details", "get_product_basic_info", "send_product_images", "send_product_videos", "provide_order_link"],
             "model": "gpt-4o-mini",
-            "first_message_logic": "Carousel 1 sản phẩm",
-            "second_message_logic": "GPT Function Calling",
+            "first_message_logic": "Carousel 1 sản phẩm (chưa gửi carousel)",
+            "second_message_logic": "GPT Function Calling (đã gửi carousel)",
             "price_analysis": "Thông minh (color_based, size_based, complex_based, single_price)",
             "policy_handling": "GPT tự đọc mô tả sản phẩm (không dùng tool riêng, không dùng từ khóa)"
         },
@@ -4075,7 +4164,9 @@ def health_check():
             "order_form": True,
             "google_sheets_api": True,
             "poscake_webhook": True,
-            "facebook_shop_order_processing": True  # Thêm tính năng mới
+            "facebook_shop_order_processing": True,
+            "ms_context_update": True,  # Thêm tính năng mới
+            "no_duplicate_ms_display": True  # Thêm tính năng mới
         }
     }, 200
 
@@ -4108,16 +4199,19 @@ if __name__ == "__main__":
     print(f"🟢 OpenAI Function Calling: {'TÍCH HỢP THÀNH CÔNG' if client else 'CHƯA CẤU HÌNH'}")
     print("=" * 80)
     
-    print("🔴 QUAN TRỌNG: TÍNH NĂNG GPT FUNCTION CALLING")
+    print("🔴 CẢI TIẾN MỚI: XỬ LÝ CẬP NHẬT MS VÀ RESET COUNTER")
     print("=" * 80)
-    print(f"🔴 Tin nhắn đầu tiên: Carousel 1 sản phẩm")
-    print(f"🔴 Từ tin nhắn thứ 2: GPT Function Calling với CONTEXT PRIORITY")
-    print(f"🔴 Tools: get_product_price_details, get_product_basic_info, send_product_images, provide_order_link")
-    print(f"🔴 Price Analysis: Thông minh (phân tích theo màu, size, complex)")
-    print(f"🔴 Policy Handling: GPT tự đọc mô tả (KHÔNG dùng tool riêng, KHÔNG dùng từ khóa)")
-    print(f"🔴 Context Tracking: Ghi nhớ MS từ echo Fchat, ad_title, catalog")
-    print(f"🔴 Real Message Counter: Đếm tin nhắn thật từ user")
-    print(f"🔴 Postback Idempotency: Mỗi postback chỉ xử lý 1 lần")
+    print(f"🔴 Hàm mới: update_context_with_new_ms() - tự động reset counter khi phát hiện MS mới")
+    print(f"🔴 Nguồn cập nhật: catalog, ADS referral, Fchat echo, image search, Facebook Shop order")
+    print(f"🔴 Reset counter: real_message_count = 0, has_sent_first_carousel = False")
+    print(f"🔴 Đảm bảo: Khi user chuyển sang sản phẩm khác, bot luôn gửi carousel cho sản phẩm mới")
+    print("=" * 80)
+    
+    print("🔴 CẢI TIẾN MỚI: XÓA MÃ SẢN PHẨM TRÙNG LẶP")
+    print("=" * 80)
+    print(f"🔴 Carousel: Chỉ hiển thị tên sản phẩm (đã loại bỏ mã nếu có trong tên)")
+    print(f"🔴 Tin nhắn xác nhận đơn hàng: Chỉ hiển thị tên sản phẩm, không hiển thị mã lặp lại")
+    print(f"🔴 Tự động xử lý: Kiểm tra nếu tên đã chứa mã thì xóa bỏ mã khỏi tên")
     print("=" * 80)
     
     print("🟢 CẢI TIẾN MỚI: POSCAKE WEBHOOK INTEGRATION")
@@ -4159,7 +4253,7 @@ if __name__ == "__main__":
     print(f"🔴 Thêm debug log để kiểm tra khi có vấn đề")
     print("=" * 80)
     
-    print("🟢 TÍNH NĂNG MỚI: XỬ LÝ ĐƠN HÀNG TỪ FACEBOOK SHOP")
+    print("🟢 TÍNH NĂNG MỚI: XỬ LÝ ĐƠN HÀNG TỰ FACEBOOK SHOP")
     print("=" * 80)
     print(f"🟢 Xử lý sự kiện 'order' từ Facebook Shop")
     print(f"🟢 KHÔNG gửi tin nhắn cảm ơn khi có đơn hàng mới từ Facebook Shop")
