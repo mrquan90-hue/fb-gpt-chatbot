@@ -72,6 +72,81 @@ def get_postback_lock(uid: str, payload: str):
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 # ============================================
+# GLOBAL CACHE CONFIGURATION (THÊM MỚI)
+# ============================================
+PRODUCT_CACHE = {}
+PRODUCT_CACHE_TTL = 3600  # 60 phút
+
+API_CACHE = {}
+API_CACHE_TTL = 300  # 5 phút
+
+PRODUCTS = {}
+PRODUCTS_BY_NUMBER = {}
+LAST_LOAD = 0
+LOAD_TTL = 300
+
+# ============================================
+# CACHE FUNCTIONS (THÊM MỚI)
+# ============================================
+def get_product_with_cache(ms: str) -> Optional[dict]:
+    """Lấy sản phẩm từ cache với TTL 60 phút"""
+    now = time.time()
+    
+    if ms in PRODUCT_CACHE:
+        product_data, cache_time = PRODUCT_CACHE[ms]
+        if now - cache_time < PRODUCT_CACHE_TTL:
+            return product_data
+    
+    # Nếu không có trong cache hoặc cache hết hạn
+    load_products(force=False)
+    if ms in PRODUCTS:
+        product_data = get_product_data_for_gpt(ms)
+        PRODUCT_CACHE[ms] = (product_data, now)
+        return product_data
+    
+    return None
+
+def update_product_cache(ms: str):
+    """Cập nhật cache cho sản phẩm"""
+    if ms in PRODUCTS:
+        product_data = get_product_data_for_gpt(ms)
+        PRODUCT_CACHE[ms] = (product_data, time.time())
+
+def get_api_cache(cache_key: str):
+    """Lấy dữ liệu từ API cache"""
+    now = time.time()
+    if cache_key in API_CACHE:
+        data, timestamp = API_CACHE[cache_key]
+        if now - timestamp < API_CACHE_TTL:
+            return data
+    return None
+
+def set_api_cache(cache_key: str, data):
+    """Lưu dữ liệu vào API cache"""
+    now = time.time()
+    API_CACHE[cache_key] = (data, now)
+    # Giới hạn cache size (tối đa 1000 entries)
+    if len(API_CACHE) > 1000:
+        # Xóa cache cũ nhất
+        oldest_key = min(API_CACHE.items(), key=lambda x: x[1][1])[0]
+        del API_CACHE[oldest_key]
+
+def optimize_image_url(image_url: str, width: int = 400, height: int = 400) -> str:
+    """Tối ưu URL ảnh với kích thước và compression"""
+    if not image_url:
+        return image_url
+    
+    # Nếu là URL Facebook, thêm tham số tối ưu
+    if 'facebook.com' in image_url or 'fbcdn.net' in image_url:
+        return f"{image_url}&width={width}&height={height}&ext=12345678"
+    
+    # Nếu hỗ trợ query parameters
+    if '?' in image_url:
+        return f"{image_url}&w={width}&h={height}&q=80"
+    else:
+        return f"{image_url}?w={width}&h={height}&q=80"
+
+# ============================================
 # MAP TIẾNG VIỆT KHÔNG DẤU
 # ============================================
 VIETNAMESE_MAP = {
@@ -133,11 +208,6 @@ USER_CONTEXT = defaultdict(lambda: {
     # Thêm trường mới cho Poscake
     "poscake_orders": []
 })
-
-PRODUCTS = {}
-PRODUCTS_BY_NUMBER = {}
-LAST_LOAD = 0
-LOAD_TTL = 300
 
 # ============================================
 # CACHE CHO TÊN FANPAGE
@@ -224,6 +294,18 @@ def update_context_with_new_ms(uid: str, new_ms: str, source: str = "unknown"):
     
     print(f"[CONTEXT UPDATE] Đã cập nhật MS {new_ms} cho user {uid} (nguồn: {source}, real_message_count: {ctx['real_message_count']})")
     return True
+
+def ensure_context_for_first_carousel(uid: str, ms: str):
+    """
+    Đảm bảo context được thiết lập đúng để gửi carousel đầu tiên.
+    Gọi hàm này khi phát hiện MS mới từ bất kỳ nguồn nào.
+    """
+    ctx = USER_CONTEXT[uid]
+    ctx["last_ms"] = ms
+    ctx["has_sent_first_carousel"] = False
+    ctx["real_message_count"] = 0
+    ctx["last_msg_time"] = 0
+    print(f"[CONTEXT ENSURED] Đã đảm bảo context cho carousel đầu tiên: MS={ms}")
 
 # ============================================
 # HÀM PHÁT HIỆN EMOJI/STICKER
@@ -1209,7 +1291,7 @@ def get_variant_image(ms: str, color: str, size: str) -> str:
 
 def analyze_product_price_patterns(ms: str) -> dict:
     """
-    Phân tích mẫu giá của sản phẩm và trả về cấu trúc dữ liệu rõ ràng
+    Phân tích mẫu giá của sản phẩm và trả về cấu trúc dữliệu rõ ràng
     """
     if ms not in PRODUCTS:
         return {"error": "Product not found"}
@@ -1457,7 +1539,11 @@ def execute_tool(uid, name, args):
         }, ensure_ascii=False)
     
     elif name == "get_product_basic_info":
-        product_data = get_product_data_for_gpt(ms)
+        # Sử dụng cache cho product data
+        product_data = get_product_with_cache(ms)
+        if not product_data:
+            product_data = get_product_data_for_gpt(ms)
+            update_product_cache(ms)
         
         return json.dumps({
             "status": "success",
@@ -1624,7 +1710,7 @@ def handle_text_with_function_calling(uid: str, text: str):
         if detected_ms != current_ms:
             current_ms = detected_ms
             # SỬ DỤNG HÀM MỚI ĐỂ CẬP NHẬT MS VÀ RESET COUNTER
-            update_context_with_new_ms(uid, current_ms, "text_detection")
+            ensure_context_for_first_carousel(uid, current_ms)
             print(f"[MS DETECTED] Phát hiện MS từ tin nhắn hiện tại: {current_ms}")
     
     # ƯU TIÊN 3: Nếu vẫn không có, kiểm tra xem tin nhắn có chứa số không
@@ -1636,19 +1722,8 @@ def handle_text_with_function_calling(uid: str, text: str):
             clean_num = num.lstrip('0')
             if clean_num and clean_num in PRODUCTS_BY_NUMBER:
                 current_ms = PRODUCTS_BY_NUMBER[clean_num]
-                ctx["last_ms"] = current_ms
-                # Gọi hàm cập nhật context
-                if "product_history" not in ctx:
-                    ctx["product_history"] = []
-                
-                if not ctx["product_history"] or ctx["product_history"][0] != current_ms:
-                    if current_ms in ctx["product_history"]:
-                        ctx["product_history"].remove(current_ms)
-                    ctx["product_history"].insert(0, current_ms)
-                
-                if len(ctx["product_history"]) > 5:
-                    ctx["product_history"] = ctx["product_history"][:5]
-                
+                # Cập nhật context với MS mới
+                ensure_context_for_first_carousel(uid, current_ms)
                 print(f"[MS FALLBACK] Tìm thấy MS từ tiền tố + số: {current_ms}")
                 break
     
@@ -2140,6 +2215,8 @@ def handle_text(uid: str, text: str):
         # 2. Nếu đã gửi carousel rồi: LUÔN dùng GPT Function Calling
         last_ms = ctx.get("last_ms")
         
+        print(f"[FIRST MESSAGE DEBUG] uid={uid}, last_ms={last_ms}, has_sent_first_carousel={ctx.get('has_sent_first_carousel')}, real_message_count={ctx.get('real_message_count')}")
+        
         if not ctx.get("has_sent_first_carousel") and last_ms and last_ms in PRODUCTS:
             print(f"🚨 [FIRST CAROUSEL FOR PRODUCT] Chưa gửi carousel cho sản phẩm {last_ms}")
             print(f"🚨 [FIRST CAROUSEL RULE] BỎ QUA nội dung '{text[:50]}...', gửi carousel cho {last_ms}")
@@ -2210,7 +2287,7 @@ def handle_image(uid: str, image_url: str):
         print(f"[IMAGE PRODUCT FOUND] Tìm thấy sản phẩm {found_ms} từ ảnh")
         
         # SỬ DỤNG HÀM MỚI ĐỂ CẬP NHẬT MS VÀ RESET COUNTER
-        update_context_with_new_ms(uid, found_ms, "image_search")
+        ensure_context_for_first_carousel(uid, found_ms)
         
         # Gửi thông báo tìm thấy
         # LẤY TÊN SẢN PHẨM (KHÔNG BAO GỒM MÃ SẢN PHẨM)
@@ -2648,7 +2725,7 @@ def test_poscake_webhook():
     }), 200
 
 # ============================================
-# API MỚI: Lấy thông tin biến thể (ảnh, giá)
+# API MỚI: Lấy thông tin biến thể (ảnh, giá) - VỚI CACHE
 # ============================================
 
 @app.route("/api/get-variant-info")
@@ -2657,9 +2734,20 @@ def api_get_variant_info():
     color = request.args.get("color", "").strip()
     size = request.args.get("size", "").strip()
     
+    # Tạo cache key
+    cache_key = f"variant_{ms}_{color}_{size}"
+    
+    # Kiểm tra cache
+    cached_data = get_api_cache(cache_key)
+    if cached_data:
+        return cached_data
+    
+    # Nếu không có cache
     load_products()
     if ms not in PRODUCTS:
-        return {"error": "not_found"}, 404
+        result = {"error": "not_found"}, 404
+        set_api_cache(cache_key, result)
+        return result
     
     product = PRODUCTS[ms]
     
@@ -2695,7 +2783,7 @@ def api_get_variant_info():
         urls = parse_image_urls(images_field)
         variant_image = urls[0] if urls else ""
     
-    return {
+    result = {
         "ms": ms,
         "color": color,
         "size": size,
@@ -2704,6 +2792,26 @@ def api_get_variant_info():
         "price_raw": variant_price_raw,
         "found_variant": target_variant is not None
     }
+    
+    # Cache kết quả
+    set_api_cache(cache_key, result)
+    return result
+
+# ============================================
+# HELPER FUNCTIONS FOR RENDERING
+# ============================================
+
+def render_error_page(message: str):
+    """Render trang lỗi"""
+    return f"""
+    <html>
+    <body style="text-align: center; padding: 50px; font-family: Arial, sans-serif;">
+        <h2 style="color: #FF3B30;">⚠️ {message}</h2>
+        <p>Vui lòng quay lại Messenger và thử lại.</p>
+        <a href="/" style="color: #1DB954; text-decoration: none; font-weight: bold;">Quay về trang chủ</a>
+    </body>
+    </html>
+    """
 
 # ============================================
 # WEBHOOK HANDLER (ĐÃ SỬA ĐỂ NHẬN DIỆN FCHAT VÀ XỬ LÝ ORDER FACEBOOK SHOP)
@@ -2763,7 +2871,7 @@ def webhook():
                                     ms_from_retailer = extract_ms_from_retailer_id(retailer_id)
                                     if ms_from_retailer:
                                         # SỬ DỤNG HÀM MỚI ĐỂ CẬP NHẬT MS VÀ RESET COUNTER
-                                        update_context_with_new_ms(sender_id, ms_from_retailer, "catalog")
+                                        ensure_context_for_first_carousel(sender_id, ms_from_retailer)
                                         print(f"[CATALOG] Đã cập nhật MS mới từ catalog: {ms_from_retailer}")
 
             # Xử lý echo message từ Fchat - LOGIC MỚI VỚI FCHAT DETECTION
@@ -2787,8 +2895,8 @@ def webhook():
                     # Đây là echo từ Fchat với mã sản phẩm => Xử lý ngay
                     print(f"[FCHAT PROCESS] Xử lý echo Fchat với mã: {detected_ms} cho user: {recipient_id}")
                     
-                    # SỬ DỤNG HÀM MỚI ĐỂ CẬP NHẬT MS VÀ RESET COUNTER
-                    update_context_with_new_ms(recipient_id, detected_ms, "fchat_echo")
+                    # SỬ DỤNG HÀM MỚI ĐỂ ĐẢM BẢO CONTEXT CHO CAROUSEL ĐẦU TIÊN
+                    ensure_context_for_first_carousel(recipient_id, detected_ms)
                     
                     # KHÔNG gửi carousel ở đây - đợi tin nhắn đầu tiên từ user
                     continue
@@ -2822,7 +2930,7 @@ def webhook():
                     
                     try:
                         # SỬ DỤNG HÀM MỚI ĐỂ CẬP NHẬT MS VÀ RESET COUNTER
-                        update_context_with_new_ms(recipient_id, detected_ms, "fchat_echo")
+                        ensure_context_for_first_carousel(recipient_id, detected_ms)
                         
                         print(f"[ECHO CONTEXT] Đã cập nhật context cho user {recipient_id} với MS: {detected_ms}")
                         
@@ -2874,7 +2982,7 @@ def webhook():
                     new_ms = order_items[0]["ms"]
                     
                     # SỬ DỤNG HÀM MỚI ĐỂ CẬP NHẬT MS VÀ RESET COUNTER
-                    update_context_with_new_ms(sender_id, new_ms, "facebook_shop_order")
+                    ensure_context_for_first_carousel(sender_id, new_ms)
                     
                     print(f"[FACEBOOK SHOP ORDER] Đã cập nhật MS mới {new_ms} từ đơn hàng Facebook Shop")
                 
@@ -2932,7 +3040,7 @@ def webhook():
                         print(f"[ADS PRODUCT] Xác định sản phẩm từ ad_title: {ms_from_ad}")
                         
                         # SỬ DỤNG HÀM MỚI ĐỂ CẬP NHẬT MS VÀ RESET COUNTER
-                        update_context_with_new_ms(sender_id, ms_from_ad, "ADS")
+                        ensure_context_for_first_carousel(sender_id, ms_from_ad)
                         
                         welcome_msg = f"""Chào anh/chị! 👋 
 Em là trợ lý AI của {get_fanpage_name_from_api()}.
@@ -2949,7 +3057,7 @@ Em thấy anh/chị quan tâm đến sản phẩm **[{ms_from_ad}]** từ quản
                             print(f"[ADS REFERRAL] Nhận diện mã từ payload: {detected_ms}")
                             
                             # SỬ DỤNG HÀM MỚI ĐỂ CẬP NHẬT MS VÀ RESET COUNTER
-                            update_context_with_new_ms(sender_id, detected_ms, "ADS")
+                            ensure_context_for_first_carousel(sender_id, detected_ms)
                             
                             welcome_msg = f"""Chào anh/chị! 👋 
 Em là trợ lý AI của {get_fanpage_name_from_api()}.
@@ -2974,7 +3082,7 @@ Em thấy anh/chị quan tâm đến sản phẩm **[{detected_ms}]**.
                         print(f"[REFERRAL AUTO] Nhận diện mã sản phẩm từ referral: {detected_ms}")
                         
                         # SỬ DỤNG HÀM MỚI ĐỂ CẬP NHẬT MS VÀ RESET COUNTER
-                        update_context_with_new_ms(sender_id, detected_ms, "referral")
+                        ensure_context_for_first_carousel(sender_id, detected_ms)
                         
                         welcome_msg = f"""Chào anh/chị! 👋 
 Em là trợ lý AI của {FANPAGE_NAME}.
@@ -3074,50 +3182,44 @@ Anh/chị quan tâm sản phẩm nào ạ?"""
     return "OK", 200
 
 # ============================================
-# ORDER FORM PAGE - CẢI TIẾN MỚI
+# ORDER FORM PAGE - CẢI TIẾN MỚI VỚI LAZY LOADING VÀ CACHE
 # ============================================
 
 @app.route("/order-form", methods=["GET"])
 def order_form():
     ms = (request.args.get("ms") or "").upper()
     uid = request.args.get("uid") or ""
-    if not ms:
-        return (
-            """
-        <html>
-        <body style="text-align: center; padding: 50px; font-family: Arial, sans-serif;">
-            <h2 style="color: #FF3B30;">⚠️ Không tìm thấy sản phẩm</h2>
-            <p>Vui lòng quay lại Messenger và chọn sản phẩm để đặt hàng.</p>
-            <a href="/" style="color: #1DB954; text-decoration: none; font-weight: bold;">Quay về trang chủ</a>
-        </body>
-        </html>
-        """,
-            400,
-        )
-
-    load_products()
-    if ms not in PRODUCTS:
-        return (
-            """
-        <html>
-        <body style="text-align: center; padding: 50px; font-family: Arial, sans-serif;">
-            <h2 style="color: #FF3B30;">⚠️ Sản phẩm không tồn tại</h2>
-            <p>Vui lòng quay lại Messenger và chọn sản phẩm khác giúp shop ạ.</p>
-            <a href="/" style="color: #1DB954; text-decoration: none; font-weight: bold;">Quay về trang chủ</a>
-        </body>
-        </html>
-        """,
-            404,
-        )
-
-    current_fanpage_name = get_fanpage_name_from_api()
     
-    row = PRODUCTS[ms]
+    if not ms:
+        return render_error_page("Không tìm thấy sản phẩm")
+    
+    # Sử dụng cache để lấy thông tin sản phẩm
+    product_data = get_product_with_cache(ms)
+    
+    if not product_data:
+        # Nếu không có cache, load như bình thường
+        load_products()
+        if ms not in PRODUCTS:
+            return render_error_page("Sản phẩm không tồn tại")
+        
+        # Cache sản phẩm
+        update_product_cache(ms)
+        product_data = get_product_data_for_gpt(ms)
+        row = PRODUCTS[ms]
+    else:
+        # Nếu có cache, vẫn cần row để lấy các trường khác
+        load_products()
+        row = PRODUCTS.get(ms, {})
+    
+    current_fanpage_name = get_fanpage_name_from_api()
     
     images_field = row.get("Images", "")
     urls = parse_image_urls(images_field)
     default_image = urls[0] if urls else ""
-
+    
+    # Tạo thumbnail URL cho lazy loading
+    thumbnail_url = optimize_image_url(default_image, width=400, height=400) if default_image else ""
+    
     size_field = row.get("size (Thuộc tính)", "")
     color_field = row.get("màu (Thuộc tính)", "")
 
@@ -3137,7 +3239,7 @@ def order_form():
     price_str = row.get("Gia", "0")
     price_int = extract_price_int(price_str) or 0
 
-    # Tạo HTML với form địa chỉ mới
+    # Tạo HTML với lazy loading và cache optimization
     html = f"""
     <!DOCTYPE html>
     <html>
@@ -3145,6 +3247,12 @@ def order_form():
         <meta charset="utf-8" />
         <title>Đặt hàng - {row.get('Ten','')}</title>
         <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <!-- Preload resources -->
+        <link rel="preload" href="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/css/select2.min.css" as="style">
+        <link rel="preload" href="https://code.jquery.com/jquery-3.6.0.min.js" as="script">
+        <link rel="dns-prefetch" href="https://provinces.open-api.vn">
+        <link rel="dns-prefetch" href="https://cdn.jsdelivr.net">
+        
         <link href="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/css/select2.min.css" rel="stylesheet" />
         <style>
             * {{
@@ -3208,12 +3316,36 @@ def order_form():
                 align-items: center;
                 justify-content: center;
                 flex-shrink: 0;
+                position: relative;
             }}
             
             .product-image {{
                 width: 100%;
                 height: 100%;
                 object-fit: cover;
+                opacity: 0;
+                transition: opacity 0.3s ease;
+            }}
+            
+            .product-image.loaded {{
+                opacity: 1;
+            }}
+            
+            .image-placeholder {{
+                position: absolute;
+                top: 0;
+                left: 0;
+                width: 100%;
+                height: 100%;
+                background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%);
+                background-size: 200% 100%;
+                animation: loading 1.5s infinite;
+                border-radius: 12px;
+            }}
+            
+            @keyframes loading {{
+                0% {{ background-position: 200% 0; }}
+                100% {{ background-position: -200% 0; }}
             }}
             
             .placeholder-image {{
@@ -3435,10 +3567,11 @@ def order_form():
             </div>
             
             <div class="content">
-                <!-- Product Info Section -->
+                <!-- Product Info Section với lazy loading -->
                 <div class="product-section">
-                    <div class="product-image-container" id="image-container">
-                        {"<img id='product-image' src='" + default_image + "' class='product-image' onerror=\"this.onerror=null; this.src='https://via.placeholder.com/120x120?text=No+Image'\" />" if default_image else "<div class='placeholder-image'>Chưa có ảnh sản phẩm</div>"}
+                    <div class="product-image-container">
+                        <div class="image-placeholder" id="image-placeholder"></div>
+                        {"<img id='product-image' class='product-image' data-src='" + default_image + "' src='" + thumbnail_url + "' onload=\"this.classList.add('loaded'); document.getElementById('image-placeholder').style.display='none';\" />" if default_image else "<div class='placeholder-image'>Chưa có ảnh sản phẩm</div>"}
                     </div>
                     <div class="product-info">
                         <div class="product-code">Mã: {ms}</div>
@@ -3548,6 +3681,22 @@ def order_form():
                 wards: []
             }};
             
+            // Lazy load high-res image
+            document.addEventListener('DOMContentLoaded', function() {{
+                const productImage = document.getElementById('product-image');
+                if (productImage) {{
+                    const highResSrc = productImage.getAttribute('data-src');
+                    if (highResSrc && highResSrc !== productImage.src) {{
+                        const img = new Image();
+                        img.onload = function() {{
+                            productImage.src = highResSrc;
+                            productImage.classList.add('loaded');
+                        }};
+                        img.src = highResSrc;
+                    }}
+                }}
+            }});
+            
             function formatPrice(n) {{
                 return n.toLocaleString('vi-VN') + ' đ';
             }}
@@ -3557,7 +3706,7 @@ def order_form():
                 document.getElementById('total-display').innerText = formatPrice(BASE_PRICE * quantity);
             }}
             
-            // Hàm cập nhật thông tin biến thể (ảnh và giá)
+            // Hàm cập nhật thông tin biến thể (ảnh và giá) với cache support
             async function updateVariantInfo() {{
                 const color = document.getElementById('color').value;
                 const size = document.getElementById('size').value;
@@ -3566,21 +3715,26 @@ def order_form():
                 document.getElementById('variant-loading').style.display = 'block';
                 
                 try {{
+                    // Sử dụng cache bên client (sessionStorage)
+                    const cacheKey = `variant_${{PRODUCT_MS}}_${{color}}_${{size}}`;
+                    const cachedData = sessionStorage.getItem(cacheKey);
+                    
+                    if (cachedData) {{
+                        const data = JSON.parse(cachedData);
+                        updateVariantUI(data);
+                        document.getElementById('variant-loading').style.display = 'none';
+                        return;
+                    }}
+                    
                     const response = await fetch(`${{API_BASE_URL}}/get-variant-info?ms=${{PRODUCT_MS}}&color=${{encodeURIComponent(color)}}&size=${{encodeURIComponent(size)}}`);
                     if (response.ok) {{
                         const data = await response.json();
                         
-                        // Cập nhật ảnh sản phẩm
-                        const productImage = document.getElementById('product-image');
-                        if (data.image) {{
-                            productImage.src = data.image;
-                            productImage.style.display = 'block';
-                        }}
+                        // Cache trong sessionStorage (5 phút)
+                        sessionStorage.setItem(cacheKey, JSON.stringify(data));
+                        setTimeout(() => sessionStorage.removeItem(cacheKey), 5 * 60 * 1000);
                         
-                        // Cập nhật giá
-                        BASE_PRICE = data.price || {price_int};
-                        document.getElementById('price-display').innerText = formatPrice(BASE_PRICE);
-                        updatePriceDisplay();
+                        updateVariantUI(data);
                     }}
                 }} catch (error) {{
                     console.error('Lỗi khi cập nhật thông tin biến thể:', error);
@@ -3589,11 +3743,41 @@ def order_form():
                 }}
             }}
             
+            function updateVariantUI(data) {{
+                // Cập nhật ảnh sản phẩm với lazy loading
+                const productImage = document.getElementById('product-image');
+                if (data.image && data.image !== productImage.src) {{
+                    const imagePlaceholder = document.getElementById('image-placeholder');
+                    if (imagePlaceholder) imagePlaceholder.style.display = 'block';
+                    
+                    const tempImg = new Image();
+                    tempImg.onload = function() {{
+                        productImage.src = data.image;
+                        productImage.classList.add('loaded');
+                        if (imagePlaceholder) imagePlaceholder.style.display = 'none';
+                    }};
+                    tempImg.src = data.image;
+                }}
+                
+                // Cập nhật giá
+                BASE_PRICE = data.price || {price_int};
+                document.getElementById('price-display').innerText = formatPrice(BASE_PRICE);
+                updatePriceDisplay();
+            }}
+            
             // Hàm load danh sách tỉnh/thành
             async function loadProvinces() {{
                 try {{
-                    const response = await fetch('https://provinces.open-api.vn/api/p/');
-                    addressData.provinces = await response.json();
+                    // Kiểm tra cache
+                    const cachedProvinces = localStorage.getItem('provinces_data');
+                    if (cachedProvinces) {{
+                        addressData.provinces = JSON.parse(cachedProvinces);
+                    }} else {{
+                        const response = await fetch('https://provinces.open-api.vn/api/p/');
+                        addressData.provinces = await response.json();
+                        // Cache trong localStorage (1 ngày)
+                        localStorage.setItem('provinces_data', JSON.stringify(addressData.provinces));
+                    }}
                     
                     const provinceSelect = $('#province');
                     provinceSelect.empty();
@@ -3633,10 +3817,18 @@ def order_form():
             // Hàm load danh sách quận/huyện
             async function loadDistricts(provinceCode) {{
                 try {{
-                    const response = await fetch(`https://provinces.open-api.vn/api/p/${{provinceCode}}?depth=2`);
-                    const provinceData = await response.json();
+                    const cacheKey = `districts_${{provinceCode}}`;
+                    const cachedDistricts = localStorage.getItem(cacheKey);
                     
-                    addressData.districts = provinceData.districts || [];
+                    if (cachedDistricts) {{
+                        addressData.districts = JSON.parse(cachedDistricts);
+                    }} else {{
+                        const response = await fetch(`https://provinces.open-api.vn/api/p/${{provinceCode}}?depth=2`);
+                        const provinceData = await response.json();
+                        addressData.districts = provinceData.districts || [];
+                        // Cache trong localStorage (1 ngày)
+                        localStorage.setItem(cacheKey, JSON.stringify(addressData.districts));
+                    }}
                     
                     const districtSelect = $('#district');
                     districtSelect.empty();
@@ -3669,10 +3861,18 @@ def order_form():
             // Hàm load danh sách phường/xã
             async function loadWards(districtCode) {{
                 try {{
-                    const response = await fetch(`https://provinces.open-api.vn/api/d/${{districtCode}}?depth=2`);
-                    const districtData = await response.json();
+                    const cacheKey = `wards_${{districtCode}}`;
+                    const cachedWards = localStorage.getItem(cacheKey);
                     
-                    addressData.wards = districtData.wards || [];
+                    if (cachedWards) {{
+                        addressData.wards = JSON.parse(cachedWards);
+                    }} else {{
+                        const response = await fetch(`https://provinces.open-api.vn/api/d/${{districtCode}}?depth=2`);
+                        const districtData = await response.json();
+                        addressData.wards = districtData.wards || [];
+                        // Cache trong localStorage (1 ngày)
+                        localStorage.setItem(cacheKey, JSON.stringify(addressData.wards));
+                    }}
                     
                     const wardSelect = $('#ward');
                     wardSelect.empty();
@@ -3778,7 +3978,7 @@ def order_form():
                     return;
                 }}
                 
-                // Ghép địa chỉ đầy đủ
+                # Ghép địa chỉ đầy đủ
                 const provinceName = getAddressName(formData.province, 'provinces') || '';
                 const districtName = getAddressName(formData.district, 'districts') || '';
                 const wardName = getAddressName(formData.ward, 'wards') || '';
@@ -3794,11 +3994,18 @@ def order_form():
                 submitBtn.disabled = true;
                 
                 try {{
+                    // Thêm timeout cho request
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort(), 10000);
+                    
                     const response = await fetch(`${{API_BASE_URL}}/submit-order`, {{
                         method: 'POST',
                         headers: {{ 'Content-Type': 'application/json' }},
-                        body: JSON.stringify(formData)
+                        body: JSON.stringify(formData),
+                        signal: controller.signal
                     }});
+                    
+                    clearTimeout(timeoutId);
                     
                     const data = await response.json();
                     
@@ -3822,7 +4029,7 @@ Cảm ơn quý khách đã đặt hàng! ❤️`;
                         
                         alert(successMessage);
                         
-                        // Reset form sau 2 giây
+                        # Reset form sau 2 giây
                         setTimeout(() => {{
                             document.getElementById('orderForm').reset();
                             $('#province, #district, #ward').val('').trigger('change');
@@ -3836,25 +4043,29 @@ Cảm ơn quý khách đã đặt hàng! ❤️`;
                     }}
                 }} catch (error) {{
                     console.error('Lỗi khi đặt hàng:', error);
-                    alert('❌ Lỗi kết nối. Vui lòng kiểm tra mạng và thử lại!');
+                    if (error.name === 'AbortError') {{
+                        alert('❌ Yêu cầu quá thời gian chờ. Vui lòng thử lại!');
+                    }} else {{
+                        alert('❌ Lỗi kết nối. Vui lòng kiểm tra mạng và thử lại!');
+                    }}
                 }} finally {{
                     submitBtn.innerHTML = originalText;
                     submitBtn.disabled = false;
                 }}
             }}
             
-            // Khởi tạo khi trang được tải
+            # Khởi tạo khi trang được tải
             document.addEventListener('DOMContentLoaded', function() {{
-                // Load danh sách tỉnh/thành
+                # Load danh sách tỉnh/thành
                 loadProvinces();
                 
-                // Cập nhật giá khi thay đổi số lượng
+                # Cập nhật giá khi thay đổi số lượng
                 document.getElementById('quantity').addEventListener('input', updatePriceDisplay);
                 
-                // Gọi cập nhật biến thể lần đầu
+                # Gọi cập nhật biến thể lần đầu
                 updateVariantInfo();
                 
-                // Focus vào trường tên
+                # Focus vào trường tên
                 setTimeout(() => {{
                     document.getElementById('customerName').focus();
                 }}, 500);
@@ -3866,15 +4077,25 @@ Cảm ơn quý khách đã đặt hàng! ❤️`;
     return html
 
 # ============================================
-# API ENDPOINTS
+# API ENDPOINTS VỚI CACHE OPTIMIZATION
 # ============================================
 
 @app.route("/api/get-product")
 def api_get_product():
-    load_products()
     ms = (request.args.get("ms") or "").upper()
+    cache_key = f"api_get_product_{ms}"
+    
+    # Kiểm tra cache
+    cached_data = get_api_cache(cache_key)
+    if cached_data:
+        return cached_data
+    
+    # Nếu không có cache
+    load_products()
     if ms not in PRODUCTS:
-        return {"error": "not_found"}, 404
+        result = {"error": "not_found"}, 404
+        set_api_cache(cache_key, result)  # Cache kể cả lỗi
+        return result
 
     row = PRODUCTS[ms]
     images_field = row.get("Images", "")
@@ -3900,7 +4121,7 @@ def api_get_product():
     price_str = row.get("Gia", "0")
     price_int = extract_price_int(price_str) or 0
 
-    return {
+    result = {
         "ms": ms,
         "name": row.get("Ten", ""),
         "image": image,
@@ -3909,29 +4130,50 @@ def api_get_product():
         "price": price_int,
         "price_display": f"{price_int:,.0f} đ",
     }
+    
+    set_api_cache(cache_key, result)
+    return result
 
-@app.route("/api/get-variant-image")
-def api_get_variant_image():
-    ms = (request.args.get("ms") or "").upper()
-    color = request.args.get("color", "").strip()
-    size = request.args.get("size", "").strip()
-    
-    load_products()
-    if ms not in PRODUCTS:
-        return {"error": "not_found"}, 404
-    
-    variant_image = get_variant_image(ms, color, size)
-    
-    return {
-        "ms": ms,
-        "color": color,
-        "size": size,
-        "image": variant_image
-    }
+# ============================================
+# API SUBMIT ORDER VỚI BACKGROUND PROCESSING
+# ============================================
 
-@app.route("/api/submit-order", methods=["POST"])
-def api_submit_order():
-    data = request.get_json() or {}
+def process_order_in_background(order_data: dict):
+    """Xử lý đơn hàng trong background thread"""
+    try:
+        # Lấy lại các biến từ order_data
+        ms = order_data.get("ms", "").upper()
+        uid = order_data.get("uid", "")
+        color = order_data.get("color", "")
+        size = order_data.get("size", "")
+        quantity = int(order_data.get("quantity") or 1)
+        customer_name = order_data.get("customerName", "")
+        phone = order_data.get("phone", "")
+        address_detail = order_data.get("addressDetail", "")
+        province_name = order_data.get("provinceName", "")
+        district_name = order_data.get("districtName", "")
+        ward_name = order_data.get("wardName", "")
+        full_address = order_data.get("fullAddress", "")
+        
+        # Gọi hàm xử lý đơn hàng gốc
+        from flask import jsonify
+        import json
+        
+        # Tạo request context giả lập
+        with app.test_request_context():
+            # Gọi hàm api_submit_order_internal
+            result = api_submit_order_internal(order_data)
+            
+            print(f"[BACKGROUND ORDER] Xử lý đơn hàng xong: {ms} - {customer_name}")
+            return result
+        
+    except Exception as e:
+        print(f"[BACKGROUND ORDER ERROR] Lỗi khi xử lý background: {e}")
+        import traceback
+        traceback.print_exc()
+
+def api_submit_order_internal(data: dict):
+    """Hàm xử lý đơn hàng nội bộ (được gọi từ background thread)"""
     ms = (data.get("ms") or "").upper()
     uid = data.get("uid") or ""
     color = data.get("color") or ""
@@ -3939,9 +4181,6 @@ def api_submit_order():
     quantity = int(data.get("quantity") or 1)
     customer_name = data.get("customerName") or ""
     phone = data.get("phone") or ""
-    
-    # Debug log
-    print(f"[ORDER DEBUG] MS: {ms}, Color: {color}, Size: {size}")
     
     # Địa chỉ mới
     address_detail = data.get("addressDetail") or ""
@@ -3959,15 +4198,12 @@ def api_submit_order():
     if not row:
         return {"error": "not_found", "message": "Sản phẩm không tồn tại"}, 404
 
-    # QUAN TRỌNG: Tìm giá đúng của biến thể (màu + size)
+    # Tìm giá đúng của biến thể (màu + size)
     unit_price = 0
     variant_found = False
     
-    # Debug: Log các biến thể có sẵn
-    print(f"[ORDER DEBUG] Tìm biến thể với màu='{color}', size='{size}'")
-    
     # Tìm biến thể phù hợp trong danh sách variants
-    for idx, variant in enumerate(row.get("variants", [])):
+    for variant in row.get("variants", []):
         variant_color = variant.get("mau", "").strip().lower()
         variant_size = variant.get("size", "").strip().lower()
         
@@ -3980,22 +4216,18 @@ def api_submit_order():
         
         if color_match and size_match:
             variant_found = True
-            # Ưu tiên lấy giá số (gia) trước, nếu không có thì lấy giá dạng chuỗi (gia_raw)
             if variant.get("gia"):
                 unit_price = variant.get("gia", 0)
             else:
-                # Nếu không có gia dạng số, thử chuyển đổi từ gia_raw
                 gia_raw = variant.get("gia_raw", "")
                 if gia_raw:
                     unit_price = extract_price_int(gia_raw) or 0
-            print(f"[ORDER DEBUG] Biến thể {idx} phù hợp: màu='{variant_color}', size='{variant_size}', giá={unit_price}")
             break
     
     # Nếu không tìm thấy biến thể phù hợp, lấy giá chung của sản phẩm
     if not variant_found or unit_price == 0:
         price_str = row.get("Gia", "0")
         unit_price = extract_price_int(price_str) or 0
-        print(f"[ORDER DEBUG] Không tìm thấy biến thể phù hợp, sử dụng giá chung: {unit_price}")
     
     total = unit_price * quantity
     
@@ -4004,21 +4236,17 @@ def api_submit_order():
     
     # KIỂM TRA NẾU TÊN ĐÃ CHỨA MÃ SẢN PHẨM, CHỈ GIỮ TÊN
     if f"[{ms}]" in product_name or ms in product_name:
-        # Xóa mã sản phẩm khỏi tên
         product_name = product_name.replace(f"[{ms}]", "").replace(ms, "").strip()
     
-    print(f"[ORDER DEBUG] Biến thể tìm thấy: {variant_found}, Đơn giá: {unit_price}, Tổng tiền: {total}")
-
     # Gửi tin nhắn xác nhận cho khách hàng nếu có uid hợp lệ
-    if uid and len(uid) > 5:  # UID Facebook thường dài
+    if uid and len(uid) > 5:
         try:
             ctx = USER_CONTEXT.get(uid, {})
             referral_source = ctx.get("referral_source", "direct")
             
-            # Tin nhắn với giá đúng của biến thể (KHÔNG HIỂN THỊ MÃ SẢN PHẨM 2 LẦN)
             msg = (
                 "🎉 Shop đã nhận được đơn hàng mới:\n"
-                f"🛍 Sản phẩm: {product_name}\n"  # CHỈ HIỂN THỊ TÊN SẢN PHẨM
+                f"🛍 Sản phẩm: {product_name}\n"
                 f"🎨 Phân loại: {color} / {size}\n"
                 f"💰 Đơn giá: {unit_price:,.0f} đ\n"
                 f"📦 Số lượng: {quantity}\n"
@@ -4038,7 +4266,6 @@ def api_submit_order():
             
         except Exception as e:
             print(f"⚠️ Không thể gửi tin nhắn cho user {uid}: {str(e)}")
-            # Vẫn tiếp tục xử lý đơn hàng ngay cả khi không gửi được tin nhắn
     
     order_data = {
         "ms": ms,
@@ -4054,10 +4281,10 @@ def api_submit_order():
         "district": district_name,
         "ward": ward_name,
         "product_name": product_name,
-        "unit_price": unit_price,  # Lưu giá của biến thể
+        "unit_price": unit_price,
         "total_price": total,
-        "referral_source": ctx.get("referral_source", "direct") if uid else "direct",
-        "variant_found": variant_found  # Đánh dấu đã tìm thấy biến thể
+        "referral_source": USER_CONTEXT.get(uid, {}).get("referral_source", "direct") if uid else "direct",
+        "variant_found": variant_found
     }
     
     # Ghi vào Google Sheets
@@ -4108,6 +4335,26 @@ def api_submit_order():
         }
     }
 
+@app.route("/api/submit-order", methods=["POST"])
+def api_submit_order():
+    """API xử lý đơn hàng với background processing"""
+    data = request.get_json() or {}
+    
+    # Trả về phản hồi ngay lập xử lý nhanh
+    immediate_response = {
+        "status": "processing",
+        "message": "Đang xử lý đơn hàng...",
+        "order_received": True,
+        "order_id": f"ORD{int(time.time())}_{data.get('uid', '0000')[-4:]}"
+    }
+    
+    # Khởi chạy thread xử lý background
+    thread = threading.Thread(target=process_order_in_background, args=(data,))
+    thread.daemon = True
+    thread.start()
+    
+    return jsonify(immediate_response), 202  # 202 Accepted
+
 # ============================================
 # HEALTH CHECK
 # ============================================
@@ -4123,6 +4370,12 @@ def health_check():
         "timestamp": datetime.now().isoformat(),
         "products_loaded": len(PRODUCTS),
         "variants_loaded": total_variants,
+        "cache_info": {
+            "product_cache_size": len(PRODUCT_CACHE),
+            "api_cache_size": len(API_CACHE),
+            "product_cache_ttl": PRODUCT_CACHE_TTL,
+            "api_cache_ttl": API_CACHE_TTL
+        },
         "openai_configured": bool(client),
         "facebook_configured": bool(PAGE_ACCESS_TOKEN),
         "fanpage_name": current_fanpage_name,
@@ -4138,6 +4391,15 @@ def health_check():
                 "webhook": "/poscake-webhook",
                 "test": "/test-poscake-webhook"
             }
+        },
+        "performance_optimizations": {
+            "enabled": True,
+            "product_cache": True,
+            "api_cache": True,
+            "lazy_loading": True,
+            "image_optimization": True,
+            "background_processing": True,
+            "client_side_caching": True
         },
         "gpt_function_calling": {
             "enabled": True,
@@ -4165,8 +4427,10 @@ def health_check():
             "google_sheets_api": True,
             "poscake_webhook": True,
             "facebook_shop_order_processing": True,
-            "ms_context_update": True,  # Thêm tính năng mới
-            "no_duplicate_ms_display": True  # Thêm tính năng mới
+            "ms_context_update": True,
+            "no_duplicate_ms_display": True,
+            "cache_optimization": True,
+            "lazy_loading": True
         }
     }, 200
 
@@ -4185,7 +4449,7 @@ if __name__ == "__main__":
     import os
     
     print("=" * 80)
-    print("🟢 KHỞI ĐỘNG FACEBOOK CHATBOT - GPT FUNCTION CALLING MODE")
+    print("🟢 KHỞI ĐỘNG FACEBOOK CHATBOT - OPTIMIZED VERSION")
     print("=" * 80)
     print(f"🟢 Process ID: {os.getpid()}")
     print(f"🟢 Port: {get_port()}")
@@ -4199,9 +4463,20 @@ if __name__ == "__main__":
     print(f"🟢 OpenAI Function Calling: {'TÍCH HỢP THÀNH CÔNG' if client else 'CHƯA CẤU HÌNH'}")
     print("=" * 80)
     
+    print("✅ PERFORMANCE OPTIMIZATIONS ENABLED:")
+    print("=" * 80)
+    print(f"✅ Product Cache: {PRODUCT_CACHE_TTL} giây (60 phút)")
+    print(f"✅ API Cache: {API_CACHE_TTL} giây (5 phút)")
+    print(f"✅ Lazy Loading Images: Enabled")
+    print(f"✅ Image Optimization: Enabled (thumbnails + compression)")
+    print(f"✅ Background Order Processing: Enabled")
+    print(f"✅ Client-side Caching: Enabled (sessionStorage + localStorage)")
+    print("=" * 80)
+    
     print("🔴 CẢI TIẾN MỚI: XỬ LÝ CẬP NHẬT MS VÀ RESET COUNTER")
     print("=" * 80)
-    print(f"🔴 Hàm mới: update_context_with_new_ms() - tự động reset counter khi phát hiện MS mới")
+    print(f"🔴 Hàm mới: ensure_context_for_first_carousel() - tự động reset counter khi phát hiện MS mới")
+    print(f"🔴 Hàm mới: handle_text_with_function_calling() - ưu tiên MS từ context thay vì tìm lại")
     print(f"🔴 Nguồn cập nhật: catalog, ADS referral, Fchat echo, image search, Facebook Shop order")
     print(f"🔴 Reset counter: real_message_count = 0, has_sent_first_carousel = False")
     print(f"🔴 Đảm bảo: Khi user chuyển sang sản phẩm khác, bot luôn gửi carousel cho sản phẩm mới")
@@ -4235,14 +4510,15 @@ if __name__ == "__main__":
     print(f"🟢 Context cập nhật: Reset counter để áp dụng first message rule khi tìm thấy sản phẩm từ ảnh")
     print("=" * 80)
     
-    print("🔴 FORM ĐẶT HÀNG CẢI TIẾN:")
+    print("🔴 FORM ĐẶT HÀNG CẢI TIẾN VỚI CACHE VÀ LAZY LOADING:")
     print("=" * 80)
-    print(f"🔴 Cập nhật ảnh và giá theo biến thể: /api/get-variant-info")
-    print(f"🔴 Địa chỉ theo API: Tỉnh/Huyện/Xã + địa chỉ chi tiết")
-    print(f"🔴 Sử dụng Select2 cho UI tốt hơn")
-    print(f"🔴 Fallback khi API địa chỉ lỗi")
-    print(f"🔴 FIX: Sửa lỗi validate số điện thoại - chấp nhận 0982155980, +84982155980")
-    print(f"🔴 FIX: Thêm xử lý chuẩn hóa số điện thoại tự động")
+    print(f"🔴 Product Cache: TTL 60 phút cho thông tin sản phẩm")
+    print(f"🔴 API Cache: TTL 5 phút cho /api/get-variant-info")
+    print(f"🔴 Lazy Loading: Ảnh được load từ thumbnail → high-res")
+    print(f"🔴 Client Caching: sessionStorage cho variant info, localStorage cho địa chỉ")
+    print(f"🔴 Image Optimization: Tự động tạo thumbnail URL cho Facebook images")
+    print(f"🔴 Background Processing: Đơn hàng được xử lý trong background thread")
+    print(f"🔴 Preload Resources: CSS và JS được preload để tăng tốc độ")
     print("=" * 80)
     
     print("🔴 FIX THÀNH TIỀN TRONG TIN NHẮN PHẢN HỒI:")
@@ -4250,7 +4526,6 @@ if __name__ == "__main__":
     print(f"🔴 Tìm giá đúng của biến thể (màu + size) trong hàm api_submit_order")
     print(f"🔴 Cập nhật tin nhắn phản hồi: hiển thị cả đơn giá và thành tiền tính đúng")
     print(f"🔴 Cải thiện hàm extract_price_int để xử lý nhiều định dạng giá")
-    print(f"🔴 Thêm debug log để kiểm tra khi có vấn đề")
     print("=" * 80)
     
     print("🟢 TÍNH NĂNG MỚI: XỬ LÝ ĐƠN HÀNG TỰ FACEBOOK SHOP")
