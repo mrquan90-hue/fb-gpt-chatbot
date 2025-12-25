@@ -193,7 +193,7 @@ def update_context_with_new_ms(uid: str, new_ms: str, source: str = "unknown"):
     Cập nhật context với MS mới và reset counter để đảm bảo bot gửi carousel
     cho sản phẩm mới khi user gửi tin nhắn đầu tiên
     """
-    if not new_ms or new_ms not in PRODUCTS:
+    if not new_ms:
         return False
     
     ctx = USER_CONTEXT[uid]
@@ -890,12 +890,13 @@ def get_post_content_from_facebook(post_id: str) -> Optional[dict]:
         return None
 
 # ============================================
-# HÀM TRÍCH XUẤT MS TỪ BÀI VIẾT (TỐI ƯU - ĐÃ CẢI THIỆN)
+# HÀM TRÍCH XUẤT MS TỪ BÀI VIẾT (ĐÃ SỬA - CHỈ DÙNG REGEX)
 # ============================================
 
 def extract_ms_from_post_content(post_data: dict) -> Optional[str]:
     """
-    Trích xuất mã sản phẩm từ nội dung bài viết - CẢI THIỆN ĐỂ BẮT [MSxxxxxx]
+    Trích xuất mã sản phẩm từ nội dung bài viết - CHỈ DÙNG REGEX, KHÔNG KIỂM TRA PRODUCTS
+    Trả về mã sản phẩm (MSxxxxxx) nếu tìm thấy, ngược lại trả về None
     """
     if not post_data:
         return None
@@ -908,9 +909,9 @@ def extract_ms_from_post_content(post_data: dict) -> Optional[str]:
     if not message:
         return None
     
-    # PHƯƠNG PHÁP 1: Tìm MS trong dấu ngoặc vuông [MSxxxxxx] - TRƯỜNG HỢP ĐẶC BIỆT
+    # PHƯƠNG PHÁP 1: Tìm MS trong dấu ngoặc vuông [MSxxxxxx] - ƯU TIÊN CAO NHẤT
     bracket_patterns = [
-        r'\[(MS\d{2,6})\]',  # [MS000034] - CHÍNH XÁC TRƯỜNG HỢP TRONG LOG
+        r'\[(MS\d{2,6})\]',  # [MS000034]
         r'\[MS\s*(\d{2,6})\]',  # [MS 000034] với khoảng trắng
     ]
     
@@ -922,11 +923,10 @@ def extract_ms_from_post_content(post_data: dict) -> Optional[str]:
             if not num_part:  # nếu toàn là số 0
                 num_part = '0'
             full_ms = f"MS{num_part.zfill(6)}"
-            if full_ms in PRODUCTS:
-                print(f"[EXTRACT MS FROM POST] Tìm thấy {full_ms} qua bracket pattern {pattern}")
-                return full_ms
+            print(f"[EXTRACT MS FROM POST] Tìm thấy {full_ms} qua bracket pattern {pattern}")
+            return full_ms
     
-    # PHƯƠNG PHÁP 2: Tìm MSxxxxxx trực tiếp (có thể có khoảng trắng)
+    # PHƯƠNG PHÁP 2: Tìm MSxxxxxx trực tiếp
     ms_patterns = [
         (r'\[(MS\d{6})\]', True),  # [MS000046] -> đủ 6 số
         (r'\b(MS\d{6})\b', True),  # MS000046
@@ -954,40 +954,47 @@ def extract_ms_from_post_content(post_data: dict) -> Optional[str]:
                     num_part = '0'
                 full_ms = f"MS{num_part.zfill(6)}"
             
-            if full_ms in PRODUCTS:
-                print(f"[EXTRACT MS FROM POST] Tìm thấy {full_ms} qua pattern {pattern}")
-                return full_ms
+            print(f"[EXTRACT MS FROM POST] Tìm thấy {full_ms} qua pattern {pattern}")
+            return full_ms
     
     # PHƯƠNG PHÁP 3: Tìm số 6 chữ số
     six_digit_numbers = re.findall(r'\b(\d{6})\b', message)
     for num in six_digit_numbers:
         # Thử với MS đầy đủ
         full_ms = f"MS{num}"
-        if full_ms in PRODUCTS:
-            print(f"[EXTRACT MS FROM POST] Tìm thấy số 6 chữ số {num} -> {full_ms}")
-            return full_ms
-        
-        # Thử với số không có leading zeros
-        clean_num = num.lstrip('0')
-        if clean_num and clean_num in PRODUCTS_BY_NUMBER:
-            ms = PRODUCTS_BY_NUMBER[clean_num]
-            print(f"[EXTRACT MS FROM POST] Tìm thấy số rút gọn {num} -> {ms}")
-            return ms
+        print(f"[EXTRACT MS FROM POST] Tìm thấy số 6 chữ số {num} -> {full_ms}")
+        return full_ms
     
     # PHƯƠNG PHÁP 4: Tìm số 2-5 chữ số
     short_numbers = re.findall(r'\b(\d{2,5})\b', message)
     for num in short_numbers:
         clean_num = num.lstrip('0')
-        if clean_num and clean_num in PRODUCTS_BY_NUMBER:
-            ms = PRODUCTS_BY_NUMBER[clean_num]
-            print(f"[EXTRACT MS FROM POST] Tìm thấy số ngắn {num} -> {ms}")
-            return ms
+        if not clean_num:
+            clean_num = '0'
+        full_ms = f"MS{clean_num.zfill(6)}"
+        print(f"[EXTRACT MS FROM POST] Tìm thấy số ngắn {num} -> {full_ms}")
+        return full_ms
+    
+    # PHƯƠNG PHÁP 5: Fallback - tìm bất kỳ "MS" nào trong ngoặc vuông
+    fallback_pattern = r'\[.*?(MS\d+).*?\]'
+    fallback_matches = re.findall(fallback_pattern, message, re.IGNORECASE)
+    for match in fallback_matches:
+        # Tách số từ MS
+        num_match = re.search(r'(\d+)', match)
+        if num_match:
+            num = num_match.group(1)
+            num_clean = num.lstrip('0')
+            if not num_clean:
+                num_clean = '0'
+            full_ms = f"MS{num_clean.zfill(6)}"
+            print(f"[EXTRACT MS FROM POST] Tìm thấy {full_ms} qua fallback pattern")
+            return full_ms
     
     print(f"[EXTRACT MS FROM POST] Không tìm thấy MS trong bài viết")
     return None
 
 # ============================================
-# HÀM XỬ LÝ COMMENT TỪ FEED (HOÀN CHỈNH - ĐÃ CẢI THIỆN)
+# HÀM XỬ LÝ COMMENT TỪ FEED (HOÀN CHỈNH - ĐÃ SỬA)
 # ============================================
 
 def handle_feed_comment(change_data: dict):
@@ -995,8 +1002,9 @@ def handle_feed_comment(change_data: dict):
     Xử lý comment từ feed với logic:
     1. Lấy post_id từ comment
     2. Lấy nội dung bài viết gốc
-    3. Trích xuất MS từ caption
-    4. Cập nhật context cho user
+    3. Trích xuất MS từ caption (CHỈ DÙNG REGEX)
+    4. Load products và kiểm tra tồn tại
+    5. Cập nhật context cho user và gửi tin nhắn tự động
     """
     try:
         # 1. Lấy thông tin cơ bản
@@ -1029,21 +1037,27 @@ def handle_feed_comment(change_data: dict):
         print(f"[FEED COMMENT DEBUG] Nội dung bài viết ({len(post_message)} ký tự):")
         print(f"[FEED COMMENT DEBUG] {post_message[:500]}")
         
-        # 4. Trích xuất MS từ caption bài viết (DÙNG HÀM ĐÃ CẢI THIỆN)
+        # 4. Trích xuất MS từ caption bài viết (CHỈ DÙNG REGEX - KHÔNG KIỂM TRA PRODUCTS)
         detected_ms = extract_ms_from_post_content(post_data)
         
         if not detected_ms:
             print(f"[FEED COMMENT] Không tìm thấy MS trong bài viết {post_id}")
-            # Thử tìm thủ công
-            if '[MS' in post_message:
-                print(f"[FEED COMMENT MANUAL] Phát hiện [MS trong bài viết, cần kiểm tra pattern")
             return None
         
-        # 5. Kiểm tra MS có tồn tại trong database
-        load_products()
+        # 5. Load products và kiểm tra MS có tồn tại trong database
+        load_products(force=True)  # Load với force=True để đảm bảo có dữ liệu mới nhất
+        
+        # Kiểm tra nếu MS trực tiếp tồn tại
         if detected_ms not in PRODUCTS:
-            print(f"[FEED COMMENT] MS {detected_ms} không tồn tại trong database")
-            return None
+            print(f"[FEED COMMENT] MS {detected_ms} không tồn tại trong database, tìm trong mapping...")
+            # Thử tìm trong mapping số ngắn
+            num_part = detected_ms[2:].lstrip('0')
+            if num_part and num_part in PRODUCTS_BY_NUMBER:
+                detected_ms = PRODUCTS_BY_NUMBER[num_part]
+                print(f"[FEED COMMENT] Đã map sang {detected_ms}")
+            else:
+                print(f"[FEED COMMENT] MS {detected_ms} không tồn tại trong database")
+                return None
         
         # 6. Cập nhật context cho user (RESET COUNTER để áp dụng first message rule)
         print(f"[FEED COMMENT MS] Phát hiện MS {detected_ms} từ post {post_id} cho user {user_id}")
@@ -1063,33 +1077,40 @@ def handle_feed_comment(change_data: dict):
         ctx["source_post_content"] = post_data.get('message', '')[:300]
         ctx["source_post_url"] = post_data.get('permalink_url', '')
         
-        # 7. Gửi tin nhắn tự động cho user (tùy chọn)
-        # Chỉ gửi nếu user chưa nhắn tin trước đó
+        # 7. GỬI TIN NHẮN TỰ ĐỘNG GIỚI THIỆU SẢN PHẨM
+        # Chỉ gửi nếu user chưa nhắn tin trước đó hoặc real_message_count = 0
         if ctx.get("real_message_count", 0) == 0:
             try:
-                # Gửi tin nhắn giới thiệu sản phẩm
+                # Gửi tin nhắn giới thiệu sản phẩm chi tiết
                 intro_message = f"""Chào {user_name}! 👋 
 
-Em thấy bạn đã bình luận trên bài viết của shop.
+Em thấy bạn đã bình luận trên bài viết của shop và quan tâm đến sản phẩm:
 
 📦 **{product_name}**
 📌 Mã sản phẩm: {detected_ms}
 
-Để em tư vấn chi tiết về sản phẩm này, bạn vui lòng:
-• Gửi "giá bao nhiêu" để xem giá
-• Gửi "xem ảnh" để xem hình ảnh thực tế  
-• Gửi "đặt hàng" để mua sản phẩm
+Đây là sản phẩm rất được yêu thích tại shop! Để em tư vấn chi tiết cho bạn:
 
-Hoặc hỏi bất kỳ thông tin gì bạn cần ạ! 😊"""
+• Gửi "giá bao nhiêu" để xem giá sản phẩm
+• Gửi "xem ảnh" để xem hình ảnh thực tế sản phẩm
+• Gửi "màu gì có" để xem các màu sắc có sẵn
+• Gửi "size nào" để xem các size có sẵn
+• Gửi "đặt hàng" để mua sản phẩm này
+
+Hoặc bạn có thể hỏi bất kỳ thông tin gì về sản phẩm, em sẵn sàng tư vấn ạ! 😊
+
+Nếu bạn quan tâm đến sản phẩm khác, vui lòng gửi mã sản phẩm (ví dụ: MS000034) nhé!"""
                 
                 send_message(user_id, intro_message)
-                print(f"[FEED COMMENT AUTO REPLY] Đã gửi tin nhắn tự động cho user {user_id}")
+                print(f"[FEED COMMENT AUTO REPLY] Đã gửi tin nhắn tự động giới thiệu sản phẩm cho user {user_id}")
                 
                 # Tăng counter để không gửi lại lần nữa
                 ctx["real_message_count"] = 1
                 
             except Exception as e:
                 print(f"[FEED COMMENT AUTO REPLY ERROR] Lỗi gửi tin nhắn: {e}")
+        else:
+            print(f"[FEED COMMENT SKIP AUTO REPLY] User {user_id} đã có real_message_count = {ctx.get('real_message_count')}, bỏ qua auto reply")
         
         return detected_ms
         
@@ -2881,6 +2902,36 @@ def test_poscake_webhook():
     }), 200
 
 # ============================================
+# DEBUG FEED COMMENT ENDPOINT
+# ============================================
+
+@app.route("/debug-feed-comment", methods=["GET"])
+def debug_feed_comment():
+    """Debug endpoint cho feed comment processing"""
+    post_id = request.args.get("post_id", "516937221685203_1775036843322177")
+    
+    # Test trực tiếp với post_id từ log
+    test_data = {
+        "id": post_id,
+        "message": "[MS000033] 🔥 Tỏa Sáng Với Áo Dài Cách Tân Đính Ren Lấp Lánh\n💸 Giá chỉ: **575K ** cho tất cả các màu\n✨ Đừng bỏ lỡ cơ hội nổi bật tại mọi sự kiện với thiết kế áo dài cách tân đính ren và sequin lấp lánh."
+    }
+    
+    # Test hàm extract_ms_from_post_content
+    ms = extract_ms_from_post_content(test_data)
+    
+    return jsonify({
+        "post_id": post_id,
+        "extracted_ms": ms,
+        "message_preview": test_data["message"][:200],
+        "patterns_tested": [
+            "\[(MS\\d{2,6})\]",
+            "\[MS\\s*(\\d{2,6})\]",
+            "\\b(MS\\d{6})\\b",
+            "MS\\s*(\\d{6})"
+        ]
+    })
+
+# ============================================
 # TEST FEED COMMENT ENDPOINT
 # ============================================
 
@@ -2902,18 +2953,36 @@ def test_feed_comment():
     # Test hàm extract_ms_from_post_content
     detected_ms = extract_ms_from_post_content(post_data)
     
+    # Load products để kiểm tra tồn tại
+    load_products(force=True)
+    
+    # Kiểm tra nếu MS tồn tại
+    ms_exists = False
+    final_ms = detected_ms
+    
+    if detected_ms:
+        if detected_ms in PRODUCTS:
+            ms_exists = True
+        else:
+            # Thử tìm trong mapping số ngắn
+            num_part = detected_ms[2:].lstrip('0')
+            if num_part and num_part in PRODUCTS_BY_NUMBER:
+                final_ms = PRODUCTS_BY_NUMBER[num_part]
+                ms_exists = True
+    
     # Test context update
     test_user_id = "test_user_123"
-    if detected_ms:
-        update_context_with_new_ms(test_user_id, detected_ms, "test_feed_comment")
+    if detected_ms and ms_exists:
+        update_context_with_new_ms(test_user_id, final_ms, "test_feed_comment")
     
     return jsonify({
         "status": "success",
         "post_id": post_id,
         "post_content_preview": post_data.get('message', '')[:200] + "..." if post_data.get('message') else "No message",
         "detected_ms": detected_ms,
-        "ms_exists": detected_ms in PRODUCTS if detected_ms else False,
-        "context_updated": detected_ms is not None,
+        "final_ms": final_ms if detected_ms else None,
+        "ms_exists": ms_exists,
+        "context_updated": detected_ms is not None and ms_exists,
         "test_user_context": USER_CONTEXT.get(test_user_id, {})
     })
 
@@ -3994,7 +4063,7 @@ def order_form():
                     return;
                 }}
                 
-                // Chuẩn hóa số điện thoại
+                # Chuẩn hóa số điện thoại
                 let normalizedPhone = formData.phone.replace(/\\s/g, '');
                 normalizedPhone = normalizedPhone.replace(/[^\\d+]/g, '');
                 
@@ -4039,7 +4108,7 @@ def order_form():
                     return;
                 }}
                 
-                // Ghép địa chỉ đầy đủ
+                # Ghép địa chỉ đầy đủ
                 const provinceName = $('#province option:selected').text();
                 const districtName = $('#district option:selected').text();
                 const wardName = $('#ward option:selected').text();
@@ -4064,7 +4133,7 @@ def order_form():
                     const data = await response.json();
                     
                     if (response.ok) {{
-                        // Hiển thị thông báo thành công
+                        # Hiển thị thông báo thành công
                         const total = BASE_PRICE * formData.quantity;
                         const successMessage = `🎉 ĐÃ ĐẶT HÀNG THÀNH CÔNG!
 
@@ -4083,7 +4152,7 @@ Cảm ơn quý khách đã đặt hàng! ❤️`;
                         
                         alert(successMessage);
                         
-                        // Reset form sau 2 giây
+                        # Reset form sau 2 giây
                         setTimeout(() => {{
                             document.getElementById('orderForm').reset();
                             $('#province, #district, #ward').val('').trigger('change');
@@ -4104,23 +4173,23 @@ Cảm ơn quý khách đã đặt hàng! ❤️`;
                 }}
             }}
             
-            // Khởi tạo khi trang được tải
+            # Khởi tạo khi trang được tải
             document.addEventListener('DOMContentLoaded', function() {{
-                // Load danh sách tỉnh/thành từ cache
+                # Load danh sách tỉnh/thành từ cache
                 loadProvinces();
                 
-                // Áp dụng lazy loading cho ảnh
+                # Áp dụng lazy loading cho ảnh
                 lazyLoadImages();
                 
-                // Cập nhật giá khi thay đổi số lượng
+                # Cập nhật giá khi thay đổi số lượng
                 document.getElementById('quantity').addEventListener('input', updatePriceDisplay);
                 
-                // Gọi cập nhật biến thể lần đầu
+                # Gọi cập nhật biến thể lần đầu
                 setTimeout(() => {{
                     updateVariantInfo();
                 }}, 300);
                 
-                // Focus vào trường tên
+                # Focus vào trường tên
                 setTimeout(() => {{
                     document.getElementById('customerName').focus();
                 }}, 500);
@@ -4449,10 +4518,10 @@ def health_check():
             "enabled": True,
             "logic": "Lấy MS từ caption bài viết khi user comment",
             "capabilities": [
-                "Detect MS từ bài viết gốc",
-                "Auto reply với thông tin sản phẩm",
-                "Cập nhật context cho user",
-                "Reset counter để áp dụng first message rule"
+                "Detect MS từ bài viết gốc (chỉ dùng regex)",
+                "Auto reply với thông tin sản phẩm chi tiết",
+                "Cập nhật context cho user và reset counter",
+                "Chỉ gửi tin nhắn tự động khi real_message_count = 0"
             ],
             "required_permissions": "pages_read_engagement, pages_messaging"
         },
@@ -4472,7 +4541,8 @@ def health_check():
             "address_api_cache": True,
             "lazy_image_loading": True,
             "gzip_compression": True,
-            "feed_comment_processing": True  # TÍNH NĂNG MỚI
+            "feed_comment_processing": True,  # TÍNH NĂNG MỚI ĐÃ SỬA
+            "feed_comment_auto_reply": True  # TÍNH NĂNG MỚI: Gửi tin nhắn tự động giới thiệu sản phẩm
         }
     }, 200
 
@@ -4520,13 +4590,22 @@ if __name__ == "__main__":
     print(f"🟢 OpenAI Function Calling: {'TÍCH HỢP THÀNH CÔNG' if client else 'CHƯA CẤU HÌNH'}")
     print("=" * 80)
     
-    print("🔴 CẢI TIẾN MỚI: XỬ LÝ COMMENT TỪ FEED (LẤY MS TỪ CAPTION BÀI VIẾT)")
+    print("🔴 CẢI TIẾN QUAN TRỌNG: XỬ LÝ COMMENT TỪ FEED (ĐÃ SỬA LỖI)")
     print("=" * 80)
     print(f"🔴 1. Feed Comment Processing: Tự động phát hiện MS khi user comment")
-    print(f"🔴 2. Logic: Lấy post_id → Lấy nội dung bài viết → Trích xuất MS từ caption")
-    print(f"🔴 3. Auto Reply: Gửi tin nhắn giới thiệu sản phẩm khi user comment lần đầu")
+    print(f"🔴 2. Logic: Lấy post_id → Lấy nội dung bài viết → Trích xuất MS từ caption (CHỈ DÙNG REGEX)")
+    print(f"🔴 3. Auto Reply: Gửi tin nhắn giới thiệu sản phẩm chi tiết khi user comment lần đầu")
     print(f"🔴 4. Context Update: Reset counter để áp dụng first message rule")
     print(f"🔴 5. Test Endpoint: /test-feed-comment?post_id=...")
+    print(f"🔴 6. Debug Endpoint: /debug-feed-comment?post_id=...")
+    print("=" * 80)
+    
+    print("🔴 TÍNH NĂNG MỚI: GỬI TIN NHẮN TỰ ĐỘNG GIỚI THIỆU SẢN PHẨM")
+    print("=" * 80)
+    print(f"🔴 1. Khi user comment lần đầu (real_message_count = 0): Gửi tin nhắn giới thiệu chi tiết")
+    print(f"🔴 2. Nội dung: Chào hỏi + Tên sản phẩm + Mã sản phẩm + Hướng dẫn tư vấn")
+    print(f"🔴 3. Hướng dẫn: Các câu hỏi thường gặp (giá, ảnh, màu, size, đặt hàng)")
+    print(f"🔴 4. Tự động tăng real_message_count để tránh spam")
     print("=" * 80)
     
     print("🔴 CẢI TIẾN MỚI: TỐI ƯU TỐC ĐỘ LOAD TRANG FORM ĐẶT HÀNG")
