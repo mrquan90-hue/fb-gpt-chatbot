@@ -6,6 +6,8 @@ import csv
 import hashlib
 import base64
 import threading
+import gzip
+import functools
 from collections import defaultdict
 from urllib.parse import quote
 from datetime import datetime
@@ -16,7 +18,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
 import requests
-from flask import Flask, request, send_from_directory, jsonify, render_template_string
+from flask import Flask, request, send_from_directory, jsonify, render_template_string, make_response
 from openai import OpenAI
 
 # ============================================
@@ -2557,6 +2559,38 @@ def handle_poscake_order_event(event_type: str, data: dict):
             "message": "Không tìm thấy user tương ứng"
         }), 200
 
+# ============================================
+# CACHE ADDRESS API (CẢI TIẾN MỚI)
+# ============================================
+
+ADDRESS_CACHE = {
+    'provinces': None,
+    'provinces_updated': 0,
+    'districts': {},
+    'wards': {}
+}
+
+@app.route("/api/cached-provinces", methods=["GET"])
+def cached_provinces():
+    """Cache API tỉnh/thành để tăng tốc độ load form"""
+    now = time.time()
+    cache_ttl = 3600  # 1 giờ
+    
+    if (ADDRESS_CACHE['provinces'] and 
+        (now - ADDRESS_CACHE['provinces_updated']) < cache_ttl):
+        return jsonify(ADDRESS_CACHE['provinces'])
+    
+    try:
+        response = requests.get('https://provinces.open-api.vn/api/p/', timeout=5)
+        if response.status_code == 200:
+            ADDRESS_CACHE['provinces'] = response.json()
+            ADDRESS_CACHE['provinces_updated'] = now
+            return jsonify(ADDRESS_CACHE['provinces'])
+    except Exception as e:
+        print(f"[ADDRESS API ERROR] Lỗi khi gọi API tỉnh/thành: {e}")
+    
+    return jsonify([])
+
 @app.route("/poscake-webhook", methods=["POST"])
 def poscake_webhook():
     """
@@ -2866,7 +2900,7 @@ def webhook():
                         "retailer_id": retailer_id
                     })
                 
-                # KHÔNG GỬI TIN NHẮN CHO ĐƠN HÀNG TỪ FACEBOOK SHOP
+                # KHÔNG GỬI TIN NHẮN CHO ĐƠN HÀNG TỰ FACEBOOK SHOP
                 # Chỉ cập nhật context và ghi log
                 
                 # Cập nhật context với mã sản phẩm đầu tiên (nếu có) và RESET COUNTER
@@ -3074,16 +3108,19 @@ Anh/chị quan tâm sản phẩm nào ạ?"""
     return "OK", 200
 
 # ============================================
-# ORDER FORM PAGE - CẢI TIẾN MỚI
+# ORDER FORM PAGE - CẢI TIẾN MỚI VỚI TỐI ƯU TỐC ĐỘ
 # ============================================
 
 @app.route("/order-form", methods=["GET"])
 def order_form():
     ms = (request.args.get("ms") or "").upper()
     uid = request.args.get("uid") or ""
+    
+    # Preload products nếu chưa có
+    load_products(force=False)
+    
     if not ms:
-        return (
-            """
+        response = make_response("""
         <html>
         <body style="text-align: center; padding: 50px; font-family: Arial, sans-serif;">
             <h2 style="color: #FF3B30;">⚠️ Không tìm thấy sản phẩm</h2>
@@ -3091,14 +3128,20 @@ def order_form():
             <a href="/" style="color: #1DB954; text-decoration: none; font-weight: bold;">Quay về trang chủ</a>
         </body>
         </html>
-        """,
-            400,
-        )
+        """)
+        
+        # Nén response nếu client hỗ trợ gzip
+        @response.call_on_close
+        def compress():
+            pass
+        return response, 400
 
-    load_products()
+    # Nếu không có sản phẩm, thử load lại
+    if not PRODUCTS:
+        load_products(force=True)
+        
     if ms not in PRODUCTS:
-        return (
-            """
+        response = make_response("""
         <html>
         <body style="text-align: center; padding: 50px; font-family: Arial, sans-serif;">
             <h2 style="color: #FF3B30;">⚠️ Sản phẩm không tồn tại</h2>
@@ -3106,9 +3149,13 @@ def order_form():
             <a href="/" style="color: #1DB954; text-decoration: none; font-weight: bold;">Quay về trang chủ</a>
         </body>
         </html>
-        """,
-            404,
-        )
+        """)
+        
+        # Nén response
+        @response.call_on_close
+        def compress():
+            pass
+        return response, 404
 
     current_fanpage_name = get_fanpage_name_from_api()
     
@@ -3137,15 +3184,15 @@ def order_form():
     price_str = row.get("Gia", "0")
     price_int = extract_price_int(price_str) or 0
 
-    # Tạo HTML với form địa chỉ mới
+    # Tạo HTML với form địa chỉ mới và tối ưu hóa
     html = f"""
     <!DOCTYPE html>
-    <html>
+    <html lang="vi">
     <head>
         <meta charset="utf-8" />
         <title>Đặt hàng - {row.get('Ten','')}</title>
         <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <link href="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/css/select2.min.css" rel="stylesheet" />
+        <link href="https://cdnjs.cloudflare.com/ajax/libs/select2/4.1.0-rc.0/css/select2.min.css" rel="stylesheet" />
         <style>
             * {{
                 margin: 0;
@@ -3438,7 +3485,7 @@ def order_form():
                 <!-- Product Info Section -->
                 <div class="product-section">
                     <div class="product-image-container" id="image-container">
-                        {"<img id='product-image' src='" + default_image + "' class='product-image' onerror=\"this.onerror=null; this.src='https://via.placeholder.com/120x120?text=No+Image'\" />" if default_image else "<div class='placeholder-image'>Chưa có ảnh sản phẩm</div>"}
+                        {"<img id='product-image' class='product-image lazy-load' src='https://via.placeholder.com/120x120?text=Loading...' data-src='" + default_image + "' onerror=\"this.onerror=null; this.src='https://via.placeholder.com/120x120?text=No+Image'\" />" if default_image else "<div class='placeholder-image'>Chưa có ảnh sản phẩm</div>"}
                     </div>
                     <div class="product-info">
                         <div class="product-code">Mã: {ms}</div>
@@ -3532,21 +3579,15 @@ def order_form():
             </div>
         </div>
 
-        <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
-        <script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
+        <!-- Sử dụng CDN nhanh hơn -->
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.6.0/jquery.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/select2/4.1.0-rc.0/js/select2.min.js"></script>
         <script>
             const PRODUCT_MS = "{ms}";
             const PRODUCT_UID = "{uid}";
             let BASE_PRICE = {price_int};
             const DOMAIN = "{'https://' + DOMAIN if not DOMAIN.startswith('http') else DOMAIN}";
             const API_BASE_URL = "{('/api' if DOMAIN.startswith('http') else 'https://' + DOMAIN + '/api')}";
-            
-            // Biến lưu thông tin địa chỉ
-            let addressData = {{
-                provinces: [],
-                districts: [],
-                wards: []
-            }};
             
             function formatPrice(n) {{
                 return n.toLocaleString('vi-VN') + ' đ';
@@ -3555,6 +3596,32 @@ def order_form():
             function updatePriceDisplay() {{
                 const quantity = parseInt(document.getElementById('quantity').value || '1');
                 document.getElementById('total-display').innerText = formatPrice(BASE_PRICE * quantity);
+            }}
+            
+            // Lazy load ảnh sản phẩm
+            function lazyLoadImages() {{
+                const lazyImages = document.querySelectorAll('img.lazy-load');
+                if ('IntersectionObserver' in window) {{
+                    const imageObserver = new IntersectionObserver(function(entries) {{
+                        entries.forEach(function(entry) {{
+                            if (entry.isIntersecting) {{
+                                const lazyImage = entry.target;
+                                lazyImage.src = lazyImage.dataset.src;
+                                lazyImage.classList.remove('lazy-load');
+                                imageObserver.unobserve(lazyImage);
+                            }}
+                        }});
+                    }});
+                    
+                    lazyImages.forEach(function(lazyImage) {{
+                        imageObserver.observe(lazyImage);
+                    }});
+                }} else {{
+                    // Fallback cho trình duyệt cũ
+                    lazyImages.forEach(function(lazyImage) {{
+                        lazyImage.src = lazyImage.dataset.src;
+                    }});
+                }}
             }}
             
             // Hàm cập nhật thông tin biến thể (ảnh và giá)
@@ -3573,8 +3640,12 @@ def order_form():
                         // Cập nhật ảnh sản phẩm
                         const productImage = document.getElementById('product-image');
                         if (data.image) {{
-                            productImage.src = data.image;
-                            productImage.style.display = 'block';
+                            productImage.dataset.src = data.image;
+                            // Sử dụng lazy loading
+                            if (!productImage.classList.contains('lazy-load')) {{
+                                productImage.classList.add('lazy-load');
+                            }}
+                            lazyLoadImages();
                         }}
                         
                         // Cập nhật giá
@@ -3589,37 +3660,39 @@ def order_form():
                 }}
             }}
             
-            // Hàm load danh sách tỉnh/thành
+            // Hàm load danh sách tỉnh/thành từ cache
             async function loadProvinces() {{
                 try {{
-                    const response = await fetch('https://provinces.open-api.vn/api/p/');
-                    addressData.provinces = await response.json();
+                    const response = await fetch('/api/cached-provinces');
+                    const provinces = await response.json();
                     
                     const provinceSelect = $('#province');
                     provinceSelect.empty();
                     provinceSelect.append('<option value="">Chọn tỉnh/thành phố</option>');
                     
-                    addressData.provinces.forEach(province => {{
+                    provinces.forEach(province => {{
                         provinceSelect.append(`<option value="${{province.code}}">${{province.name}}</option>`);
                     }});
                     
-                    // Khởi tạo Select2
-                    $('#province, #district, #ward').select2({{
-                        width: '100%',
-                        placeholder: 'Chọn...',
-                        allowClear: false
-                    }});
-                    
-                    // Xử lý sự kiện khi chọn tỉnh
-                    provinceSelect.on('change', function() {{
-                        const provinceCode = $(this).val();
-                        if (provinceCode) {{
-                            loadDistricts(provinceCode);
-                        }} else {{
-                            $('#district').val('').trigger('change').prop('disabled', true);
-                            $('#ward').val('').trigger('change').prop('disabled', true);
-                        }}
-                    }});
+                    // Khởi tạo Select2 sau khi trang đã load
+                    setTimeout(() => {{
+                        $('#province, #district, #ward').select2({{
+                            width: '100%',
+                            placeholder: 'Chọn...',
+                            allowClear: false
+                        }});
+                        
+                        // Xử lý sự kiện khi chọn tỉnh
+                        provinceSelect.on('change', function() {{
+                            const provinceCode = $(this).val();
+                            if (provinceCode) {{
+                                loadDistricts(provinceCode);
+                            }} else {{
+                                $('#district').val('').trigger('change').prop('disabled', true);
+                                $('#ward').val('').trigger('change').prop('disabled', true);
+                            }}
+                        }});
+                    }}, 100);
                     
                 }} catch (error) {{
                     console.error('Lỗi khi load tỉnh/thành:', error);
@@ -3636,13 +3709,13 @@ def order_form():
                     const response = await fetch(`https://provinces.open-api.vn/api/p/${{provinceCode}}?depth=2`);
                     const provinceData = await response.json();
                     
-                    addressData.districts = provinceData.districts || [];
+                    const districts = provinceData.districts || [];
                     
                     const districtSelect = $('#district');
                     districtSelect.empty();
                     districtSelect.append('<option value="">Chọn quận/huyện</option>');
                     
-                    addressData.districts.forEach(district => {{
+                    districts.forEach(district => {{
                         districtSelect.append(`<option value="${{district.code}}">${{district.name}}</option>`);
                     }});
                     
@@ -3672,13 +3745,13 @@ def order_form():
                     const response = await fetch(`https://provinces.open-api.vn/api/d/${{districtCode}}?depth=2`);
                     const districtData = await response.json();
                     
-                    addressData.wards = districtData.wards || [];
+                    const wards = districtData.wards || [];
                     
                     const wardSelect = $('#ward');
                     wardSelect.empty();
                     wardSelect.append('<option value="">Chọn phường/xã</option>');
                     
-                    addressData.wards.forEach(ward => {{
+                    wards.forEach(ward => {{
                         wardSelect.append(`<option value="${{ward.code}}">${{ward.name}}</option>`);
                     }});
                     
@@ -3689,13 +3762,6 @@ def order_form():
                 }}
             }}
             
-            // Hàm lấy tên địa chỉ từ mã
-            function getAddressName(code, type) {{
-                const data = addressData[type];
-                const item = data.find(item => item.code == code);
-                return item ? item.name : '';
-            }}
-            
             async function submitOrder() {{
                 // Lấy thông tin từ form
                 const formData = {{
@@ -3704,10 +3770,9 @@ def order_form():
                     color: document.getElementById('color').value,
                     size: document.getElementById('size').value,
                     quantity: parseInt(document.getElementById('quantity').value || '1'),
-                    unitPrice: BASE_PRICE,  // Thêm giá đơn vị để tính toán chính xác
+                    unitPrice: BASE_PRICE,
                     customerName: document.getElementById('customerName').value.trim(),
                     phone: document.getElementById('phone').value.trim(),
-                    // Địa chỉ mới
                     province: $('#province').val(),
                     district: $('#district').val(),
                     ward: $('#ward').val(),
@@ -3727,24 +3792,18 @@ def order_form():
                     return;
                 }}
                 
-                // Chuẩn hóa và validate số điện thoại
+                // Chuẩn hóa số điện thoại
                 let normalizedPhone = formData.phone.replace(/\\s/g, '');
                 normalizedPhone = normalizedPhone.replace(/[^\\d+]/g, '');
                 
-                // Thêm số 0 nếu bắt đầu bằng 84 mà không có dấu +
                 if (normalizedPhone.startsWith('84') && normalizedPhone.length === 11) {{
                     normalizedPhone = '0' + normalizedPhone.substring(2);
                 }}
                 
-                // Thêm số 0 nếu bắt đầu bằng +84
                 if (normalizedPhone.startsWith('+84') && normalizedPhone.length === 12) {{
                     normalizedPhone = '0' + normalizedPhone.substring(3);
                 }}
                 
-                // Kiểm tra regex - chấp nhận:
-                // 1. 10 số bắt đầu bằng 0: 0982155980
-                // 2. 11 số bắt đầu bằng 84: 84982155980
-                // 3. 12 số bắt đầu bằng +84: +84982155980
                 const phoneRegex = /^(0\\d{{9}}|84\\d{{9}}|\\+84\\d{{9}})$/;
                 if (!phoneRegex.test(normalizedPhone)) {{
                     alert('Số điện thoại không hợp lệ. Vui lòng nhập số điện thoại 10 chữ số (ví dụ: 0982155980) hoặc số quốc tế (+84982155980)');
@@ -3779,9 +3838,9 @@ def order_form():
                 }}
                 
                 // Ghép địa chỉ đầy đủ
-                const provinceName = getAddressName(formData.province, 'provinces') || '';
-                const districtName = getAddressName(formData.district, 'districts') || '';
-                const wardName = getAddressName(formData.ward, 'wards') || '';
+                const provinceName = $('#province option:selected').text();
+                const districtName = $('#district option:selected').text();
+                const wardName = $('#ward option:selected').text();
                 
                 formData.fullAddress = `${{formData.addressDetail}}, ${{wardName}}, ${{districtName}}, ${{provinceName}}`;
                 formData.provinceName = provinceName;
@@ -3803,7 +3862,7 @@ def order_form():
                     const data = await response.json();
                     
                     if (response.ok) {{
-                        // Hiển thị thông báo thành công với chi tiết
+                        // Hiển thị thông báo thành công
                         const total = BASE_PRICE * formData.quantity;
                         const successMessage = `🎉 ĐÃ ĐẶT HÀNG THÀNH CÔNG!
 
@@ -3845,14 +3904,19 @@ Cảm ơn quý khách đã đặt hàng! ❤️`;
             
             // Khởi tạo khi trang được tải
             document.addEventListener('DOMContentLoaded', function() {{
-                // Load danh sách tỉnh/thành
+                // Load danh sách tỉnh/thành từ cache
                 loadProvinces();
+                
+                // Áp dụng lazy loading cho ảnh
+                lazyLoadImages();
                 
                 // Cập nhật giá khi thay đổi số lượng
                 document.getElementById('quantity').addEventListener('input', updatePriceDisplay);
                 
                 // Gọi cập nhật biến thể lần đầu
-                updateVariantInfo();
+                setTimeout(() => {{
+                    updateVariantInfo();
+                }}, 300);
                 
                 // Focus vào trường tên
                 setTimeout(() => {{
@@ -3863,7 +3927,22 @@ Cảm ơn quý khách đã đặt hàng! ❤️`;
     </body>
     </html>
     """
-    return html
+    
+    response = make_response(html)
+    
+    # Nén response nếu client hỗ trợ gzip
+    if 'gzip' in request.headers.get('Accept-Encoding', '').lower() and len(html) > 500:
+        @response.call_on_close
+        def compress():
+            gzip_buffer = BytesIO()
+            with gzip.GzipFile(mode='wb', fileobj=gzip_buffer) as gzip_file:
+                gzip_file.write(response.get_data())
+            
+            response.set_data(gzip_buffer.getvalue())
+            response.headers['Content-Encoding'] = 'gzip'
+            response.headers['Content-Length'] = len(response.get_data())
+    
+    return response
 
 # ============================================
 # API ENDPOINTS
@@ -4165,10 +4244,28 @@ def health_check():
             "google_sheets_api": True,
             "poscake_webhook": True,
             "facebook_shop_order_processing": True,
-            "ms_context_update": True,  # Thêm tính năng mới
-            "no_duplicate_ms_display": True  # Thêm tính năng mới
+            "ms_context_update": True,
+            "no_duplicate_ms_display": True,
+            "optimized_form_loading": True,
+            "address_api_cache": True,
+            "lazy_image_loading": True,
+            "gzip_compression": True
         }
     }, 200
+
+# ============================================
+# HEALTH CHECK NHANH (CHO LOAD BALANCER)
+# ============================================
+
+@app.route("/health-light", methods=["GET"])
+def health_light():
+    """Health check nhanh, không load products"""
+    return jsonify({
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "service": "order-form",
+        "uptime": time.time() - LAST_LOAD if LAST_LOAD > 0 else 0
+    }), 200
 
 # ============================================
 # PORT CONFIGURATION FOR KOYEB/RENDER
@@ -4199,12 +4296,15 @@ if __name__ == "__main__":
     print(f"🟢 OpenAI Function Calling: {'TÍCH HỢP THÀNH CÔNG' if client else 'CHƯA CẤU HÌNH'}")
     print("=" * 80)
     
-    print("🔴 CẢI TIẾN MỚI: XỬ LÝ CẬP NHẬT MS VÀ RESET COUNTER")
+    print("🔴 CẢI TIẾN MỚI: TỐI ƯU TỐC ĐỘ LOAD TRANG FORM ĐẶT HÀNG")
     print("=" * 80)
-    print(f"🔴 Hàm mới: update_context_with_new_ms() - tự động reset counter khi phát hiện MS mới")
-    print(f"🔴 Nguồn cập nhật: catalog, ADS referral, Fchat echo, image search, Facebook Shop order")
-    print(f"🔴 Reset counter: real_message_count = 0, has_sent_first_carousel = False")
-    print(f"🔴 Đảm bảo: Khi user chuyển sang sản phẩm khác, bot luôn gửi carousel cho sản phẩm mới")
+    print(f"🔴 1. Prefetch Products: Tự động load products khi truy cập order-form")
+    print(f"🔴 2. Address API Cache: Cache dữ liệu tỉnh/thành (/api/cached-provinces)")
+    print(f"🔴 3. Lazy Loading Images: Ảnh sản phẩm chỉ load khi cần thiết")
+    print(f"🔴 4. Optimized CDN: Sử dụng Cloudflare CDN cho jQuery và Select2")
+    print(f"🔴 5. Async Select2: Khởi tạo Select2 sau khi trang đã load")
+    print(f"🔴 6. Gzip Compression: Nén HTML response giảm 70% kích thước")
+    print(f"🔴 7. Health Check Light: /health-light endpoint nhanh cho load balancer")
     print("=" * 80)
     
     print("🔴 CẢI TIẾN MỚI: XÓA MÃ SẢN PHẨM TRÙNG LẶP")
