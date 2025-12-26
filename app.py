@@ -895,7 +895,7 @@ def get_post_content_from_facebook(post_id: str) -> Optional[dict]:
 
 def extract_ms_from_post_content(post_data: dict) -> Optional[str]:
     """
-    Trích xuất mã sản phẩm từ nội dung bài viết - CHỈ DÙNG REGEX, KHÔNG KIỂM TRA PRODUCTS
+    Trích xuất mã sản phẩm từ nội dung bài viết - CHỈ DÙNG REGEX
     Trả về mã sản phẩm (MSxxxxxx) nếu tìm thấy, ngược lại trả về None
     """
     if not post_data:
@@ -918,10 +918,21 @@ def extract_ms_from_post_content(post_data: dict) -> Optional[str]:
     for pattern in bracket_patterns:
         matches = re.findall(pattern, message, re.IGNORECASE)
         for match in matches:
-            # match là số (2-6 chữ số)
-            num_part = match.lstrip('0')
-            if not num_part:  # nếu toàn là số 0
+            if isinstance(match, tuple):
+                match = match[0]
+            
+            # match có thể là "MS000038" hoặc "000038"
+            # Chuẩn hóa về MSxxxxxx
+            if match.upper().startswith('MS'):
+                # Đã có MS ở đầu, chỉ cần lấy số
+                num_part = match[2:].lstrip('0')
+            else:
+                # Chỉ có số
+                num_part = match.lstrip('0')
+            
+            if not num_part:
                 num_part = '0'
+            
             full_ms = f"MS{num_part.zfill(6)}"
             print(f"[EXTRACT MS FROM POST] Tìm thấy {full_ms} qua bracket pattern {pattern}")
             return full_ms
@@ -944,34 +955,39 @@ def extract_ms_from_post_content(post_data: dict) -> Optional[str]:
         for match in matches:
             if isinstance(match, tuple):
                 match = match[0]
+            
             if is_full_ms:
                 # match là MSxxxxxx đầy đủ
-                full_ms = match.upper()
+                # Trích xuất số từ MSxxxxxx
+                num_part = match[2:].lstrip('0')
             else:
                 # match chỉ là số
-                num_part = str(match).lstrip('0')
-                if not num_part:
-                    num_part = '0'
-                full_ms = f"MS{num_part.zfill(6)}"
+                num_part = match.lstrip('0')
             
+            if not num_part:
+                num_part = '0'
+            
+            full_ms = f"MS{num_part.zfill(6)}"
             print(f"[EXTRACT MS FROM POST] Tìm thấy {full_ms} qua pattern {pattern}")
             return full_ms
     
     # PHƯƠNG PHÁP 3: Tìm số 6 chữ số
     six_digit_numbers = re.findall(r'\b(\d{6})\b', message)
     for num in six_digit_numbers:
-        # Thử với MS đầy đủ
-        full_ms = f"MS{num}"
+        num_part = num.lstrip('0')
+        if not num_part:
+            num_part = '0'
+        full_ms = f"MS{num_part.zfill(6)}"
         print(f"[EXTRACT MS FROM POST] Tìm thấy số 6 chữ số {num} -> {full_ms}")
         return full_ms
     
     # PHƯƠNG PHÁP 4: Tìm số 2-5 chữ số
     short_numbers = re.findall(r'\b(\d{2,5})\b', message)
     for num in short_numbers:
-        clean_num = num.lstrip('0')
-        if not clean_num:
-            clean_num = '0'
-        full_ms = f"MS{clean_num.zfill(6)}"
+        num_part = num.lstrip('0')
+        if not num_part:
+            num_part = '0'
+        full_ms = f"MS{num_part.zfill(6)}"
         print(f"[EXTRACT MS FROM POST] Tìm thấy số ngắn {num} -> {full_ms}")
         return full_ms
     
@@ -983,10 +999,10 @@ def extract_ms_from_post_content(post_data: dict) -> Optional[str]:
         num_match = re.search(r'(\d+)', match)
         if num_match:
             num = num_match.group(1)
-            num_clean = num.lstrip('0')
-            if not num_clean:
-                num_clean = '0'
-            full_ms = f"MS{num_clean.zfill(6)}"
+            num_part = num.lstrip('0')
+            if not num_part:
+                num_part = '0'
+            full_ms = f"MS{num_part.zfill(6)}"
             print(f"[EXTRACT MS FROM POST] Tìm thấy {full_ms} qua fallback pattern")
             return full_ms
     
