@@ -290,9 +290,15 @@ def load_user_context_from_sheets():
 
 def periodic_context_save():
     """Lưu context định kỳ vào Google Sheets"""
+    print(f"[PERIODIC SAVE THREAD] Thread lưu context đã bắt đầu")
+    
+    # Đợi app khởi động xong
+    time.sleep(30)
+    
     while True:
-        time.sleep(300)  # 5 phút
+        print(f"[PERIODIC SAVE] Đang lưu context vào Google Sheets...")
         save_user_context_to_sheets()
+        time.sleep(300)  # 5 phút
 
 def get_user_order_history_from_sheets(user_id: str, phone: str = None) -> List[Dict]:
     """Tra cứu lịch sử đơn hàng từ Google Sheets"""
@@ -2258,7 +2264,7 @@ def handle_text_with_function_calling(uid: str, text: str):
     # ƯU TIÊN 2: Nếu phát hiện MS từ text (có tiền tố) thì cập nhật, bất kể có current_ms hay không
     detected_ms = detect_ms_from_text(text)
     if detected_ms and detected_ms in PRODUCTS:
-        # Nếu MS mới khác MS cũ, hoặc chưa có MS, thì cập nhật
+        # Nếu MS mới khác với MS cũ, hoặc chưa có MS, thì cập nhật
         if detected_ms != current_ms:
             current_ms = detected_ms
             # SỬ DỤNG HÀM MỚI ĐỂ CẬP NHẬT MS VÀ RESET COUNTER
@@ -3466,7 +3472,7 @@ def api_get_variant_info():
             target_variant = variant
             break
     
-    # Nếu không tìm thấy biến thể, dùng thông tin chung
+    # Nếu không tìm thấy biến thể phù hợp, dùng thông tin chung
     if target_variant:
         variant_image = target_variant.get("variant_image", "")
         variant_price = target_variant.get("gia", 0)
@@ -4892,6 +4898,41 @@ def api_save_context():
     return jsonify({"status": "success", "message": "Đã lưu context vào Google Sheets"})
 
 # ============================================
+# THÊM CÁC ENDPOINT TEST
+# ============================================
+
+@app.route("/check-env", methods=["GET"])
+def check_env():
+    """Kiểm tra biến môi trường"""
+    return jsonify({
+        "GOOGLE_SHEET_ID": "CÓ" if GOOGLE_SHEET_ID else "KHÔNG",
+        "GOOGLE_SHEETS_CREDENTIALS_JSON": "CÓ" if GOOGLE_SHEETS_CREDENTIALS_JSON else "KHÔNG",
+        "SHEET_ID_LENGTH": len(GOOGLE_SHEET_ID) if GOOGLE_SHEET_ID else 0,
+        "CREDENTIALS_LENGTH": len(GOOGLE_SHEETS_CREDENTIALS_JSON) if GOOGLE_SHEETS_CREDENTIALS_JSON else 0
+    })
+
+@app.route("/test-context-save", methods=["GET"])
+def test_context_save():
+    """Test lưu context thủ công"""
+    print(f"[TEST] Đang test lưu context thủ công...")
+    print(f"[TEST] Số users trong memory: {len(USER_CONTEXT)}")
+    
+    # Test một user
+    test_user_id = "26225402767048945"
+    if test_user_id in USER_CONTEXT:
+        print(f"[TEST] User context: {USER_CONTEXT[test_user_id].get('last_ms')}")
+    
+    # Lưu thủ công
+    save_user_context_to_sheets()
+    
+    return jsonify({
+        "status": "success",
+        "users_in_memory": len(USER_CONTEXT),
+        "test_user_found": test_user_id in USER_CONTEXT,
+        "test_user_ms": USER_CONTEXT.get(test_user_id, {}).get("last_ms") if test_user_id in USER_CONTEXT else None
+    })
+
+# ============================================
 # HEALTH CHECK
 # ============================================
 
@@ -5041,11 +5082,20 @@ if __name__ == "__main__":
     print(f"🟢 Port: {get_port()}")
     print("=" * 80)
     
-    # Khởi tạo Google Sheets UserContext sheet
+    # KHỞI TẠO GOOGLE SHEETS USERCONTEXT SHEET
+    print("🟢 Đang khởi tạo Google Sheets UserContext sheet...")
     init_user_context_sheet()
     
-    # Load context từ Google Sheets khi khởi động
+    # LOAD CONTEXT TỪ GOOGLE SHEETS
+    print("🟢 Đang load context từ Google Sheets...")
     load_user_context_from_sheets()
+    print(f"🟢 Đã load {len(USER_CONTEXT)} users từ Google Sheets")
+    
+    # BẮT ĐẦU THREAD LƯU CONTEXT ĐỊNH KỲ
+    print("🟢 Đang khởi động thread lưu context định kỳ...")
+    saver_thread = threading.Thread(target=periodic_context_save, daemon=True)
+    saver_thread.start()
+    print(f"🟢 Thread lưu context đã khởi động, sẽ lưu mỗi 5 phút")
     
     print(f"🟢 GPT-4o-mini: {'SẴN SÀNG' if client else 'CHƯA CẤU HÌNH'}")
     print(f"🟢 Fanpage: {get_fanpage_name_from_api()}")
@@ -5094,11 +5144,6 @@ if __name__ == "__main__":
     print(f"🔴 5. Test Endpoint: /test-feed-comment?post_id=...")
     print(f"🔴 6. Debug Endpoint: /debug-feed-comment?post_id=...")
     print("=" * 80)
-    
-    # Bắt đầu thread lưu context định kỳ
-    saver_thread = threading.Thread(target=periodic_context_save, daemon=True)
-    saver_thread.start()
-    print(f"🟢 Đã khởi động thread lưu context vào Google Sheets mỗi 5 phút")
     
     load_products()
     
