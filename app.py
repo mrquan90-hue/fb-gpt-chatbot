@@ -568,6 +568,8 @@ def update_context_with_new_ms(uid: str, new_ms: str, source: str = "unknown"):
         ctx["has_sent_first_carousel"] = False
         ctx["last_msg_time"] = 0  # Reset thời gian tin nhắn cuối
         ctx["last_processed_text"] = ""  # Reset text đã xử lý
+    else:
+        print(f"[CONTEXT NO CHANGE] User {uid}: Vẫn giữ MS {new_ms} (nguồn: {source})")
     
     # Cập nhật MS mới
     ctx["last_ms"] = new_ms
@@ -588,7 +590,7 @@ def update_context_with_new_ms(uid: str, new_ms: str, source: str = "unknown"):
     # Cập nhật thời gian
     ctx["last_updated"] = time.time()
     
-    print(f"[CONTEXT UPDATE] Đã cập nhật MS {new_ms} cho user {uid} (nguồn: {source}, real_message_count: {ctx['real_message_count']})")
+    print(f"[CONTEXT UPDATE COMPLETE] Đã cập nhật MS {new_ms} cho user {uid} (nguồn: {source}, real_message_count: {ctx['real_message_count']})")
     return True
 
 def restore_user_context_on_wakeup(uid: str):
@@ -2258,18 +2260,15 @@ def handle_text_with_function_calling(uid: str, text: str):
         if restored:
             print(f"[GPT FUNCTION] Đã khôi phục context cho user {uid}")
     
-    # ƯU TIÊN 1: Lấy MS từ context (echo Fchat, ad_title, catalog...)
-    current_ms = ctx.get("last_ms")
-    
-    # ƯU TIÊN 2: Nếu phát hiện MS từ text (có tiền tố) thì cập nhật, bất kể có current_ms hay không
+    # ƯU TIÊN 1: Nếu phát hiện MS từ text (có tiền tố) thì cập nhật NGAY
     detected_ms = detect_ms_from_text(text)
     if detected_ms and detected_ms in PRODUCTS:
-        # Nếu MS mới khác với MS cũ, hoặc chưa có MS, thì cập nhật
-        if detected_ms != current_ms:
-            current_ms = detected_ms
-            # SỬ DỤNG HÀM MỚI ĐỂ CẬP NHẬT MS VÀ RESET COUNTER
-            update_context_with_new_ms(uid, current_ms, "text_detection")
-            print(f"[MS DETECTED] Phát hiện MS từ tin nhắn hiện tại: {current_ms}")
+        # Cập nhật MS mới NGAY LẬP TỨC
+        update_context_with_new_ms(uid, detected_ms, "text_detection")
+        print(f"[MS DETECTED IN GPT] Phát hiện và cập nhật MS mới: {detected_ms}")
+    
+    # ƯU TIÊN 2: Lấy MS từ context (sau khi đã cập nhật từ text nếu có)
+    current_ms = ctx.get("last_ms")
     
     # ƯU TIÊN 3: Nếu vẫn không có, kiểm tra xem tin nhắn có chứa số không
     if not current_ms or current_ms not in PRODUCTS:
@@ -2280,20 +2279,9 @@ def handle_text_with_function_calling(uid: str, text: str):
             clean_num = num.lstrip('0')
             if clean_num and clean_num in PRODUCTS_BY_NUMBER:
                 current_ms = PRODUCTS_BY_NUMBER[clean_num]
-                ctx["last_ms"] = current_ms
-                # Gọi hàm cập nhật context
-                if "product_history" not in ctx:
-                    ctx["product_history"] = []
-                
-                if not ctx["product_history"] or ctx["product_history"][0] != current_ms:
-                    if current_ms in ctx["product_history"]:
-                        ctx["product_history"].remove(current_ms)
-                    ctx["product_history"].insert(0, current_ms)
-                
-                if len(ctx["product_history"]) > 5:
-                    ctx["product_history"] = ctx["product_history"][:5]
-                
-                print(f"[MS FALLBACK] Tìm thấy MS từ tiền tố + số: {current_ms}")
+                # Cập nhật context với MS mới
+                update_context_with_new_ms(uid, current_ms, "text_detection")
+                print(f"[MS FALLBACK IN GPT] Tìm thấy MS từ tiền tố + số: {current_ms}")
                 break
     
     # ƯU TIÊN 4: Nếu vẫn không có, hỏi lại khách
@@ -2743,8 +2731,7 @@ Vui lòng gửi mã sản phẩm (ví dụ: MS123456) hoặc mô tả sản ph�
 
 def handle_text(uid: str, text: str):
     """Xử lý tin nhắn văn bản với logic mới: 
-       1. Nếu đã có MS trong context: dùng GPT ngay và gửi carousel nếu chưa gửi
-       2. Nếu chưa có MS: cố gắng phát hiện MS từ tin nhắn, nếu có thì cập nhật context, gửi carousel và dùng GPT, nếu không thì yêu cầu MS"""
+       LUÔN ưu tiên MS mới nhất từ mọi nguồn trước khi trả lời"""
     if not text or len(text.strip()) == 0:
         return
     
@@ -2786,76 +2773,63 @@ def handle_text(uid: str, text: str):
         message_count = ctx["real_message_count"]
         
         print(f"[MESSAGE COUNT] User {uid}: tin nhắn thứ {message_count}")
+        print(f"[DEBUG] Current last_ms in context: {ctx.get('last_ms')}")
         
         # Xử lý order state nếu có
         if handle_order_form_step(uid, text):
             ctx["processing_lock"] = False
             return
         
-        # Xác định MS hiện tại
-        current_ms = ctx.get("last_ms")
+        # ============================================
+        # QUAN TRỌNG: LUÔN ƯU TIÊN MS MỚI NHẤT TRƯỚC KHI TRẢ LỜI
+        # ============================================
         
-        # ƯU TIÊN 1: Kiểm tra nếu đã có MS từ trước (từ feed comment, catalog, ads, v.v.)
+        # BƯỚC 1: Tìm MS từ text (nếu có tiền tố) - ƯU TIÊN CAO NHẤT
+        detected_ms = detect_ms_from_text(text)
+        if detected_ms and detected_ms in PRODUCTS:
+            print(f"[MS DETECTED FROM TEXT] Phát hiện MS từ tin nhắn: {detected_ms}")
+            # Cập nhật context với MS mới NGAY LẬP TỨC
+            update_context_with_new_ms(uid, detected_ms, "text_detection")
+        
+        # BƯỚC 2: Tìm số trong tin nhắn với tiền tố
+        if not detected_ms:
+            text_norm = normalize_vietnamese(text.lower())
+            numbers = re.findall(r'\b(?:ms|mã|sp|ma|san pham)\s*(\d{1,6})\b', text_norm, re.IGNORECASE)
+            for num in numbers:
+                clean_num = num.lstrip('0')
+                if clean_num and clean_num in PRODUCTS_BY_NUMBER:
+                    detected_ms = PRODUCTS_BY_NUMBER[clean_num]
+                    print(f"[MS FALLBACK] Tìm thấy MS từ tiền tố + số: {detected_ms}")
+                    # Cập nhật context với MS mới NGAY LẬP TỨC
+                    update_context_with_new_ms(uid, detected_ms, "text_detection")
+                    break
+        
+        # Xác định MS hiện tại (sau khi đã cập nhật từ text)
+        current_ms = ctx.get("last_ms")
+        print(f"[DEBUG] After MS detection, current_ms: {current_ms}")
+        
+        # BƯỚC 3: Kiểm tra xem đã có MS từ trước chưa
         if current_ms and current_ms in PRODUCTS:
             print(f"[HAS MS FROM CONTEXT] User {uid} đã có MS từ context: {current_ms}")
             
-            # Gửi carousel nếu chưa gửi
+            # Gửi carousel nếu chưa gửi (cho MS mới hoặc MS cũ nhưng chưa gửi carousel)
             if not ctx.get("has_sent_first_carousel"):
                 print(f"🚨 [FIRST CAROUSEL FOR PRODUCT] Chưa gửi carousel cho sản phẩm {current_ms}")
                 send_single_product_carousel(uid, current_ms)
                 ctx["has_sent_first_carousel"] = True
             
-            # Dùng GPT để trả lời ngay
+            # Dùng GPT để trả lời theo MS HIỆN TẠI (đã được cập nhật nếu có từ text)
             print(f"✅ [GPT REQUIRED] User {uid} đã có MS {current_ms}, dùng GPT trả lời")
             handle_text_with_function_calling(uid, text)
             ctx["processing_lock"] = False
             return
-        
-        # ƯU TIÊN 2: Tìm MS từ text (nếu có tiền tố)
-        detected_ms = detect_ms_from_text(text)
-        if detected_ms and detected_ms in PRODUCTS:
-            print(f"[MS DETECTED FROM TEXT] Phát hiện MS từ tin nhắn: {detected_ms}")
-            
-            # Cập nhật context với MS mới
-            update_context_with_new_ms(uid, detected_ms, "text_detection")
-            
-            # Gửi carousel
-            send_single_product_carousel(uid, detected_ms)
-            ctx["has_sent_first_carousel"] = True
-            
-            # Dùng GPT để trả lời ngay
-            print(f"✅ [GPT REQUIRED] MS mới được phát hiện, dùng GPT trả lời")
-            handle_text_with_function_calling(uid, text)
-            ctx["processing_lock"] = False
-            return
-        
-        # ƯU TIÊN 3: Tìm số trong tin nhắn với tiền tố
-        text_norm = normalize_vietnamese(text.lower())
-        numbers = re.findall(r'\b(?:ms|mã|sp|ma|san pham)\s*(\d{1,6})\b', text_norm, re.IGNORECASE)
-        for num in numbers:
-            clean_num = num.lstrip('0')
-            if clean_num and clean_num in PRODUCTS_BY_NUMBER:
-                detected_ms = PRODUCTS_BY_NUMBER[clean_num]
-                print(f"[MS FALLBACK] Tìm thấy MS từ tiền tố + số: {detected_ms}")
-                
-                # Cập nhật context với MS mới
-                update_context_with_new_ms(uid, detected_ms, "text_detection")
-                
-                # Gửi carousel
-                send_single_product_carousel(uid, detected_ms)
-                ctx["has_sent_first_carousel"] = True
-                
-                # Dùng GPT để trả lời ngay
-                print(f"✅ [GPT REQUIRED] MS mới được phát hiện từ fallback, dùng GPT trả lời")
-                handle_text_with_function_calling(uid, text)
-                ctx["processing_lock"] = False
-                return
         
         # Nếu không tìm thấy MS từ bất kỳ nguồn nào
         print(f"[NO MS DETECTED] Không tìm thấy MS từ tin nhắn: {text}")
         
         # Kiểm tra nếu tin nhắn là câu hỏi chung (không có MS)
         general_questions = ['giá', 'bao nhiêu', 'màu gì', 'size nào', 'còn hàng', 'đặt hàng', 'mua', 'tư vấn']
+        text_norm = normalize_vietnamese(text.lower())
         if any(keyword in text_norm for keyword in general_questions):
             # Yêu cầu khách gửi MS cụ thể
             send_message(uid, "Dạ, để em tư vấn chính xác cho anh/chị, vui lòng cho em biết mã sản phẩm (ví dụ: MS000034) hoặc gửi ảnh sản phẩm ạ! 🤗")
