@@ -26,7 +26,7 @@ from openai import OpenAI
 app = Flask(__name__)
 
 # ============================================
-# ENV & CONFIG - THÊM POSCAKE, PAGE_ID VÀ FACEBOOK CAPI
+# ENV & CONFIG - THÊM POSCAKE VÀ PAGE_ID
 # ============================================
 PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN", "").strip()
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "").strip()
@@ -45,11 +45,6 @@ POSCAKE_STORE_ID = os.getenv("POSCAKE_STORE_ID", "").strip()
 # Page ID để xác định comment từ page
 PAGE_ID = os.getenv("PAGE_ID", "516937221685203").strip()
 
-# Facebook Conversion API Configuration
-FACEBOOK_PIXEL_ID = os.getenv("FACEBOOK_PIXEL_ID", "").strip()
-FACEBOOK_ACCESS_TOKEN = os.getenv("FACEBOOK_ACCESS_TOKEN", "").strip()
-FACEBOOK_API_VERSION = os.getenv("FACEBOOK_API_VERSION", "v18.0").strip()
-
 # ============================================
 # GOOGLE SHEETS API CONFIGURATION
 # ============================================
@@ -66,62 +61,6 @@ USER_CONTEXT_SHEET_NAME = "UserContext"
 # APP ID CỦA BOT
 # ============================================
 BOT_APP_IDS = {"645956568292435"}
-
-# ============================================
-# FACEBOOK EVENT QUEUE FOR ASYNC PROCESSING
-# ============================================
-from queue import Queue
-
-# Queue cho sự kiện Facebook CAPI
-FACEBOOK_EVENT_QUEUE = Queue()
-FACEBOOK_WORKER_RUNNING = False
-
-def facebook_event_worker():
-    """Worker xử lý sự kiện Facebook bất đồng bộ"""
-    global FACEBOOK_WORKER_RUNNING
-    FACEBOOK_WORKER_RUNNING = True
-    
-    print(f"[FACEBOOK WORKER] Worker đã khởi động")
-    
-    while True:
-        try:
-            # Lấy sự kiện từ queue (blocking)
-            event_data = FACEBOOK_EVENT_QUEUE.get()
-            
-            # Nếu là tín hiệu dừng
-            if event_data is None:
-                break
-            
-            # Xử lý sự kiện
-            event_type = event_data.get('event_type')
-            
-            if event_type == 'ViewContent':
-                _send_view_content_async(event_data)
-            elif event_type == 'AddToCart':
-                _send_add_to_cart_async(event_data)
-            elif event_type == 'Purchase':
-                _send_purchase_async(event_data)
-            elif event_type == 'InitiateCheckout':
-                _send_initiate_checkout_async(event_data)
-            
-            # Đánh dấu task hoàn thành
-            FACEBOOK_EVENT_QUEUE.task_done()
-            
-        except Exception as e:
-            print(f"[FACEBOOK WORKER ERROR] {e}")
-            time.sleep(1)
-    
-    FACEBOOK_WORKER_RUNNING = False
-    print(f"[FACEBOOK WORKER] Worker đã dừng")
-
-def start_facebook_worker():
-    """Khởi động worker xử lý sự kiện Facebook"""
-    if not FACEBOOK_WORKER_RUNNING:
-        worker_thread = threading.Thread(target=facebook_event_worker, daemon=True)
-        worker_thread.start()
-        print(f"[FACEBOOK WORKER] Đã khởi động worker thread")
-        return worker_thread
-    return None
 
 # ============================================
 # GLOBAL LOCKS
@@ -1171,9 +1110,9 @@ def send_suggestion_carousel(uid: str, suggestion_count: int = 3):
                     "payload": f"VIEW_IMAGES_{ms}"
                 },
                 {
-                    "type": "postback",
-                    "title": "🛒 Đặt ngay",
-                    "payload": f"ORDER_BUTTON_{ms}"
+                    "type": "web_url",
+                    "url": f"{DOMAIN}/order-form?ms={ms}&uid={uid}",
+                    "title": "🛒 Đặt ngay"
                 }
             ]
         }
@@ -2479,424 +2418,6 @@ def handle_text_with_function_calling(uid: str, text: str):
         send_message(uid, "Dạ em đang gặp chút trục trặc, anh/chị vui lòng thử lại sau ạ.")
 
 # ============================================
-# FACEBOOK CONVERSION API FUNCTIONS - ASYNC
-# ============================================
-
-def queue_facebook_event(event_type: str, event_data: dict):
-    """
-    Thêm sự kiện vào queue để xử lý bất đồng bộ
-    KHÔNG chờ kết quả, KHÔNG block bot
-    """
-    if not FACEBOOK_PIXEL_ID or not FACEBOOK_ACCESS_TOKEN:
-        return False
-    
-    # Thêm vào queue
-    queue_item = {
-        'event_type': event_type,
-        'data': event_data,
-        'timestamp': time.time()
-    }
-    
-    # Giới hạn queue size để tránh memory leak
-    if FACEBOOK_EVENT_QUEUE.qsize() < 1000:  # Max 1000 sự kiện trong queue
-        FACEBOOK_EVENT_QUEUE.put(queue_item)
-        return True
-    else:
-        print(f"[FACEBOOK QUEUE] Queue đầy, bỏ qua sự kiện {event_type}")
-        return False
-
-def _send_view_content_async(event_data: dict):
-    """Gửi sự kiện ViewContent bất đồng bộ"""
-    try:
-        data = event_data['data']
-        
-        payload = {
-            "data": [{
-                "event_name": "ViewContent",
-                "event_time": int(data.get('event_time', time.time())),
-                "action_source": "website",
-                "user_data": data['user_data'],
-                "custom_data": {
-                    "currency": "VND",
-                    "value": data.get('price', 0),
-                    "content_ids": [data.get('ms', '')],
-                    "content_name": data.get('product_name', '')[:100],
-                    "content_type": "product",
-                    "content_category": "fashion",
-                }
-            }]
-        }
-        
-        # Thêm event_source_url nếu có
-        if data.get('event_source_url'):
-            payload["data"][0]["event_source_url"] = data['event_source_url']
-        
-        url = f"https://graph.facebook.com/{FACEBOOK_API_VERSION}/{FACEBOOK_PIXEL_ID}/events"
-        
-        response = requests.post(
-            url,
-            params={"access_token": FACEBOOK_ACCESS_TOKEN},
-            json=payload,
-            timeout=3  # Timeout ngắn, không chờ đợi lâu
-        )
-        
-        if response.status_code == 200:
-            print(f"[FACEBOOK CAPI ASYNC] Đã gửi ViewContent cho {data.get('ms')}")
-        else:
-            print(f"[FACEBOOK CAPI ASYNC ERROR] {response.status_code}: {response.text[:100]}")
-            
-    except requests.exceptions.Timeout:
-        print(f"[FACEBOOK CAPI TIMEOUT] Timeout khi gửi ViewContent")
-    except Exception as e:
-        print(f"[FACEBOOK CAPI EXCEPTION] {e}")
-
-def _send_add_to_cart_async(event_data: dict):
-    """Gửi sự kiện AddToCart bất đồng bộ"""
-    try:
-        data = event_data['data']
-        
-        payload = {
-            "data": [{
-                "event_name": "AddToCart",
-                "event_time": int(data.get('event_time', time.time())),
-                "action_source": "website",
-                "user_data": data['user_data'],
-                "custom_data": {
-                    "currency": "VND",
-                    "value": data.get('price', 0) * data.get('quantity', 1),
-                    "content_ids": [data.get('ms', '')],
-                    "content_name": data.get('product_name', '')[:100],
-                    "content_type": "product",
-                    "num_items": data.get('quantity', 1)
-                }
-            }]
-        }
-        
-        url = f"https://graph.facebook.com/{FACEBOOK_API_VERSION}/{FACEBOOK_PIXEL_ID}/events"
-        
-        response = requests.post(
-            url,
-            params={"access_token": FACEBOOK_ACCESS_TOKEN},
-            json=payload,
-            timeout=3
-        )
-        
-        if response.status_code == 200:
-            print(f"[FACEBOOK CAPI ASYNC] Đã gửi AddToCart cho {data.get('ms')}")
-        else:
-            print(f"[FACEBOOK CAPI ASYNC ERROR] {response.status_code}: {response.text[:100]}")
-            
-    except requests.exceptions.Timeout:
-        print(f"[FACEBOOK CAPI TIMEOUT] Timeout khi gửi AddToCart")
-    except Exception as e:
-        print(f"[FACEBOOK CAPI EXCEPTION] {e}")
-
-def _send_purchase_async(event_data: dict):
-    """Gửi sự kiện Purchase bất đồng bộ"""
-    try:
-        data = event_data['data']
-        
-        payload = {
-            "data": [{
-                "event_name": "Purchase",
-                "event_time": int(data.get('event_time', time.time())),
-                "action_source": "website",
-                "user_data": data['user_data'],
-                "custom_data": {
-                    "currency": "VND",
-                    "value": data.get('total_price', 0),
-                    "content_ids": [data.get('ms', '')],
-                    "content_name": data.get('product_name', '')[:100],
-                    "content_type": "product",
-                    "num_items": data.get('quantity', 1),
-                    "order_id": data.get('order_id', f"ORD{int(time.time())}")
-                }
-            }]
-        }
-        
-        # Thêm event_source_url nếu có
-        if data.get('event_source_url'):
-            payload["data"][0]["event_source_url"] = data['event_source_url']
-        
-        url = f"https://graph.facebook.com/{FACEBOOK_API_VERSION}/{FACEBOOK_PIXEL_ID}/events"
-        
-        response = requests.post(
-            url,
-            params={"access_token": FACEBOOK_ACCESS_TOKEN},
-            json=payload,
-            timeout=3
-        )
-        
-        if response.status_code == 200:
-            print(f"[FACEBOOK CAPI ASYNC] Đã gửi Purchase cho đơn hàng {data.get('order_id')}")
-        else:
-            print(f"[FACEBOOK CAPI ASYNC ERROR] {response.status_code}: {response.text[:100]}")
-            
-    except requests.exceptions.Timeout:
-        print(f"[FACEBOOK CAPI TIMEOUT] Timeout khi gửi Purchase")
-    except Exception as e:
-        print(f"[FACEBOOK CAPI EXCEPTION] {e}")
-
-def _send_initiate_checkout_async(event_data: dict):
-    """Gửi sự kiện InitiateCheckout bất đồng bộ"""
-    try:
-        data = event_data['data']
-        
-        payload = {
-            "data": [{
-                "event_name": "InitiateCheckout",
-                "event_time": int(data.get('event_time', time.time())),
-                "action_source": "website",
-                "user_data": data['user_data'],
-                "custom_data": {
-                    "currency": "VND",
-                    "value": data.get('price', 0) * data.get('quantity', 1),
-                    "content_ids": [data.get('ms', '')],
-                    "content_name": data.get('product_name', '')[:100],
-                    "content_type": "product",
-                    "num_items": data.get('quantity', 1)
-                }
-            }]
-        }
-        
-        # Thêm event_source_url nếu có
-        if data.get('event_source_url'):
-            payload["data"][0]["event_source_url"] = data['event_source_url']
-        
-        url = f"https://graph.facebook.com/{FACEBOOK_API_VERSION}/{FACEBOOK_PIXEL_ID}/events"
-        
-        response = requests.post(
-            url,
-            params={"access_token": FACEBOOK_ACCESS_TOKEN},
-            json=payload,
-            timeout=3
-        )
-        
-        if response.status_code == 200:
-            print(f"[FACEBOOK CAPI ASYNC] Đã gửi InitiateCheckout cho {data.get('ms')}")
-        else:
-            print(f"[FACEBOOK CAPI ASYNC ERROR] {response.status_code}: {response.text[:100]}")
-            
-    except requests.exceptions.Timeout:
-        print(f"[FACEBOOK CAPI TIMEOUT] Timeout khi gửi InitiateCheckout")
-    except Exception as e:
-        print(f"[FACEBOOK CAPI EXCEPTION] {e}")
-
-def get_fbclid_from_context(uid: str) -> Optional[str]:
-    """
-    Lấy fbclid từ context của user (nếu có từ referral)
-    """
-    ctx = USER_CONTEXT.get(uid, {})
-    referral_payload = ctx.get("referral_payload", "")
-    
-    if referral_payload and "fbclid=" in referral_payload:
-        match = re.search(r'fbclid=([^&]+)', referral_payload)
-        if match:
-            return match.group(1)
-    
-    return None
-
-def prepare_user_data_for_capi(uid: str, phone: str = None, client_ip: str = None, user_agent: str = None):
-    """
-    Chuẩn bị user_data cho Conversion API
-    """
-    user_data = {
-        "client_user_agent": user_agent or "",
-        "client_ip_address": client_ip or "",
-    }
-    
-    # Thêm fbclid nếu có
-    fbclid = get_fbclid_from_context(uid)
-    if fbclid:
-        user_data["fbc"] = f"fb.1.{int(time.time())}.{fbclid}"
-    
-    # Thêm FBP cookie mô phỏng
-    user_data["fbp"] = f"fb.1.{int(time.time())}.{uid[:10] if uid else str(int(time.time()))}"
-    
-    # Hash phone nếu có
-    if phone:
-        # Chuẩn hóa số điện thoại
-        phone_clean = re.sub(r'[^\d]', '', phone)
-        if phone_clean.startswith('0'):
-            phone_clean = '84' + phone_clean[1:]
-        elif phone_clean.startswith('+84'):
-            phone_clean = phone_clean[1:]
-        
-        # Hash SHA256
-        phone_hash = hashlib.sha256(phone_clean.encode()).hexdigest()
-        user_data["ph"] = phone_hash
-    
-    return user_data
-
-def send_view_content_smart(uid: str, ms: str, product_name: str, price: float, referral_source: str = "direct"):
-    """
-    Gửi ViewContent THÔNG MINH - chỉ gửi 1 lần mỗi 30 phút cho cùng user + product
-    """
-    if not FACEBOOK_PIXEL_ID:
-        return
-    
-    # Key cache: user + product
-    cache_key = f"{uid}_{ms}"
-    
-    # Kiểm tra cache trong memory
-    if hasattr(send_view_content_smart, 'cache'):
-        last_sent = send_view_content_smart.cache.get(cache_key, 0)
-        now = time.time()
-        
-        # Nếu đã gửi trong 30 phút gần đây, bỏ qua
-        if now - last_sent < 1800:  # 30 phút = 1800 giây
-            print(f"[FACEBOOK CAPI SMART] Đã gửi ViewContent cho {ms} trong 30 phút gần đây, bỏ qua")
-            return
-    
-    # Lấy context để có user_data
-    ctx = USER_CONTEXT.get(uid, {})
-    phone = ctx.get("order_data", {}).get("phone", "")
-    
-    # Chuẩn bị user_data đơn giản (không cần IP, user_agent cho ViewContent từ bot)
-    user_data = {
-        "fbp": f"fb.1.{int(time.time())}.{uid[:10] if uid else str(int(time.time()))}",
-    }
-    
-    # Hash phone nếu có
-    if phone:
-        phone_clean = re.sub(r'[^\d]', '', phone)
-        if phone_clean.startswith('0'):
-            phone_clean = '84' + phone_clean[1:]
-        phone_hash = hashlib.sha256(phone_clean.encode()).hexdigest()
-        user_data["ph"] = phone_hash
-    
-    # Thêm fbclid nếu có
-    fbclid = get_fbclid_from_context(uid)
-    if fbclid:
-        user_data["fbc"] = f"fb.1.{int(time.time())}.{fbclid}"
-    
-    # Chuẩn bị event data
-    event_data = {
-        'uid': uid,
-        'ms': ms,
-        'product_name': product_name,
-        'price': price,
-        'user_data': user_data,
-        'event_time': int(time.time()),
-        'event_source_url': f"https://www.facebook.com/{PAGE_ID}" if PAGE_ID else f"https://{DOMAIN}",
-        'referral_source': referral_source
-    }
-    
-    # Thêm vào queue để xử lý bất đồng bộ
-    queued = queue_facebook_event('ViewContent', event_data)
-    
-    if queued:
-        # Cập nhật cache
-        if not hasattr(send_view_content_smart, 'cache'):
-            send_view_content_smart.cache = {}
-        send_view_content_smart.cache[cache_key] = time.time()
-        
-        # Dọn dẹp cache cũ (giữ tối đa 1000 entries)
-        if len(send_view_content_smart.cache) > 1000:
-            # Giữ 500 entries mới nhất
-            items = sorted(send_view_content_smart.cache.items(), key=lambda x: x[1], reverse=True)[:500]
-            send_view_content_smart.cache = dict(items)
-        
-        print(f"[FACEBOOK CAPI SMART] Đã queue ViewContent cho {ms}")
-    else:
-        print(f"[FACEBOOK CAPI SMART] Không thể queue ViewContent, queue đầy")
-
-def send_add_to_cart_smart(uid: str, ms: str, product_name: str, price: float, quantity: int = 1):
-    """
-    Gửi AddToCart sự kiện thông minh
-    """
-    if not FACEBOOK_PIXEL_ID:
-        return
-    
-    ctx = USER_CONTEXT.get(uid, {})
-    phone = ctx.get("order_data", {}).get("phone", "")
-    
-    user_data = prepare_user_data_for_capi(uid, phone)
-    
-    event_data = {
-        'uid': uid,
-        'ms': ms,
-        'product_name': product_name,
-        'price': price,
-        'quantity': quantity,
-        'user_data': user_data,
-        'event_time': int(time.time())
-    }
-    
-    # Thêm vào queue để xử lý bất đồng bộ
-    queued = queue_facebook_event('AddToCart', event_data)
-    
-    if queued:
-        print(f"[FACEBOOK CAPI SMART] Đã queue AddToCart cho {ms}")
-    else:
-        print(f"[FACEBOOK CAPI SMART] Không thể queue AddToCart, queue đầy")
-
-def send_purchase_smart(uid: str, ms: str, product_name: str, order_data: dict):
-    """
-    Gửi Purchase sự kiện thông minh
-    """
-    if not FACEBOOK_PIXEL_ID:
-        return
-    
-    phone = order_data.get("phone", "")
-    total_price = order_data.get("total_price", 0)
-    quantity = order_data.get("quantity", 1)
-    
-    # Lấy client IP và user agent từ request (nếu có)
-    user_data = prepare_user_data_for_capi(uid, phone)
-    
-    event_data = {
-        'uid': uid,
-        'ms': ms,
-        'product_name': product_name,
-        'total_price': total_price,
-        'quantity': quantity,
-        'user_data': user_data,
-        'event_time': int(time.time()),
-        'order_id': order_data.get("order_id", f"ORD{int(time.time())}_{uid[-4:] if uid else '0000'}"),
-        'event_source_url': f"https://{DOMAIN}/order-form?ms={ms}&uid={uid}"
-    }
-    
-    # Thêm vào queue để xử lý bất đồng bộ
-    queued = queue_facebook_event('Purchase', event_data)
-    
-    if queued:
-        print(f"[FACEBOOK CAPI SMART] Đã queue Purchase cho {ms}")
-    else:
-        print(f"[FACEBOOK CAPI SMART] Không thể queue Purchase, queue đầy")
-
-def send_initiate_checkout_smart(uid: str, ms: str, product_name: str, price: float, quantity: int = 1):
-    """
-    Gửi InitiateCheckout sự kiện thông minh
-    """
-    if not FACEBOOK_PIXEL_ID:
-        return
-    
-    ctx = USER_CONTEXT.get(uid, {})
-    phone = ctx.get("order_data", {}).get("phone", "")
-    
-    user_data = prepare_user_data_for_capi(uid, phone)
-    
-    event_data = {
-        'uid': uid,
-        'ms': ms,
-        'product_name': product_name,
-        'price': price,
-        'quantity': quantity,
-        'user_data': user_data,
-        'event_time': int(time.time()),
-        'event_source_url': f"https://{DOMAIN}/order-form?ms={ms}&uid={uid}"
-    }
-    
-    # Thêm vào queue để xử lý bất đồng bộ
-    queued = queue_facebook_event('InitiateCheckout', event_data)
-    
-    if queued:
-        print(f"[FACEBOOK CAPI SMART] Đã queue InitiateCheckout cho {ms}")
-    else:
-        print(f"[FACEBOOK CAPI SMART] Không thể queue InitiateCheckout, queue đầy")
-
-# ============================================
 # GỬI CAROUSEL 1 SẢN PHẨM
 # ============================================
 
@@ -2943,9 +2464,9 @@ def send_single_product_carousel(uid: str, ms: str):
                 "payload": f"VIEW_IMAGES_{ms}"
             },
             {
-                "type": "postback",
-                "title": "🛒 Đặt ngay",
-                "payload": f"ORDER_BUTTON_{ms}"
+                "type": "web_url",
+                "url": f"{DOMAIN}/order-form?ms={ms}&uid={uid}",
+                "title": "🛒 Đặt ngay"
             }
         ]
     }
@@ -2968,25 +2489,6 @@ def send_single_product_carousel(uid: str, ms: str):
         ctx["product_history"] = ctx["product_history"][:5]
     
     ctx["has_sent_first_carousel"] = True
-    
-    # GỬI SỰ KIỆN VIEWCONTENT THÔNG MINH (BẤT ĐỒNG BỘ)
-    try:
-        # Lấy referral source từ context
-        referral_source = ctx.get("referral_source", "direct")
-        
-        # Gửi sự kiện ViewContent SMART (bất đồng bộ)
-        send_view_content_smart(
-            uid=uid,
-            ms=ms,
-            product_name=product_name,
-            price=gia_int,
-            referral_source=referral_source
-        )
-        
-        print(f"[FACEBOOK CAPI] Đã queue ViewContent cho {ms}")
-    except Exception as e:
-        print(f"[FACEBOOK CAPI ERROR] Lỗi queue ViewContent: {e}")
-        # KHÔNG ảnh hưởng đến việc gửi carousel
     
     print(f"✅ [SINGLE CAROUSEL] Đã gửi carousel 1 sản phẩm {ms} cho user {uid}")
 
@@ -3195,37 +2697,6 @@ Hãy liệt kê 5 ưu điểm nổi bật nhất của sản phẩm này theo đ
             
             # Gọi GPT để xử lý việc gửi ảnh
             handle_text_with_function_calling(uid, "gửi ảnh sản phẩm cho tôi xem")
-            return True
-    
-    elif payload.startswith("ORDER_BUTTON_"):
-        ms = payload.replace("ORDER_BUTTON_", "")
-        if ms in PRODUCTS:
-            # Gửi sự kiện AddToCart khi click nút đặt hàng
-            try:
-                product = PRODUCTS[ms]
-                product_name = product.get('Ten', '')
-                
-                if f"[{ms}]" in product_name or ms in product_name:
-                    product_name = product_name.replace(f"[{ms}]", "").replace(ms, "").strip()
-                
-                gia_int = extract_price_int(product.get("Gia", "")) or 0
-                
-                send_add_to_cart_smart(
-                    uid=uid,
-                    ms=ms,
-                    product_name=product_name,
-                    price=gia_int
-                )
-                
-                print(f"[FACEBOOK CAPI] Đã queue AddToCart từ nút đặt hàng: {ms}")
-            except Exception as e:
-                print(f"[FACEBOOK CAPI ERROR] Lỗi queue AddToCart: {e}")
-            
-            # Chuyển hướng đến form đặt hàng
-            domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
-            order_link = f"{domain}/order-form?ms={ms}&uid={uid}"
-            
-            send_message(uid, f"Để đặt hàng sản phẩm này, anh/chị vui lòng truy cập: {order_link}")
             return True
     
     elif payload in ["PRICE_QUERY", "COLOR_QUERY", "SIZE_QUERY", "MATERIAL_QUERY", "STOCK_QUERY"]:
@@ -4510,25 +3981,6 @@ def order_form():
     if f"[{ms}]" in product_name or ms in product_name:
         product_name = product_name.replace(f"[{ms}]", "").replace(ms, "").strip()
     
-    # GỬI SỰ KIỆN INITIATECHECKOUT THÔNG MINH (BẤT ĐỒNG BỘ)
-    try:
-        # Lấy client IP và user agent
-        client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
-        user_agent = request.headers.get('User-Agent', '')
-        
-        # Gửi sự kiện InitiateCheckout SMART (bất đồng bộ)
-        send_initiate_checkout_smart(
-            uid=uid,
-            ms=ms,
-            product_name=product_name,
-            price=price_int
-        )
-        
-        print(f"[FACEBOOK CAPI] Đã queue InitiateCheckout cho {uid} - {ms}")
-    except Exception as e:
-        print(f"[FACEBOOK CAPI ERROR] Lỗi queue InitiateCheckout: {e}")
-        # KHÔNG ảnh hưởng đến việc hiển thị form
-    
     # Tạo HTML với tối ưu hóa cực nhanh
     html = f"""
     <!DOCTYPE html>
@@ -5349,24 +4801,6 @@ def api_submit_order():
         "variant_found": variant_found  # Đánh dấu đã tìm thấy biến thể
     }
     
-    # GHI SỰ KIỆN PURCHASE VÀO FACEBOOK CONVERSION API (BẤT ĐỒNG BỘ)
-    try:
-        # Thêm order_id cho sự kiện Purchase
-        order_data["order_id"] = f"ORD{int(time.time())}_{uid[-4:] if uid else '0000'}"
-        
-        # Gửi sự kiện Purchase SMART (bất đồng bộ)
-        send_purchase_smart(
-            uid=uid,
-            ms=ms,
-            product_name=product_name,
-            order_data=order_data
-        )
-        
-        print(f"[FACEBOOK CAPI] Đã queue Purchase cho đơn hàng {order_data['order_id']}")
-    except Exception as e:
-        print(f"[FACEBOOK CAPI ERROR] Lỗi queue Purchase: {e}")
-        # KHÔNG ảnh hưởng đến việc lưu đơn hàng
-    
     # Ghi vào Google Sheets
     write_success = False
     if GOOGLE_SHEET_ID and GOOGLE_SHEETS_CREDENTIALS_JSON:
@@ -5473,63 +4907,6 @@ def test_context_save():
     })
 
 # ============================================
-# FACEBOOK CAPI TEST ENDPOINTS
-# ============================================
-
-@app.route("/test-facebook-capi", methods=["GET"])
-def test_facebook_capi():
-    """Test endpoint cho Facebook Conversion API"""
-    uid = request.args.get("uid", "test_user_123")
-    ms = request.args.get("ms", "MS000001")
-    
-    # Test ViewContent
-    send_view_content_smart(
-        uid=uid,
-        ms=ms,
-        product_name="Sản phẩm test",
-        price=100000,
-        referral_source="test"
-    )
-    
-    # Test AddToCart
-    send_add_to_cart_smart(
-        uid=uid,
-        ms=ms,
-        product_name="Sản phẩm test",
-        price=100000
-    )
-    
-    # Test InitiateCheckout
-    send_initiate_checkout_smart(
-        uid=uid,
-        ms=ms,
-        product_name="Sản phẩm test",
-        price=100000
-    )
-    
-    return jsonify({
-        "status": "test_queued",
-        "facebook_pixel_id": FACEBOOK_PIXEL_ID,
-        "queue_size": FACEBOOK_EVENT_QUEUE.qsize(),
-        "worker_running": FACEBOOK_WORKER_RUNNING,
-        "test_user": uid,
-        "test_product": ms
-    })
-
-@app.route("/facebook-queue-status", methods=["GET"])
-def facebook_queue_status():
-    """Kiểm tra trạng thái Facebook Event Queue"""
-    cache_size = len(getattr(send_view_content_smart, 'cache', {})) if hasattr(send_view_content_smart, 'cache') else 0
-    
-    return jsonify({
-        "queue_size": FACEBOOK_EVENT_QUEUE.qsize(),
-        "worker_running": FACEBOOK_WORKER_RUNNING,
-        "cache_size": cache_size,
-        "facebook_pixel_id_configured": bool(FACEBOOK_PIXEL_ID),
-        "facebook_access_token_configured": bool(FACEBOOK_ACCESS_TOKEN)
-    })
-
-# ============================================
 # HEALTH CHECK
 # ============================================
 
@@ -5548,9 +4925,6 @@ def health_check():
     
     # Kiểm tra persistent storage với Google Sheets
     google_sheets_status = "✅ Đã cấu hình" if GOOGLE_SHEET_ID and GOOGLE_SHEETS_CREDENTIALS_JSON else "⚠️ Chưa cấu hình"
-    
-    # Kiểm tra Facebook Conversion API
-    facebook_capi_status = "✅ Đã cấu hình" if FACEBOOK_PIXEL_ID and FACEBOOK_ACCESS_TOKEN else "⚠️ Chưa cấu hình"
     
     return {
         "status": "healthy",
@@ -5583,18 +4957,6 @@ def health_check():
                 "webhook": "/poscake-webhook",
                 "test": "/test-poscake-webhook"
             }
-        },
-        "facebook_conversion_api": {
-            "pixel_id_configured": bool(FACEBOOK_PIXEL_ID),
-            "access_token_configured": bool(FACEBOOK_ACCESS_TOKEN),
-            "api_version": FACEBOOK_API_VERSION,
-            "events_tracked": ["ViewContent", "AddToCart", "InitiateCheckout", "Purchase"],
-            "async_processing": True,
-            "queue_size": FACEBOOK_EVENT_QUEUE.qsize(),
-            "worker_running": FACEBOOK_WORKER_RUNNING,
-            "cache_enabled": True,
-            "test_endpoint": "/test-facebook-capi",
-            "queue_status_endpoint": "/facebook-queue-status"
         },
         "gpt_function_calling": {
             "enabled": True,
@@ -5654,10 +5016,7 @@ def health_check():
             "feed_comment_auto_reply": True,
             "persistent_storage": True,
             "form_static_address": True,
-            "context_restoration_after_sleep": True,
-            "facebook_conversion_api": True,
-            "async_event_processing": True,
-            "smart_event_cache": True
+            "context_restoration_after_sleep": True  # TÍNH NĂNG MỚI QUAN TRỌNG
         }
     }, 200
 
@@ -5673,9 +5032,7 @@ def health_light():
         "timestamp": datetime.now().isoformat(),
         "service": "order-form",
         "uptime": time.time() - LAST_LOAD if LAST_LOAD > 0 else 0,
-        "users_in_memory": len(USER_CONTEXT),
-        "facebook_queue_size": FACEBOOK_EVENT_QUEUE.qsize(),
-        "facebook_worker_running": FACEBOOK_WORKER_RUNNING
+        "users_in_memory": len(USER_CONTEXT)
     }), 200
 
 # ============================================
@@ -5714,18 +5071,12 @@ if __name__ == "__main__":
     saver_thread.start()
     print(f"🟢 Thread lưu context đã khởi động, sẽ lưu mỗi 5 phút")
     
-    # KHỞI ĐỘNG FACEBOOK EVENT WORKER
-    print("🟢 Đang khởi động Facebook Event Worker...")
-    facebook_worker = start_facebook_worker()
-    print("🟢 Facebook Event Worker đã sẵn sàng (async mode)")
-    
     print(f"🟢 GPT-4o-mini: {'SẴN SÀNG' if client else 'CHƯA CẤU HÌNH'}")
     print(f"🟢 Fanpage: {get_fanpage_name_from_api()}")
     print(f"🟢 Page ID: {PAGE_ID}")
     print(f"🟢 Domain: {DOMAIN}")
     print(f"🟢 Google Sheets API: {'SẴN SÀNG' if GOOGLE_SHEET_ID and GOOGLE_SHEETS_CREDENTIALS_JSON else 'CHƯA CẤU HÌNH'}")
     print(f"🟢 Poscake Webhook: {'SẴN SÀNG' if POSCAKE_API_KEY else 'CHƯA CẤU HÌNH'}")
-    print(f"🟢 Facebook Conversion API: {'SẴN SÀNG' if FACEBOOK_PIXEL_ID and FACEBOOK_ACCESS_TOKEN else 'CHƯA CẤU HÌNH'}")
     print(f"🟢 OpenAI Function Calling: {'TÍCH HỢP THÀNH CÔNG' if client else 'CHƯA CẤU HÌNH'}")
     print(f"🟢 Persistent Storage (Google Sheets): {'SẴN SÀNG' if GOOGLE_SHEET_ID and GOOGLE_SHEETS_CREDENTIALS_JSON else 'CHƯA CẤU HÌNH'}")
     print("=" * 80)
@@ -5746,25 +5097,31 @@ if __name__ == "__main__":
     print(f"🔴 1. Static HTML: Form load ngay lập tức với CSS inline")
     print(f"🔴 2. Placeholder image: Sử dụng base64 SVG để không chờ load ảnh")
     print(f"🔴 3. Static address list: Sử dụng danh sách tỉnh/thành static thay vì gọi API")
-    print(f"🔴 4. Lazy loading: Ảnh sản phẩm load sau khi page hiển thị")
+    print(f"🔴 4. Lazy loading: Ảnh thật chỉ load sau khi trang đã hiển thị")
+    print(f"🔴 5. Optimized JS: JavaScript tối thiểu, chạy ngay sau khi DOM ready")
+    print(f"🔴 6. Cache headers: Headers để browser cache hiệu quả")
     print("=" * 80)
     
-    print("🔴 CẢI TIẾN QUAN TRỌNG: FEED COMMENT PROCESSING")
+    print("🔴 FIX LỖI REGEX SYNTAX WARNING")
     print("=" * 80)
-    print(f"🔴 1. Nhận comment từ feed: Lấy MS từ caption bài viết gốc")
-    print(f"🔴 2. Chỉ dùng regex: Không phụ thuộc vào việc load products")
-    print(f"🔴 3. Auto reply thông minh: GPT tạo tin nhắn tiếp thị dựa trên ưu điểm sản phẩm")
-    print(f"🔴 4. Chỉ reply 1 lần: Chỉ gửi tin nhắn đầu tiên, sau đó để khách chủ động nhắn tin")
-    print(f"🔴 5. Cập nhật context: Tự động cập nhật MS và reset counter khi có comment mới")
+    print(f"🔴 Đã sửa tất cả pattern regex thành raw string (r'...')")
+    print(f"🔴 Không ảnh hưởng logic: Các regex vẫn hoạt động chính xác")
+    print(f"🔴 Fix warnings: Không còn cảnh báo SyntaxWarning trong log")
     print("=" * 80)
     
-    print("🔴 CẢI TIẾN QUAN TRỌNG: FACEBOOK CONVERSION API (ASYNC)")
+    print("🔴 TÍNH NĂNG MỚI: XỬ LÝ COMMENT TỪ FEED (ĐÃ SỬA LỖI)")
     print("=" * 80)
-    print(f"🔴 1. Async processing: Queue events để xử lý bất đồng bộ, không block bot")
-    print(f"🔴 2. Smart cache: ViewContent chỉ gửi 1 lần mỗi 30 phút cho cùng user + product")
-    print(f"🔴 3. All events tracked: ViewContent, AddToCart, InitiateCheckout, Purchase")
-    print(f"🔴 4. Thông minh: Tự động gửi từ carousel, order button, order form, order completion")
+    print(f"🔴 1. Feed Comment Processing: Tự động phát hiện MS khi user comment")
+    print(f"🔴 2. Logic: Lấy post_id → Lấy nội dung bài viết → Trích xuất MS từ caption (CHỈ DÙNG REGEX)")
+    print(f"🔴 3. Auto Reply: Gửi tin nhắn giới thiệu sản phẩm chi tiết khi user comment lần đầu")
+    print(f"🔴 4. Context Update: Reset counter để áp dụng first message rule")
+    print(f"🔴 5. Test Endpoint: /test-feed-comment?post_id=...")
+    print(f"🔴 6. Debug Endpoint: /debug-feed-comment?post_id=...")
     print("=" * 80)
     
+    load_products()
+    
+    # Lấy port từ biến môi trường
     port = get_port()
+    print(f"🟢 Đang khởi động server trên port: {port}")
     app.run(host="0.0.0.0", port=port, debug=False)
