@@ -3012,10 +3012,10 @@ def debug_feed_comment():
         "extracted_ms": ms,
         "message_preview": test_data["message"][:200],
         "patterns_tested": [
-            "\[(MS\\d{2,6})\]",
-            "\[MS\\s*(\\d{2,6})\]",
-            "\\b(MS\\d{6})\\b",
-            "MS\\s*(\\d{6})"
+            r"\[(MS\\d{2,6})\]",
+            r"\[MS\\s*(\\d{2,6})\]",
+            r"\\b(MS\\d{6})\\b",
+            r"MS\\s*(\\d{6})"
         ]
     })
 
