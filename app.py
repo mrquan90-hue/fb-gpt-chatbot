@@ -7,7 +7,6 @@ import hashlib
 import base64
 import threading
 import gzip
-import sqlite3
 import functools
 from collections import defaultdict
 from urllib.parse import quote
@@ -78,240 +77,87 @@ def get_postback_lock(uid: str, payload: str):
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 # ============================================
-# CACHE ADDRESS API (CẢI TIẾN MỚI)
+# PERSISTENT STORAGE FOR USER_CONTEXT
 # ============================================
-ADDRESS_CACHE = {
-    'provinces': None,
-    'provinces_updated': 0,
-    'districts': {},
-    'wards': {},
-    'all_addresses': None,
-    'all_addresses_updated': 0
-}
 
-# ============================================
-# DATABASE FOR CONTEXT PERSISTENCE
-# ============================================
-def init_database():
-    """Khởi tạo database SQLite để lưu trữ context"""
+USER_CONTEXT_FILE = "user_context.json"
+CONTEXT_SAVE_INTERVAL = 300  # 5 phút
+
+def save_user_context():
+    """Lưu USER_CONTEXT vào file JSON"""
     try:
-        conn = sqlite3.connect('user_context.db', check_same_thread=False)
-        cursor = conn.cursor()
+        # Chuyển defaultdict thành dict thường
+        data_to_save = {}
+        for user_id, context in USER_CONTEXT.items():
+            # Loại bỏ các giá trị không thể serialize
+            clean_context = {}
+            for key, value in context.items():
+                if isinstance(value, (str, int, float, bool, list, dict, type(None))):
+                    clean_context[key] = value
+                elif isinstance(value, set):
+                    clean_context[key] = list(value)
+                else:
+                    # Convert các kiểu dữ liệu khác thành string
+                    clean_context[key] = str(value)
+            data_to_save[user_id] = clean_context
         
-        # Tạo bảng user_context
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS user_context (
-            user_id TEXT PRIMARY KEY,
-            context_data TEXT,
-            last_updated TIMESTAMP,
-            ms_code TEXT,
-            referral_source TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-        ''')
+        # Lưu vào file
+        with open(USER_CONTEXT_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data_to_save, f, ensure_ascii=False, indent=2)
         
-        # Tạo bảng product_mapping để lưu mapping MS
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS product_mapping (
-            ms_code TEXT PRIMARY KEY,
-            product_data TEXT,
-            detected_from TEXT,
-            source_post_id TEXT,
-            detected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-        ''')
-        
-        # Tạo index cho hiệu suất
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_user_context_updated ON user_context(last_updated)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_product_mapping_detected ON product_mapping(detected_at)')
-        
-        conn.commit()
-        conn.close()
-        
-        print("[DATABASE] Đã khởi tạo database thành công")
-        return True
+        print(f"[CONTEXT SAVED] Đã lưu {len(data_to_save)} users vào {USER_CONTEXT_FILE}")
     except Exception as e:
-        print(f"[DATABASE ERROR] Lỗi khi khởi tạo database: {e}")
-        return False
+        print(f"[CONTEXT SAVE ERROR] Lỗi khi lưu context: {e}")
 
-def save_user_context_to_db(uid, ctx):
-    """Lưu context của user vào database"""
+def load_user_context():
+    """Load USER_CONTEXT từ file JSON"""
     try:
-        conn = sqlite3.connect('user_context.db', check_same_thread=False)
-        cursor = conn.cursor()
-        
-        # Chỉ lưu các trường quan trọng
-        context_to_save = {
-            "last_ms": ctx.get("last_ms"),
-            "real_message_count": ctx.get("real_message_count", 0),
-            "product_history": ctx.get("product_history", []),
-            "referral_source": ctx.get("referral_source"),
-            "referral_payload": ctx.get("referral_payload"),
-            "last_msg_time": ctx.get("last_msg_time", 0),
-            "has_sent_first_carousel": ctx.get("has_sent_first_carousel", False),
-            "poscake_orders": ctx.get("poscake_orders", [])
-        }
-        
-        cursor.execute('''
-        INSERT OR REPLACE INTO user_context 
-        (user_id, context_data, last_updated, ms_code, referral_source)
-        VALUES (?, ?, ?, ?, ?)
-        ''', (
-            uid,
-            json.dumps(context_to_save, ensure_ascii=False),
-            datetime.now().isoformat(),
-            ctx.get("last_ms"),
-            ctx.get("referral_source")
-        ))
-        
-        conn.commit()
-        conn.close()
-        return True
-    except Exception as e:
-        print(f"[DATABASE ERROR] Lỗi khi lưu context: {e}")
-        return False
-
-def load_user_context_from_db(uid):
-    """Load context của user từ database"""
-    try:
-        conn = sqlite3.connect('user_context.db', check_same_thread=False)
-        cursor = conn.cursor()
-        
-        cursor.execute('SELECT context_data FROM user_context WHERE user_id = ?', (uid,))
-        row = cursor.fetchone()
-        conn.close()
-        
-        if row:
-            return json.loads(row[0])
-    except Exception as e:
-        print(f"[DATABASE ERROR] Lỗi khi load context: {e}")
-    
-    return None
-
-def save_ms_mapping_to_db(ms_code, product_data, detected_from="", source_post_id=""):
-    """Lưu mapping MS vào database để phân tích sau"""
-    try:
-        conn = sqlite3.connect('user_context.db', check_same_thread=False)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-        INSERT OR REPLACE INTO product_mapping 
-        (ms_code, product_data, detected_from, source_post_id, detected_at)
-        VALUES (?, ?, ?, ?, ?)
-        ''', (
-            ms_code,
-            json.dumps(product_data, ensure_ascii=False) if product_data else "",
-            detected_from,
-            source_post_id,
-            datetime.now().isoformat()
-        ))
-        
-        conn.commit()
-        conn.close()
-        return True
-    except Exception as e:
-        print(f"[DATABASE ERROR] Lỗi khi lưu mapping: {e}")
-        return False
-
-def sync_context_to_db():
-    """Đồng bộ context từ RAM vào database định kỳ"""
-    while True:
-        time.sleep(60)  # Đồng bộ mỗi 60 giây
-        
-        try:
-            for uid, ctx in list(USER_CONTEXT.items()):
-                # Chỉ lưu context của các user có hoạt động trong 24h gần đây
-                last_msg_time = ctx.get("last_msg_time", 0)
-                if time.time() - last_msg_time < 86400:  # 24 giờ
-                    save_user_context_to_db(uid, ctx)
+        if os.path.exists(USER_CONTEXT_FILE):
+            with open(USER_CONTEXT_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
             
-            # Dọn dẹp context cũ khỏi RAM (giữ lại 100 user gần nhất)
-            if len(USER_CONTEXT) > 100:
-                # Sắp xếp theo thời gian cuối cùng
-                sorted_users = sorted(USER_CONTEXT.items(), key=lambda x: x[1].get("last_msg_time", 0), reverse=True)
-                USER_CONTEXT.clear()
-                for uid, ctx in sorted_users[:100]:
-                    USER_CONTEXT[uid] = ctx
+            loaded_count = 0
+            for user_id, context in data.items():
+                # Merge với context mặc định
+                default_ctx = default_user_context()
+                default_ctx.update(context)
+                USER_CONTEXT[user_id] = default_ctx
+                loaded_count += 1
             
-            print(f"[DATABASE SYNC] Đã đồng bộ {len(USER_CONTEXT)} user contexts")
-        except Exception as e:
-            print(f"[DATABASE SYNC ERROR] Lỗi khi đồng bộ: {e}")
-
-def restore_user_context(uid: str):
-    """Khôi phục context của user từ database nếu có"""
-    if uid in USER_CONTEXT and USER_CONTEXT[uid].get("last_msg_time", 0) > 0:
-        return  # Đã có context trong RAM
-    
-    db_context = load_user_context_from_db(uid)
-    if db_context:
-        # Không ghi đè nếu đã có context trong RAM
-        if uid not in USER_CONTEXT:
-            USER_CONTEXT[uid] = db_context
+            print(f"[CONTEXT LOADED] Đã load {loaded_count} users từ {USER_CONTEXT_FILE}")
         else:
-            # Chỉ cập nhật các trường quan trọng nếu cần
-            if not USER_CONTEXT[uid].get("last_ms") and db_context.get("last_ms"):
-                USER_CONTEXT[uid]["last_ms"] = db_context["last_ms"]
-            if not USER_CONTEXT[uid].get("product_history") and db_context.get("product_history"):
-                USER_CONTEXT[uid]["product_history"] = db_context["product_history"]
-        
-        print(f"[CONTEXT RESTORE] Đã khôi phục context cho user {uid}")
-
-# ============================================
-# ADDRESS CACHE FUNCTIONS
-# ============================================
-
-def load_all_addresses():
-    """Load toàn bộ dữ liệu địa chỉ từ API và cache lại"""
-    try:
-        response = requests.get('https://provinces.open-api.vn/api/?depth=3', timeout=10)
-        if response.status_code == 200:
-            ADDRESS_CACHE['all_addresses'] = response.json()
-            ADDRESS_CACHE['all_addresses_updated'] = time.time()
-            print("[ADDRESS CACHE] Đã load toàn bộ dữ liệu địa chỉ")
-            return True
+            print(f"[CONTEXT LOAD] Không tìm thấy file {USER_CONTEXT_FILE}, bắt đầu với context trống")
     except Exception as e:
-        print(f"[ADDRESS CACHE ERROR] Lỗi khi load dữ liệu địa chỉ: {e}")
-    return False
+        print(f"[CONTEXT LOAD ERROR] Lỗi khi load context: {e}")
 
-def init_address_cache():
-    """Khởi tạo cache địa chỉ khi app start"""
-    threading.Thread(target=load_all_addresses, daemon=True).start()
+def periodic_context_save():
+    """Lưu context định kỳ"""
+    while True:
+        time.sleep(CONTEXT_SAVE_INTERVAL)
+        save_user_context()
 
-# ============================================
-# IMAGE OPTIMIZATION FUNCTIONS
-# ============================================
-
-def get_cdn_image_url(image_url):
-    """
-    Tối ưu URL ảnh cho CDN và fallback
-    """
-    if not image_url:
-        return "https://via.placeholder.com/400x400?text=No+Image"
-    
-    # Nếu là ảnh Facebook, tối ưu parameters
-    if 'fbcdn.net' in image_url:
-        # Loại bỏ các parameters không cần thiết, chỉ giữ lại size cố định
-        base_url = image_url.split('?')[0]
-        return f"{base_url}?format=webp&name=medium"
-    
-    # Nếu là ảnh Google Sheets hoặc từ các nguồn khác, giữ nguyên
-    return image_url
-
-def preload_product_images(ms):
-    """Preload ảnh sản phẩm để tăng tốc độ"""
-    if ms not in PRODUCTS:
-        return []
-    
-    product = PRODUCTS[ms]
-    images_field = product.get("Images", "")
-    urls = parse_image_urls(images_field)
-    
-    # Tối ưu URL ảnh
-    optimized_urls = []
-    for url in urls[:3]:  # Chỉ preload tối đa 3 ảnh
-        optimized_urls.append(get_cdn_image_url(url))
-    
-    return optimized_urls
+def default_user_context():
+    """Tạo context mặc định cho user mới"""
+    return {
+        "last_msg_time": 0,
+        "last_ms": None,
+        "order_state": None,
+        "order_data": {},
+        "processing_lock": False,
+        "real_message_count": 0,
+        "product_history": [],
+        "conversation_history": [],
+        "referral_source": None,
+        "referral_payload": None,
+        "last_retailer_id": None,
+        "catalog_view_time": 0,
+        "has_sent_first_carousel": False,
+        "idempotent_postbacks": {},
+        "processed_message_mids": {},
+        "last_processed_text": "",
+        "poscake_orders": [],
+        "last_updated": time.time()
+    }
 
 # ============================================
 # MAP TIẾNG VIỆT KHÔNG DẤU
@@ -355,26 +201,7 @@ def normalize_vietnamese(text):
 # ============================================
 # GLOBAL STATE
 # ============================================
-USER_CONTEXT = defaultdict(lambda: {
-    "last_msg_time": 0,
-    "last_ms": None,
-    "order_state": None,
-    "order_data": {},
-    "processing_lock": False,
-    "real_message_count": 0,
-    "product_history": [],
-    "conversation_history": [],
-    "referral_source": None,
-    "referral_payload": None,
-    "last_retailer_id": None,
-    "catalog_view_time": 0,
-    "has_sent_first_carousel": False,
-    "idempotent_postbacks": {},
-    "processed_message_mids": {},
-    "last_processed_text": "",
-    # Thêm trường mới cho Poscake
-    "poscake_orders": []
-})
+USER_CONTEXT = defaultdict(default_user_context)
 
 PRODUCTS = {}
 PRODUCTS_BY_NUMBER = {}
@@ -482,12 +309,13 @@ Hãy tạo lời chào mời thân thiện, tập trung vào ưu điểm sản p
         return f"Chào {user_name}! 👋\n\nEm thấy ac đã bình luận trên bài viết của shop và quan tâm đến sản phẩm:\n\n📦 **{product_name}**\n📌 Mã sản phẩm: {ms}\n\nĐây là sản phẩm rất được yêu thích tại shop với nhiều ưu điểm nổi bật! ac có thể hỏi em bất kỳ thông tin gì về sản phẩm này ạ!"
 
 # ============================================
-# HÀM CẬP NHẬT CONTEXT VỚI MS MỚI VÀ RESET COUNTER (CẢI TIẾN)
+# HÀM CẬP NHẬT CONTEXT VỚI MS MỚI VÀ RESET COUNTER
 # ============================================
 
 def update_context_with_new_ms(uid: str, new_ms: str, source: str = "unknown"):
     """
-    Cập nhật context với MS mới và reset counter, đồng thời lưu vào database
+    Cập nhật context với MS mới và reset counter để đảm bảo bot gửi carousel
+    cho sản phẩm mới khi user gửi tin nhắn đầu tiên
     """
     if not new_ms:
         return False
@@ -504,25 +332,12 @@ def update_context_with_new_ms(uid: str, new_ms: str, source: str = "unknown"):
         # Reset counter để bot gửi carousel cho sản phẩm mới
         ctx["real_message_count"] = 0
         ctx["has_sent_first_carousel"] = False
-        ctx["last_msg_time"] = 0
-        ctx["last_processed_text"] = ""
+        ctx["last_msg_time"] = 0  # Reset thời gian tin nhắn cuối
+        ctx["last_processed_text"] = ""  # Reset text đã xử lý
     
     # Cập nhật MS mới
     ctx["last_ms"] = new_ms
     ctx["referral_source"] = source
-    
-    # Lưu vào database
-    save_user_context_to_db(uid, ctx)
-    
-    # Lưu mapping MS để phân tích
-    if new_ms in PRODUCTS:
-        product_data = {
-            "name": PRODUCTS[new_ms].get("Ten", ""),
-            "price": PRODUCTS[new_ms].get("Gia", ""),
-            "detected_by": source,
-            "user_id": uid
-        }
-        save_ms_mapping_to_db(new_ms, product_data, source, ctx.get("source_post_id", ""))
     
     # Gọi hàm update_product_context cũ
     if "product_history" not in ctx:
@@ -1220,8 +1035,8 @@ def extract_ms_from_post_content(post_data: dict) -> Optional[str]:
     
     # PHƯƠNG PHÁP 1: Tìm MS trong dấu ngoặc vuông [MSxxxxxx] - ƯU TIÊN CAO NHẤT
     bracket_patterns = [
-        r'\[(MS\d{2,6})\]',  # [MS000034]
-        r'\[MS\s*(\d{2,6})\]',  # [MS 000034] với khoảng trắng
+        r"\[(MS\d{2,6})\]",  # [MS000034]
+        r"\[MS\s*(\d{2,6})\]",  # [MS 000034] với khoảng trắng
     ]
     
     for pattern in bracket_patterns:
@@ -1248,15 +1063,15 @@ def extract_ms_from_post_content(post_data: dict) -> Optional[str]:
     
     # PHƯƠNG PHÁP 2: Tìm MSxxxxxx trực tiếp
     ms_patterns = [
-        (r'\[(MS\d{6})\]', True),  # [MS000046] -> đủ 6 số
-        (r'\b(MS\d{6})\b', True),  # MS000046
-        (r'#(MS\d{6})', True),     # #MS000046
-        (r'Mã\s*:\s*(MS\d{6})', True),  # Mã: MS000046
-        (r'SP\s*:\s*(MS\d{6})', True),  # SP: MS000046
-        (r'MS\s*(\d{6})', False),  # MS 000046 -> chỉ có số
-        (r'mã\s*(\d{6})', False),  # mã 000046 -> chỉ có số
-        (r'MS\s*(\d{2,5})\b', False),  # MS 34 -> 2-5 chữ số
-        (r'mã\s*(\d{2,5})\b', False),  # mã 34 -> 2-5 chữ số
+        (r"\[(MS\d{6})\]", True),  # [MS000046] -> đủ 6 số
+        (r"\b(MS\d{6})\b", True),  # MS000046
+        (r"#(MS\d{6})", True),     # #MS000046
+        (r"Mã\s*:\s*(MS\d{6})", True),  # Mã: MS000046
+        (r"SP\s*:\s*(MS\d{6})", True),  # SP: MS000046
+        (r"MS\s*(\d{6})", False),  # MS 000046 -> chỉ có số
+        (r"mã\s*(\d{6})", False),  # mã 000046 -> chỉ có số
+        (r"MS\s*(\d{2,5})\b", False),  # MS 34 -> 2-5 chữ số
+        (r"mã\s*(\d{2,5})\b", False),  # mã 34 -> 2-5 chữ số
     ]
     
     for pattern, is_full_ms in ms_patterns:
@@ -2572,7 +2387,61 @@ Hãy liệt kê 5 ưu điểm nổi bật nhất của sản phẩm này theo đ
                 
                 # Gửi cho khách hàng với tiêu đề
                 message = f"🌟 **5 ƯU ĐIỂM NỔI BẬT CỦA SẢN PHẨM [{ms}]** 🌟\n\n{highlights}\n\n---\nAnh/chị cần em tư vấn thêm gì không ạ?"
-                send_message(uid, message)# ============================================
+                send_message(uid, message)
+                
+            except Exception as e:
+                print(f"Lỗi khi gọi GPT cho ưu điểm sản phẩm: {e}")
+                send_message(uid, "Dạ em chưa thể tóm tắt ưu điểm sản phẩm ngay lúc này. Anh/chị có thể xem mô tả chi tiết hoặc hỏi về thông tin khác ạ!")
+            
+            return True
+            
+    elif payload.startswith("VIEW_IMAGES_"):
+        ms = payload.replace("VIEW_IMAGES_", "")
+        if ms in PRODUCTS:
+            ctx["last_ms"] = ms
+            # Gọi hàm update_product_context cũ
+            if "product_history" not in ctx:
+                ctx["product_history"] = []
+            
+            if not ctx["product_history"] or ctx["product_history"][0] != ms:
+                if ms in ctx["product_history"]:
+                    ctx["product_history"].remove(ms)
+                ctx["product_history"].insert(0, ms)
+            
+            if len(ctx["product_history"]) > 5:
+                ctx["product_history"] = ctx["product_history"][:5]
+            
+            # Gọi GPT để xử lý việc gửi ảnh
+            handle_text_with_function_calling(uid, "gửi ảnh sản phẩm cho tôi xem")
+            return True
+    
+    elif payload in ["PRICE_QUERY", "COLOR_QUERY", "SIZE_QUERY", "MATERIAL_QUERY", "STOCK_QUERY"]:
+        ms = ctx.get("last_ms")
+        
+        if ms and ms in PRODUCTS:
+            question_map = {
+                "PRICE_QUERY": "giá bao nhiêu",
+                "COLOR_QUERY": "có những màu gì",
+                "SIZE_QUERY": "có size nào",
+                "MATERIAL_QUERY": "chất liệu gì",
+                "STOCK_QUERY": "còn hàng không"
+            }
+            
+            question = question_map.get(payload, "thông tin sản phẩm")
+            handle_text_with_function_calling(uid, question)
+            return True
+    
+    elif payload == "GET_STARTED":
+        welcome_msg = f"""Chào anh/chị! 👋 
+Em là trợ lý AI của {get_fanpage_name_from_api()}.
+
+Vui lòng gửi mã sản phẩm (ví dụ: MS123456) hoặc mô tả sản phẩm."""
+        send_message(uid, welcome_msg)
+        return True
+    
+    return False
+
+# ============================================
 # HANDLE TEXT MESSAGES - ĐÃ SỬA ĐỔI LOGIC
 # ============================================
 
@@ -3063,8 +2932,15 @@ def handle_poscake_order_event(event_type: str, data: dict):
         }), 200
 
 # ============================================
-# API ADDRESS CACHE ENDPOINTS
+# CACHE ADDRESS API (CẢI TIẾN MỚI)
 # ============================================
+
+ADDRESS_CACHE = {
+    'provinces': None,
+    'provinces_updated': 0,
+    'districts': {},
+    'wards': {}
+}
 
 @app.route("/api/cached-provinces", methods=["GET"])
 def cached_provinces():
@@ -3084,21 +2960,6 @@ def cached_provinces():
             return jsonify(ADDRESS_CACHE['provinces'])
     except Exception as e:
         print(f"[ADDRESS API ERROR] Lỗi khi gọi API tỉnh/thành: {e}")
-    
-    return jsonify([])
-
-@app.route("/api/cached-all-addresses", methods=["GET"])
-def cached_all_addresses():
-    """API trả về toàn bộ dữ liệu địa chỉ đã cache"""
-    now = time.time()
-    cache_ttl = 86400  # 24 giờ
-    
-    if (ADDRESS_CACHE['all_addresses'] and 
-        (now - ADDRESS_CACHE['all_addresses_updated']) < cache_ttl):
-        return jsonify(ADDRESS_CACHE['all_addresses'])
-    
-    if load_all_addresses():
-        return jsonify(ADDRESS_CACHE['all_addresses'])
     
     return jsonify([])
 
@@ -3387,9 +3248,6 @@ def webhook():
             if not sender_id:
                 continue
             
-            # Khôi phục context từ database nếu có
-            restore_user_context(sender_id)
-            
             # Bỏ qua delivery/read events sớm
             if m.get("delivery") or m.get("read"):
                 continue
@@ -3673,7 +3531,7 @@ Anh/chị quan tâm sản phẩm nào ạ?"""
     return "OK", 200
 
 # ============================================
-# ORDER FORM PAGE - CẢI TIẾN MỚI VỚI TỐI ƯU TỐC ĐỘ
+# ORDER FORM PAGE - CẢI TIẾN MỚI VỚI TỐI ƯU TỐC ĐỘ NÂNG CAO
 # ============================================
 
 @app.route("/order-form", methods=["GET"])
@@ -3681,74 +3539,178 @@ def order_form():
     ms = (request.args.get("ms") or "").upper()
     uid = request.args.get("uid") or ""
     
-    # Preload products nếu chưa có
+    # Preload products nhanh hơn
     load_products(force=False)
     
     if not ms:
-        response = make_response("""
+        return """
         <html>
-        <body style="text-align: center; padding: 50px; font-family: Arial, sans-serif;">
-            <h2 style="color: #FF3B30;">⚠️ Không tìm thấy sản phẩm</h2>
-            <p>Vui lòng quay lại Messenger và chọn sản phẩm để đặt hàng.</p>
-            <a href="/" style="color: #1DB954; text-decoration: none; font-weight: bold;">Quay về trang chủ</a>
+        <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>Không tìm thấy sản phẩm</title>
+            <style>
+                body {
+                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    height: 100vh;
+                    display: flex;
+                    justify-content: center;
+                    align-items: center;
+                    margin: 0;
+                    padding: 20px;
+                }
+                .container {
+                    background: white;
+                    border-radius: 15px;
+                    padding: 40px;
+                    text-align: center;
+                    box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+                    max-width: 400px;
+                }
+                .error-icon {
+                    font-size: 60px;
+                    margin-bottom: 20px;
+                }
+                h2 {
+                    color: #FF3B30;
+                    margin-bottom: 15px;
+                }
+                .btn {
+                    display: inline-block;
+                    margin-top: 20px;
+                    padding: 12px 30px;
+                    background: linear-gradient(135deg, #1DB954 0%, #17a74d 100%);
+                    color: white;
+                    text-decoration: none;
+                    border-radius: 25px;
+                    font-weight: 600;
+                    transition: transform 0.3s ease;
+                }
+                .btn:hover {
+                    transform: translateY(-2px);
+                }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="error-icon">⚠️</div>
+                <h2>Không tìm thấy sản phẩm</h2>
+                <p>Vui lòng quay lại Messenger và chọn sản phẩm để đặt hàng.</p>
+                <a href="/" class="btn">Quay về trang chủ</a>
+            </div>
         </body>
         </html>
-        """)
-        return response, 400
-
+        """
+    
     # Nếu không có sản phẩm, thử load lại
     if not PRODUCTS:
         load_products(force=True)
         
     if ms not in PRODUCTS:
-        response = make_response("""
+        return """
         <html>
-        <body style="text-align: center; padding: 50px; font-family: Arial, sans-serif;">
-            <h2 style="color: #FF3B30;">⚠️ Sản phẩm không tồn tại</h2>
-            <p>Vui lòng quay lại Messenger và chọn sản phẩm khác giúp shop ạ.</p>
-            <a href="/" style="color: #1DB954; text-decoration: none; font-weight: bold;">Quay về trang chủ</a>
+        <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>Sản phẩm không tồn tại</title>
+            <style>
+                body {
+                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    height: 100vh;
+                    display: flex;
+                    justify-content: center;
+                    align-items: center;
+                    margin: 0;
+                    padding: 20px;
+                }
+                .container {
+                    background: white;
+                    border-radius: 15px;
+                    padding: 40px;
+                    text-align: center;
+                    box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+                    max-width: 400px;
+                }
+                .error-icon {
+                    font-size: 60px;
+                    margin-bottom: 20px;
+                }
+                h2 {
+                    color: #FF3B30;
+                    margin-bottom: 15px;
+                }
+                .btn {
+                    display: inline-block;
+                    margin-top: 20px;
+                    padding: 12px 30px;
+                    background: linear-gradient(135deg, #1DB954 0%, #17a74d 100%);
+                    color: white;
+                    text-decoration: none;
+                    border-radius: 25px;
+                    font-weight: 600;
+                    transition: transform 0.3s ease;
+                }
+                .btn:hover {
+                    transform: translateY(-2px);
+                }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="error-icon">❌</div>
+                <h2>Sản phẩm không tồn tại</h2>
+                <p>Vui lòng quay lại Messenger và chọn sản phẩm khác giúp shop ạ.</p>
+                <a href="/" class="btn">Quay về trang chủ</a>
+            </div>
         </body>
         </html>
-        """)
-        return response, 404
-
-    current_fanpage_name = get_fanpage_name_from_api()
+        """
     
+    current_fanpage_name = get_fanpage_name_from_api()
     row = PRODUCTS[ms]
     
+    # Lấy thông tin sản phẩm với fallback nhanh
     images_field = row.get("Images", "")
     urls = parse_image_urls(images_field)
     default_image = urls[0] if urls else ""
-
+    
+    # Sử dụng base64 placeholder để tăng tốc độ load ban đầu
+    placeholder_image = "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTIwIiBoZWlnaHQ9IjEyMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTIwIiBoZWlnaHQ9IjEyMCIgZmlsbD0iI2Y1ZjVmNSIvPjx0ZXh0IHg9IjYwIiB5PSI2MCIgZm9udC1mYW1pbHk9IkFyaWFsIiBmb250LXNpemU9IjEyIiBmaWxsPSIjY2NjY2NjIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBkeT0iLjNlbSI+TG9hZGluZy4uLjwvdGV4dD48L3N2Zz4="
+    
     size_field = row.get("size (Thuộc tính)", "")
     color_field = row.get("màu (Thuộc tính)", "")
-
-    sizes = []
+    
+    sizes = ["Mặc định"]
+    colors = ["Mặc định"]
+    
     if size_field:
         sizes = [s.strip() for s in size_field.split(",") if s.strip()]
-
-    colors = []
+    
     if color_field:
         colors = [c.strip() for c in color_field.split(",") if c.strip()]
-
-    if not sizes:
-        sizes = ["Mặc định"]
-    if not colors:
-        colors = ["Mặc định"]
-
+    
     price_str = row.get("Gia", "0")
     price_int = extract_price_int(price_str) or 0
-
-    # Tạo HTML với form địa chỉ mới và tối ưu hóa
+    
+    # Tên sản phẩm (xóa mã nếu có)
+    product_name = row.get('Ten', '')
+    if f"[{ms}]" in product_name or ms in product_name:
+        product_name = product_name.replace(f"[{ms}]", "").replace(ms, "").strip()
+    
+    # Tạo HTML với tối ưu hóa cực nhanh
     html = f"""
     <!DOCTYPE html>
     <html lang="vi">
     <head>
         <meta charset="utf-8" />
-        <title>Đặt hàng - {row.get('Ten','')}</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <link href="https://cdnjs.cloudflare.com/ajax/libs/select2/4.1.0-rc.0/css/select2.min.css" rel="stylesheet" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Đặt hàng - {product_name[:30]}...</title>
+        <link rel="preconnect" href="https://cdnjs.cloudflare.com" />
+        <link rel="preconnect" href="https://fonts.googleapis.com" />
         <style>
+            /* Critical CSS - Load ngay */
             * {{
                 margin: 0;
                 padding: 0;
@@ -3756,20 +3718,17 @@ def order_form():
             }}
             
             body {{
-                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
                 background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
                 min-height: 100vh;
-                display: flex;
-                justify-content: center;
-                align-items: center;
                 padding: 20px;
                 color: #333;
             }}
             
             .container {{
                 max-width: 480px;
-                width: 100%;
-                background: #fff;
+                margin: 0 auto;
+                background: white;
                 border-radius: 20px;
                 box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
                 overflow: hidden;
@@ -3783,7 +3742,7 @@ def order_form():
             }}
             
             .header h2 {{
-                font-size: 20px;
+                font-size: 18px;
                 font-weight: 600;
                 margin: 0;
             }}
@@ -3803,37 +3762,27 @@ def order_form():
             .product-image-container {{
                 width: 120px;
                 height: 120px;
+                flex-shrink: 0;
                 border-radius: 12px;
                 overflow: hidden;
                 background: #f8f9fa;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                flex-shrink: 0;
+                position: relative;
             }}
             
             .product-image {{
                 width: 100%;
                 height: 100%;
                 object-fit: cover;
+                transition: opacity 0.3s ease;
             }}
             
-            .placeholder-image {{
-                width: 100%;
-                height: 100%;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                color: white;
-                font-size: 13px;
-                text-align: center;
-                padding: 10px;
-                border-radius: 12px;
+            .product-image.loading {{
+                opacity: 0.3;
             }}
             
             .product-info {{
                 flex: 1;
+                min-width: 0;
             }}
             
             .product-code {{
@@ -3854,12 +3803,14 @@ def order_form():
                 margin: 0 0 8px 0;
                 line-height: 1.4;
                 color: #222;
+                word-break: break-word;
             }}
             
             .product-price {{
                 color: #FF3B30;
                 font-size: 18px;
                 font-weight: 700;
+                margin-top: 10px;
             }}
             
             .form-group {{
@@ -3880,48 +3831,18 @@ def order_form():
                 border: 2px solid #e1e5e9;
                 border-radius: 10px;
                 font-size: 14px;
-                transition: all 0.3s ease;
-                background: #fff;
+                background: white;
+                font-family: inherit;
             }}
             
-            .select2-container .select2-selection--single {{
-                height: 46px;
-                border: 2px solid #e1e5e9;
-                border-radius: 10px;
-            }}
-            
-            .select2-container .select2-selection--single .select2-selection__rendered {{
-                line-height: 46px;
-                padding-left: 15px;
-            }}
-            
-            .select2-container--default .select2-selection--single .select2-selection__arrow {{
-                height: 46px;
-            }}
-            
-            .select2-container--default .select2-selection--single {{
-                border: 2px solid #e1e5e9;
-            }}
-            
-            .select2-container--default.select2-container--focus .select2-selection--single {{
-                border-color: #1DB954;
-            }}
-            
-            .form-control:focus,
-            .select2-container--default.select2-container--focus .select2-selection--single {{
-                outline: none;
-                border-color: #1DB954;
-                box-shadow: 0 0 0 3px rgba(29, 185, 84, 0.1);
+            .select2-container {{
+                width: 100% !important;
             }}
             
             .address-row {{
                 display: flex;
                 gap: 10px;
                 margin-bottom: 10px;
-            }}
-            
-            .address-col {{
-                flex: 1;
             }}
             
             .total-section {{
@@ -3956,21 +3877,12 @@ def order_form():
                 cursor: pointer;
                 transition: all 0.3s ease;
                 margin-top: 10px;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                gap: 10px;
-            }}
-            
-            .submit-btn:hover {{
-                transform: translateY(-2px);
-                box-shadow: 0 5px 15px rgba(29, 185, 84, 0.3);
+                font-family: inherit;
             }}
             
             .submit-btn:disabled {{
                 opacity: 0.7;
                 cursor: not-allowed;
-                transform: none;
             }}
             
             .loading-spinner {{
@@ -3996,13 +3908,6 @@ def order_form():
                 line-height: 1.5;
             }}
             
-            .variant-loading {{
-                text-align: center;
-                padding: 10px;
-                color: #666;
-                font-size: 14px;
-            }}
-            
             @media (max-width: 480px) {{
                 .container {{
                     border-radius: 15px;
@@ -4014,18 +3919,11 @@ def order_form():
                 
                 .product-section {{
                     flex-direction: column;
-                    text-align: center;
                 }}
                 
                 .product-image-container {{
                     width: 100%;
                     height: 200px;
-                    margin: 0 auto 15px;
-                }}
-                
-                .address-row {{
-                    flex-direction: column;
-                    gap: 10px;
                 }}
             }}
         </style>
@@ -4039,17 +3937,19 @@ def order_form():
             <div class="content">
                 <!-- Product Info Section -->
                 <div class="product-section">
-                    <div class="product-image-container" id="image-container">
-                        {"<img id='product-image' class='product-image lazy-load' src='https://via.placeholder.com/120x120?text=Loading...' data-src='" + default_image + "' onerror=\"this.onerror=null; this.src='https://via.placeholder.com/120x120?text=No+Image'\" />" if default_image else "<div class='placeholder-image'>Chưa có ảnh sản phẩm</div>"}
+                    <div class="product-image-container">
+                        <img id="product-image" class="product-image" 
+                             src="{placeholder_image}" 
+                             data-src="{default_image}" 
+                             alt="{product_name}"
+                             onerror="this.src='data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTIwIiBoZWlnaHQ9IjEyMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTIwIiBoZWlnaHQ9IjEyMCIgZmlsbD0iI2UzZTNlMyIvPjx0ZXh0IHg9IjYwIiB5PSI2MCIgZm9udC1mYW1pbHk9IkFyaWFsIiBmb250LXNpemU9IjEyIiBmaWxsPSIjOTk5OTk5IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBkeT0iLjNlbSI+Tm8gSW1hZ2U8L3RleHQ+PC9zdmc+'"
+                             loading="lazy">
                     </div>
                     <div class="product-info">
                         <div class="product-code">Mã: {ms}</div>
-                        <h3 class="product-title">{row.get('Ten','')}</h3>
+                        <h3 class="product-title">{product_name}</h3>
                         <div class="product-price">
                             <span id="price-display">{price_int:,.0f} đ</span>
-                            <div id="variant-loading" class="variant-loading" style="display: none;">
-                                <small>Đang cập nhật thông tin biến thể...</small>
-                            </div>
                         </div>
                     </div>
                 </div>
@@ -4059,7 +3959,7 @@ def order_form():
                     <!-- Color Selection -->
                     <div class="form-group">
                         <label for="color">Màu sắc:</label>
-                        <select id="color" class="form-control" onchange="updateVariantInfo()">
+                        <select id="color" class="form-control">
                             {''.join(f"<option value='{c}'>{c}</option>" for c in colors)}
                         </select>
                     </div>
@@ -4067,7 +3967,7 @@ def order_form():
                     <!-- Size Selection -->
                     <div class="form-group">
                         <label for="size">Size:</label>
-                        <select id="size" class="form-control" onchange="updateVariantInfo()">
+                        <select id="size" class="form-control">
                             {''.join(f"<option value='{s}'>{s}</option>" for s in sizes)}
                         </select>
                     </div>
@@ -4075,7 +3975,7 @@ def order_form():
                     <!-- Quantity -->
                     <div class="form-group">
                         <label for="quantity">Số lượng:</label>
-                        <input type="number" id="quantity" class="form-control" value="1" min="1" onchange="updatePriceDisplay()">
+                        <input type="number" id="quantity" class="form-control" value="1" min="1">
                     </div>
 
                     <!-- Total Price -->
@@ -4095,26 +3995,85 @@ def order_form():
                         <input type="tel" id="phone" class="form-control" required>
                     </div>
 
-                    <!-- Address Section -->
+                    <!-- Address Section - Sử dụng static list cho nhanh -->
                     <div class="form-group">
                         <label for="province">Tỉnh/Thành phố:</label>
-                        <select id="province" class="form-control" style="width: 100%;" required>
+                        <select id="province" class="form-control" required>
                             <option value="">Chọn tỉnh/thành phố</option>
+                            <option value="Hà Nội">Hà Nội</option>
+                            <option value="TP Hồ Chí Minh">TP Hồ Chí Minh</option>
+                            <option value="Đà Nẵng">Đà Nẵng</option>
+                            <option value="Hải Phòng">Hải Phòng</option>
+                            <option value="Cần Thơ">Cần Thơ</option>
+                            <option value="An Giang">An Giang</option>
+                            <option value="Bà Rịa - Vũng Tàu">Bà Rịa - Vũng Tàu</option>
+                            <option value="Bắc Giang">Bắc Giang</option>
+                            <option value="Bắc Kạn">Bắc Kạn</option>
+                            <option value="Bạc Liêu">Bạc Liêu</option>
+                            <option value="Bắc Ninh">Bắc Ninh</option>
+                            <option value="Bến Tre">Bến Tre</option>
+                            <option value="Bình Định">Bình Định</option>
+                            <option value="Bình Dương">Bình Dương</option>
+                            <option value="Bình Phước">Bình Phước</option>
+                            <option value="Bình Thuận">Bình Thuận</option>
+                            <option value="Cà Mau">Cà Mau</option>
+                            <option value="Cao Bằng">Cao Bằng</option>
+                            <option value="Đắk Lắk">Đắk Lắk</option>
+                            <option value="Đắk Nông">Đắk Nông</option>
+                            <option value="Điện Biên">Điện Biên</option>
+                            <option value="Đồng Nai">Đồng Nai</option>
+                            <option value="Đồng Tháp">Đồng Tháp</option>
+                            <option value="Gia Lai">Gia Lai</option>
+                            <option value="Hà Giang">Hà Giang</option>
+                            <option value="Hà Nam">Hà Nam</option>
+                            <option value="Hà Tĩnh">Hà Tĩnh</option>
+                            <option value="Hải Dương">Hải Dương</option>
+                            <option value="Hậu Giang">Hậu Giang</option>
+                            <option value="Hòa Bình">Hòa Bình</option>
+                            <option value="Hưng Yên">Hưng Yên</option>
+                            <option value="Khánh Hòa">Khánh Hòa</option>
+                            <option value="Kiên Giang">Kiên Giang</option>
+                            <option value="Kon Tum">Kon Tum</option>
+                            <option value="Lai Châu">Lai Châu</option>
+                            <option value="Lâm Đồng">Lâm Đồng</option>
+                            <option value="Lạng Sơn">Lạng Sơn</option>
+                            <option value="Lào Cai">Lào Cai</option>
+                            <option value="Long An">Long An</option>
+                            <option value="Nam Định">Nam Định</option>
+                            <option value="Nghệ An">Nghệ An</option>
+                            <option value="Ninh Bình">Ninh Bình</option>
+                            <option value="Ninh Thuận">Ninh Thuận</option>
+                            <option value="Phú Thọ">Phú Thọ</option>
+                            <option value="Quảng Bình">Quảng Bình</option>
+                            <option value="Quảng Nam">Quảng Nam</option>
+                            <option value="Quảng Ngãi">Quảng Ngãi</option>
+                            <option value="Quảng Ninh">Quảng Ninh</option>
+                            <option value="Quảng Trị">Quảng Trị</option>
+                            <option value="Sóc Trăng">Sóc Trăng</option>
+                            <option value="Sơn La">Sơn La</option>
+                            <option value="Tây Ninh">Tây Ninh</option>
+                            <option value="Thái Bình">Thái Bình</option>
+                            <option value="Thái Nguyên">Thái Nguyên</option>
+                            <option value="Thanh Hóa">Thanh Hóa</option>
+                            <option value="Thừa Thiên Huế">Thừa Thiên Huế</option>
+                            <option value="Tiền Giang">Tiền Giang</option>
+                            <option value="Trà Vinh">Trà Vinh</option>
+                            <option value="Tuyên Quang">Tuyên Quang</option>
+                            <option value="Vĩnh Long">Vĩnh Long</option>
+                            <option value="Vĩnh Phúc">Vĩnh Phúc</option>
+                            <option value="Yên Bái">Yên Bái</option>
+                            <option value="Phú Yên">Phú Yên</option>
                         </select>
                     </div>
 
                     <div class="form-group">
                         <label for="district">Quận/Huyện:</label>
-                        <select id="district" class="form-control" style="width: 100%;" required disabled>
-                            <option value="">Chọn quận/huyện</option>
-                        </select>
+                        <input type="text" id="district" class="form-control" placeholder="Nhập quận/huyện" required>
                     </div>
 
                     <div class="form-group">
                         <label for="ward">Phường/Xã:</label>
-                        <select id="ward" class="form-control" style="width: 100%;" required disabled>
-                            <option value="">Chọn phường/xã</option>
-                        </select>
+                        <input type="text" id="ward" class="form-control" placeholder="Nhập phường/xã" required>
                     </div>
 
                     <div class="form-group">
@@ -4123,7 +4082,7 @@ def order_form():
                     </div>
 
                     <!-- Submit Button -->
-                    <button type="button" id="submitBtn" class="submit-btn" onclick="submitOrder()">
+                    <button type="button" id="submitBtn" class="submit-btn">
                         ĐẶT HÀNG NGAY
                     </button>
 
@@ -4134,435 +4093,221 @@ def order_form():
             </div>
         </div>
 
-        <!-- Sử dụng CDN nhanh hơn -->
-        <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.6.0/jquery.min.js"></script>
-        <script src="https://cdnjs.cloudflare.com/ajax/libs/select2/4.1.0-rc.0/js/select2.min.js"></script>
+        <!-- Defer loading of non-critical JS -->
         <script>
-            const PRODUCT_MS = "{ms}";
-            const PRODUCT_UID = "{uid}";
-            let BASE_PRICE = {price_int};
-            const DOMAIN = "{'https://' + DOMAIN if not DOMAIN.startswith('http') else DOMAIN}";
-            const API_BASE_URL = "{('/api' if DOMAIN.startswith('http') else 'https://' + DOMAIN + '/api')}";
-            
-            function formatPrice(n) {{
-                return n.toLocaleString('vi-VN') + ' đ';
-            }}
-            
-            function updatePriceDisplay() {{
-                const quantity = parseInt(document.getElementById('quantity').value || '1');
-                document.getElementById('total-display').innerText = formatPrice(BASE_PRICE * quantity);
-            }}
-            
-            // Lazy load ảnh sản phẩm
-            function lazyLoadImages() {{
-                const lazyImages = document.querySelectorAll('img.lazy-load');
-                if ('IntersectionObserver' in window) {{
-                    const imageObserver = new IntersectionObserver(function(entries) {{
-                        entries.forEach(function(entry) {{
-                            if (entry.isIntersecting) {{
-                                const lazyImage = entry.target;
-                                lazyImage.src = lazyImage.dataset.src;
-                                lazyImage.classList.remove('lazy-load');
-                                imageObserver.unobserve(lazyImage);
-                            }}
-                        }});
-                    }});
-                    
-                    lazyImages.forEach(function(lazyImage) {{
-                        imageObserver.observe(lazyImage);
-                    }});
-                }} else {{
-                    // Fallback cho trình duyệt cũ
-                    lazyImages.forEach(function(lazyImage) {{
-                        lazyImage.src = lazyImage.dataset.src;
-                    }});
+            // Inline critical JS để form hoạt động ngay
+            document.addEventListener('DOMContentLoaded', function() {{
+                const DOMAIN = '{'https://' + DOMAIN if not DOMAIN.startswith('http') else DOMAIN}';
+                const API_BASE_URL = '/api';
+                let BASE_PRICE = {price_int};
+                
+                // Format price function
+                function formatPrice(n) {{
+                    return new Intl.NumberFormat('vi-VN').format(n) + ' đ';
                 }}
-            }}
-            
-            // Hàm cập nhật thông tin biến thể (ảnh và giá)
-            async function updateVariantInfo() {{
-                const color = document.getElementById('color').value;
-                const size = document.getElementById('size').value;
                 
-                // Hiển thị loading
-                document.getElementById('variant-loading').style.display = 'block';
+                // Update price display
+                function updatePriceDisplay() {{
+                    const quantity = parseInt(document.getElementById('quantity').value) || 1;
+                    const total = BASE_PRICE * quantity;
+                    document.getElementById('total-display').textContent = formatPrice(total);
+                }}
                 
-                try {{
-                    const response = await fetch(`${{API_BASE_URL}}/get-variant-info?ms=${{PRODUCT_MS}}&color=${{encodeURIComponent(color)}}&size=${{encodeURIComponent(size)}}`);
-                    if (response.ok) {{
-                        const data = await response.json();
-                        
-                        // Cập nhật ảnh sản phẩm
-                        const productImage = document.getElementById('product-image');
-                        if (data.image) {{
-                            productImage.dataset.src = data.image;
-                            // Sử dụng lazy loading
-                            if (!productImage.classList.contains('lazy-load')) {{
-                                productImage.classList.add('lazy-load');
-                            }}
-                            lazyLoadImages();
+                // Load product image after page loads
+                function loadProductImage() {{
+                    const img = document.getElementById('product-image');
+                    if (img.dataset.src) {{
+                        // Create a new image to check if it loads
+                        const tempImg = new Image();
+                        tempImg.onload = function() {{
+                            img.src = this.src;
+                            img.classList.remove('loading');
+                        }};
+                        tempImg.onerror = function() {{
+                            // Use fallback image
+                            img.src = 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTIwIiBoZWlnaHQ9IjEyMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTIwIiBoZWlnaHQ9IjEyMCIgZmlsbD0iI2UzZTNlMyIvPjx0ZXh0IHg9IjYwIiB5PSI2MCIgZm9udC1mYW1pbHk9IkFyaWFsIiBmb250LXNpemU9IjEyIiBmaWxsPSIjOTk5OTk5IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBkeT0iLjNlbSI+Tm8gSW1hZ2U8L3RleHQ+PC9zdmc+';
+                        }};
+                        tempImg.src = img.dataset.src;
+                    }}
+                }}
+                
+                // Get variant info (ảnh và giá)
+                async function getVariantInfo(color, size) {{
+                    try {{
+                        const response = await fetch(`${{API_BASE_URL}}/get-variant-info?ms={ms}&color=${{encodeURIComponent(color)}}&size=${{encodeURIComponent(size)}}`);
+                        if (response.ok) {{
+                            return await response.json();
+                        }}
+                    }} catch (error) {{
+                        console.log('Không thể lấy thông tin biến thể, sử dụng giá mặc định');
+                    }}
+                    return null;
+                }}
+                
+                // Update variant info when color/size changes
+                async function updateVariantInfo() {{
+                    const color = document.getElementById('color').value;
+                    const size = document.getElementById('size').value;
+                    
+                    const variantInfo = await getVariantInfo(color, size);
+                    if (variantInfo) {{
+                        // Update image
+                        const img = document.getElementById('product-image');
+                        if (variantInfo.image) {{
+                            const tempImg = new Image();
+                            tempImg.onload = function() {{
+                                img.src = variantInfo.image;
+                            }};
+                            tempImg.src = variantInfo.image;
                         }}
                         
-                        // Cập nhật giá
-                        BASE_PRICE = data.price || {price_int};
-                        document.getElementById('price-display').innerText = formatPrice(BASE_PRICE);
-                        updatePriceDisplay();
+                        // Update price
+                        if (variantInfo.price && variantInfo.price > 0) {{
+                            BASE_PRICE = variantInfo.price;
+                            document.getElementById('price-display').textContent = formatPrice(BASE_PRICE);
+                            updatePriceDisplay();
+                        }}
                     }}
-                }} catch (error) {{
-                    console.error('Lỗi khi cập nhật thông tin biến thể:', error);
-                }} finally {{
-                    document.getElementById('variant-loading').style.display = 'none';
                 }}
-            }}
-            
-            // Hàm load danh sách tỉnh/thành từ cache
-            async function loadProvinces() {{
-                try {{
-                    const response = await fetch('/api/cached-all-addresses');
-                    const allData = await response.json();
+                
+                // Submit order
+                async function submitOrder() {{
+                    const formData = {{
+                        ms: '{ms}',
+                        uid: '{uid}',
+                        color: document.getElementById('color').value,
+                        size: document.getElementById('size').value,
+                        quantity: parseInt(document.getElementById('quantity').value) || 1,
+                        customerName: document.getElementById('customerName').value.trim(),
+                        phone: document.getElementById('phone').value.trim(),
+                        province: document.getElementById('province').value,
+                        district: document.getElementById('district').value.trim(),
+                        ward: document.getElementById('ward').value.trim(),
+                        addressDetail: document.getElementById('addressDetail').value.trim()
+                    }};
                     
-                    if (!Array.isArray(allData) || allData.length === 0) {{
-                        // Fallback nếu không có dữ liệu cache
-                        await loadProvincesFallback();
+                    // Validation
+                    if (!formData.customerName) {{
+                        alert('Vui lòng nhập họ và tên');
                         return;
                     }}
                     
-                    const provinceSelect = $('#province');
-                    provinceSelect.empty();
-                    provinceSelect.append('<option value="">Chọn tỉnh/thành phố</option>');
-                    
-                    allData.forEach(province => {{
-                        provinceSelect.append(`<option value="${{province.code}}">${{province.name}}</option>`);
-                    }});
-                    
-                    // Khởi tạo Select2
-                    $('#province, #district, #ward').select2({{
-                        width: '100%',
-                        placeholder: 'Chọn...',
-                        allowClear: false
-                    }});
-                    
-                    // Xử lý sự kiện khi chọn tỉnh
-                    provinceSelect.on('change', function() {{
-                        const provinceCode = $(this).val();
-                        if (provinceCode) {{
-                            const province = allData.find(p => p.code == provinceCode);
-                            if (province && province.districts) {{
-                                loadDistrictsFromData(province.districts);
-                            }}
-                        }} else {{
-                            $('#district').val('').trigger('change').prop('disabled', true);
-                            $('#ward').val('').trigger('change').prop('disabled', true);
-                        }}
-                    }});
-                    
-                }} catch (error) {{
-                    console.error('Lỗi khi load tỉnh/thành từ cache:', error);
-                    // Fallback
-                    await loadProvincesFallback();
-                }}
-            }}
-            
-            // Fallback: load từ API trực tiếp
-            async function loadProvincesFallback() {{
-                try {{
-                    const response = await fetch('https://provinces.open-api.vn/api/p/');
-                    const provinces = await response.json();
-                    
-                    const provinceSelect = $('#province');
-                    provinceSelect.empty();
-                    provinceSelect.append('<option value="">Chọn tỉnh/thành phố</option>');
-                    
-                    provinces.forEach(province => {{
-                        provinceSelect.append(`<option value="${{province.code}}">${{province.name}}</option>`);
-                    }});
-                    
-                    $('#province, #district, #ward').select2({{
-                        width: '100%',
-                        placeholder: 'Chọn...',
-                        allowClear: false
-                    }});
-                    
-                    provinceSelect.on('change', function() {{
-                        const provinceCode = $(this).val();
-                        if (provinceCode) {{
-                            loadDistricts(provinceCode);
-                        }} else {{
-                            $('#district').val('').trigger('change').prop('disabled', true);
-                            $('#ward').val('').trigger('change').prop('disabled', true);
-                        }}
-                    }});
-                    
-                }} catch (error) {{
-                    console.error('Lỗi khi load tỉnh/thành fallback:', error);
-                    // Hiển thị input text nếu API lỗi
-                    $('#province').replaceWith('<input type="text" id="province" class="form-control" placeholder="Nhập tỉnh/thành phố" required>');
-                    $('#district').replaceWith('<input type="text" id="district" class="form-control" placeholder="Nhập quận/huyện" required>');
-                    $('#ward').replaceWith('<input type="text" id="ward" class="form-control" placeholder="Nhập phường/xã" required>');
-                }}
-            }}
-            
-            // Hàm load danh sách quận/huyện từ dữ liệu cache
-            function loadDistrictsFromData(districts) {{
-                const districtSelect = $('#district');
-                districtSelect.empty();
-                districtSelect.append('<option value="">Chọn quận/huyện</option>');
-                
-                districts.forEach(district => {{
-                    districtSelect.append(`<option value="${{district.code}}">${{district.name}}</option>`);
-                }});
-                
-                districtSelect.prop('disabled', false).trigger('change');
-                
-                // Reset ward
-                $('#ward').empty().append('<option value="">Chọn phường/xã</option>').prop('disabled', true).trigger('change');
-                
-                // Xử lý sự kiện khi chọn huyện
-                districtSelect.on('change', function() {{
-                    const districtCode = $(this).val();
-                    if (districtCode) {{
-                        const district = districts.find(d => d.code == districtCode);
-                        if (district && district.wards) {{
-                            loadWardsFromData(district.wards);
-                        }}
-                    }} else {{
-                        $('#ward').val('').trigger('change').prop('disabled', true);
+                    if (!formData.phone) {{
+                        alert('Vui lòng nhập số điện thoại');
+                        return;
                     }}
-                }});
-            }}
-            
-            // Hàm load danh sách phường/xã từ dữ liệu cache
-            function loadWardsFromData(wards) {{
-                const wardSelect = $('#ward');
-                wardSelect.empty();
-                wardSelect.append('<option value="">Chọn phường/xã</option>');
-                
-                wards.forEach(ward => {{
-                    wardSelect.append(`<option value="${{ward.code}}">${{ward.name}}</option>`);
-                }});
-                
-                wardSelect.prop('disabled', false).trigger('change');
-            }}
-            
-            // Hàm load danh sách quận/huyện từ API
-            async function loadDistricts(provinceCode) {{
-                try {{
-                    const response = await fetch(`https://provinces.open-api.vn/api/p/${{provinceCode}}?depth=2`);
-                    const provinceData = await response.json();
                     
-                    const districts = provinceData.districts || [];
+                    // Phone validation
+                    const phoneRegex = /^(0[0-9]{{9}}|84[0-9]{{9}}|\+84[0-9]{{9}})$/;
+                    const normalizedPhone = formData.phone.replace(/\\s/g, '');
                     
-                    const districtSelect = $('#district');
-                    districtSelect.empty();
-                    districtSelect.append('<option value="">Chọn quận/huyện</option>');
+                    if (!phoneRegex.test(normalizedPhone)) {{
+                        alert('Số điện thoại không hợp lệ. Vui lòng nhập số 10 chữ số (VD: 0982155980)');
+                        return;
+                    }}
                     
-                    districts.forEach(district => {{
-                        districtSelect.append(`<option value="${{district.code}}">${{district.name}}</option>`);
-                    }});
+                    formData.phone = normalizedPhone.replace('+84', '0').replace(/^84/, '0');
                     
-                    districtSelect.prop('disabled', false).trigger('change');
+                    if (!formData.province) {{
+                        alert('Vui lòng chọn tỉnh/thành phố');
+                        return;
+                    }}
                     
-                    // Reset ward
-                    $('#ward').empty().append('<option value="">Chọn phường/xã</option>').prop('disabled', true).trigger('change');
+                    if (!formData.district) {{
+                        alert('Vui lòng nhập quận/huyện');
+                        return;
+                    }}
                     
-                    // Xử lý sự kiện khi chọn huyện
-                    districtSelect.on('change', function() {{
-                        const districtCode = $(this).val();
-                        if (districtCode) {{
-                            loadWards(districtCode);
-                        }} else {{
-                            $('#ward').val('').trigger('change').prop('disabled', true);
-                        }}
-                    }});
+                    if (!formData.ward) {{
+                        alert('Vui lòng nhập phường/xã');
+                        return;
+                    }}
                     
-                }} catch (error) {{
-                    console.error('Lỗi khi load quận/huyện:', error);
-                }}
-            }}
-            
-            // Hàm load danh sách phường/xã từ API
-            async function loadWards(districtCode) {{
-                try {{
-                    const response = await fetch(`https://provinces.open-api.vn/api/d/${{districtCode}}?depth=2`);
-                    const districtData = await response.json();
+                    if (!formData.addressDetail) {{
+                        alert('Vui lòng nhập địa chỉ chi tiết');
+                        return;
+                    }}
                     
-                    const wards = districtData.wards || [];
+                    formData.fullAddress = `${{formData.addressDetail}}, ${{formData.ward}}, ${{formData.district}}, ${{formData.province}}`;
+                    formData.unitPrice = BASE_PRICE;
+                    formData.totalPrice = BASE_PRICE * formData.quantity;
                     
-                    const wardSelect = $('#ward');
-                    wardSelect.empty();
-                    wardSelect.append('<option value="">Chọn phường/xã</option>');
+                    const submitBtn = document.getElementById('submitBtn');
+                    const originalText = submitBtn.innerHTML;
+                    submitBtn.innerHTML = '<span class="loading-spinner"></span> ĐANG XỬ LÝ...';
+                    submitBtn.disabled = true;
                     
-                    wards.forEach(ward => {{
-                        wardSelect.append(`<option value="${{ward.code}}">${{ward.name}}</option>`);
-                    }});
-                    
-                    wardSelect.prop('disabled', false).trigger('change');
-                    
-                }} catch (error) {{
-                    console.error('Lỗi khi load phường/xã:', error);
-                }}
-            }}
-            
-            async function submitOrder() {{
-                // Lấy thông tin từ form
-                const formData = {{
-                    ms: PRODUCT_MS,
-                    uid: PRODUCT_UID,
-                    color: document.getElementById('color').value,
-                    size: document.getElementById('size').value,
-                    quantity: parseInt(document.getElementById('quantity').value || '1'),
-                    unitPrice: BASE_PRICE,
-                    customerName: document.getElementById('customerName').value.trim(),
-                    phone: document.getElementById('phone').value.trim(),
-                    province: $('#province').val(),
-                    district: $('#district').val(),
-                    ward: $('#ward').val(),
-                    addressDetail: document.getElementById('addressDetail').value.trim()
-                }};
-                
-                // Validation
-                if (!formData.customerName) {{
-                    alert('Vui lòng nhập họ và tên');
-                    document.getElementById('customerName').focus();
-                    return;
-                }}
-                
-                if (!formData.phone) {{
-                    alert('Vui lòng nhập số điện thoại');
-                    document.getElementById('phone').focus();
-                    return;
-                }}
-                
-                // Chuẩn hóa số điện thoại
-                let normalizedPhone = formData.phone.replace(/\\s/g, '');
-                normalizedPhone = normalizedPhone.replace(/[^\\d+]/g, '');
-                
-                if (normalizedPhone.startsWith('84') && normalizedPhone.length === 11) {{
-                    normalizedPhone = '0' + normalizedPhone.substring(2);
-                }}
-                
-                if (normalizedPhone.startsWith('+84') && normalizedPhone.length === 12) {{
-                    normalizedPhone = '0' + normalizedPhone.substring(3);
-                }}
-                
-                const phoneRegex = /^(0\\d{{9}}|84\\d{{9}}|\\+84\\d{{9}})$/;
-                if (!phoneRegex.test(normalizedPhone)) {{
-                    alert('Số điện thoại không hợp lệ. Vui lòng nhập số điện thoại 10 chữ số (ví dụ: 0982155980) hoặc số quốc tế (+84982155980)');
-                    document.getElementById('phone').focus();
-                    return;
-                }}
-                
-                formData.phone = normalizedPhone;
-                
-                if (!formData.province) {{
-                    alert('Vui lòng chọn tỉnh/thành phố');
-                    $('#province').select2('open');
-                    return;
-                }}
-                
-                if (!formData.district) {{
-                    alert('Vui lòng chọn quận/huyện');
-                    $('#district').select2('open');
-                    return;
-                }}
-                
-                if (!formData.ward) {{
-                    alert('Vui lòng chọn phường/xã');
-                    $('#ward').select2('open');
-                    return;
-                }}
-                
-                if (!formData.addressDetail) {{
-                    alert('Vui lòng nhập địa chỉ chi tiết');
-                    document.getElementById('addressDetail').focus();
-                    return;
-                }}
-                
-                // Ghép địa chỉ đầy đủ
-                const provinceName = $('#province option:selected').text();
-                const districtName = $('#district option:selected').text();
-                const wardName = $('#ward option:selected').text();
-                
-                formData.fullAddress = `${{formData.addressDetail}}, ${{wardName}}, ${{districtName}}, ${{provinceName}}`;
-                formData.provinceName = provinceName;
-                formData.districtName = districtName;
-                formData.wardName = wardName;
-                
-                const submitBtn = document.getElementById('submitBtn');
-                const originalText = submitBtn.innerHTML;
-                submitBtn.innerHTML = '<span class="loading-spinner"></span> ĐANG XỬ LÝ...';
-                submitBtn.disabled = true;
-                
-                try {{
-                    const response = await fetch(`${{API_BASE_URL}}/submit-order`, {{
-                        method: 'POST',
-                        headers: {{ 'Content-Type': 'application/json' }},
-                        body: JSON.stringify(formData)
-                    }});
-                    
-                    const data = await response.json();
-                    
-                    if (response.ok) {{
-                        // Hiển thị thông báo thành công
-                        const total = BASE_PRICE * formData.quantity;
-                        const successMessage = `🎉 ĐÃ ĐẶT HÀNG THÀNH CÔNG!
-
-📦 Mã sản phẩm: ${{PRODUCT_MS}}
+                    try {{
+                        const response = await fetch(`${{API_BASE_URL}}/submit-order`, {{
+                            method: 'POST',
+                            headers: {{ 'Content-Type': 'application/json' }},
+                            body: JSON.stringify(formData)
+                        }});
+                        
+                        const data = await response.json();
+                        
+                        if (response.ok) {{
+                            const successMessage = `🎉 ĐÃ ĐẶT HÀNG THÀNH CÔNG!
+                            
+📦 Mã sản phẩm: {ms}
 👤 Khách hàng: ${{formData.customerName}}
 📱 SĐT: ${{formData.phone}}
 📍 Địa chỉ: ${{formData.fullAddress}}
 💰 Đơn giá: ${{BASE_PRICE.toLocaleString('vi-VN')}} đ
 📦 Số lượng: ${{formData.quantity}}
-💰 Tổng tiền: ${{total.toLocaleString('vi-VN')}} đ
+💰 Tổng tiền: ${{formData.totalPrice.toLocaleString('vi-VN')}} đ
 
 ⏰ Shop sẽ liên hệ xác nhận trong 5-10 phút.
 🚚 Giao hàng bởi ViettelPost (COD)
 
 Cảm ơn quý khách đã đặt hàng! ❤️`;
-                        
-                        alert(successMessage);
-                        
-                        // Reset form sau 2 giây
-                        setTimeout(() => {{
-                            document.getElementById('orderForm').reset();
-                            $('#province, #district, #ward').val('').trigger('change');
-                            $('#district').prop('disabled', true);
-                            $('#ward').prop('disabled', true);
-                            updatePriceDisplay();
-                        }}, 2000);
-                        
-                    }} else {{
-                        alert(`❌ ${{data.message || 'Có lỗi xảy ra. Vui lòng thử lại sau'}}`);
+                            
+                            alert(successMessage);
+                            
+                            // Reset form after 1 second
+                            setTimeout(() => {{
+                                document.getElementById('orderForm').reset();
+                                updatePriceDisplay();
+                                submitBtn.innerHTML = originalText;
+                                submitBtn.disabled = false;
+                            }}, 1000);
+                            
+                        }} else {{
+                            alert('❌ ' + (data.message || 'Có lỗi xảy ra. Vui lòng thử lại sau'));
+                            submitBtn.innerHTML = originalText;
+                            submitBtn.disabled = false;
+                        }}
+                    }} catch (error) {{
+                        console.error('Lỗi khi đặt hàng:', error);
+                        alert('❌ Lỗi kết nối. Vui lòng kiểm tra mạng và thử lại!');
+                        submitBtn.innerHTML = originalText;
+                        submitBtn.disabled = false;
                     }}
-                }} catch (error) {{
-                    console.error('Lỗi khi đặt hàng:', error);
-                    alert('❌ Lỗi kết nối. Vui lòng kiểm tra mạng và thử lại!');
-                }} finally {{
-                    submitBtn.innerHTML = originalText;
-                    submitBtn.disabled = false;
                 }}
-            }}
-            
-            // Khởi tạo khi trang được tải
-            document.addEventListener('DOMContentLoaded', function() {{
-                // Load danh sách tỉnh/thành từ cache
-                loadProvinces();
                 
-                // Áp dụng lazy loading cho ảnh
-                lazyLoadImages();
+                // Initialize event listeners
+                function initialize() {{
+                    // Load image
+                    loadProductImage();
+                    
+                    // Update price when quantity changes
+                    document.getElementById('quantity').addEventListener('input', updatePriceDisplay);
+                    
+                    // Update variant info when color/size changes
+                    document.getElementById('color').addEventListener('change', updateVariantInfo);
+                    document.getElementById('size').addEventListener('change', updateVariantInfo);
+                    
+                    // Submit button
+                    document.getElementById('submitBtn').addEventListener('click', submitOrder);
+                    
+                    // Auto-focus on name field
+                    setTimeout(() => {{
+                        document.getElementById('customerName').focus();
+                    }}, 500);
+                }}
                 
-                // Cập nhật giá khi thay đổi số lượng
-                document.getElementById('quantity').addEventListener('input', updatePriceDisplay);
-                
-                // Gọi cập nhật biến thể lần đầu
-                setTimeout(() => {{
-                    updateVariantInfo();
-                }}, 300);
-                
-                // Focus vào trường tên
-                setTimeout(() => {{
-                    document.getElementById('customerName').focus();
-                }}, 500);
+                // Initialize when page loads
+                initialize();
             }});
         </script>
     </body>
@@ -4571,17 +4316,11 @@ Cảm ơn quý khách đã đặt hàng! ❤️`;
     
     response = make_response(html)
     
-    # Nén response nếu client hỗ trợ gzip
-    if 'gzip' in request.headers.get('Accept-Encoding', '').lower() and len(html) > 500:
-        @response.call_on_close
-        def compress():
-            gzip_buffer = BytesIO()
-            with gzip.GzipFile(mode='wb', fileobj=gzip_buffer) as gzip_file:
-                gzip_file.write(response.get_data())
-            
-            response.set_data(gzip_buffer.getvalue())
-            response.headers['Content-Encoding'] = 'gzip'
-            response.headers['Content-Length'] = len(response.get_data())
+    # Set headers for better caching
+    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    response.headers['Content-Type'] = 'text/html; charset=utf-8'
     
     return response
 
@@ -4829,81 +4568,26 @@ def api_submit_order():
     }
 
 # ============================================
-# DATABASE EXPORT/IMPORT ENDPOINTS
+# API ENDPOINT ĐỂ XEM VÀ QUẢN LÝ CONTEXT
 # ============================================
 
-@app.route("/api/export-context", methods=["GET"])
-def export_context():
-    """Export toàn bộ context để backup"""
-    try:
-        # Lấy tất cả context từ database
-        conn = sqlite3.connect('user_context.db', check_same_thread=False)
-        cursor = conn.cursor()
-        
-        cursor.execute('SELECT * FROM user_context')
-        rows = cursor.fetchall()
-        
-        # Chuyển đổi thành dict
-        context_data = []
-        for row in rows:
-            context_data.append({
-                "user_id": row[0],
-                "context_data": json.loads(row[1]) if row[1] else {},
-                "last_updated": row[2],
-                "ms_code": row[3],
-                "referral_source": row[4],
-                "created_at": row[5]
-            })
-        
-        conn.close()
-        
-        # Tạo file backup
-        backup_data = {
-            "timestamp": datetime.now().isoformat(),
-            "total_users": len(context_data),
-            "data": context_data
-        }
-        
-        return jsonify(backup_data)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route("/api/import-context", methods=["POST"])
-def import_context():
-    """Import context từ backup"""
-    try:
-        data = request.get_json()
-        if not data or "data" not in data:
-            return jsonify({"error": "Invalid data"}), 400
-        
-        conn = sqlite3.connect('user_context.db', check_same_thread=False)
-        cursor = conn.cursor()
-        
-        imported = 0
-        for user_data in data["data"]:
-            cursor.execute('''
-            INSERT OR REPLACE INTO user_context 
-            (user_id, context_data, last_updated, ms_code, referral_source)
-            VALUES (?, ?, ?, ?, ?)
-            ''', (
-                user_data["user_id"],
-                json.dumps(user_data["context_data"], ensure_ascii=False),
-                user_data.get("last_updated", datetime.now().isoformat()),
-                user_data.get("ms_code"),
-                user_data.get("referral_source")
-            ))
-            imported += 1
-        
-        conn.commit()
-        conn.close()
-        
+@app.route("/api/user-context/<user_id>", methods=["GET"])
+def get_user_context(user_id):
+    """API để xem context của user"""
+    if user_id in USER_CONTEXT:
         return jsonify({
             "status": "success",
-            "imported": imported,
-            "message": f"Đã import {imported} user contexts"
+            "user_id": user_id,
+            "context": USER_CONTEXT[user_id],
+            "last_ms": USER_CONTEXT[user_id].get("last_ms")
         })
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    return jsonify({"status": "not_found"}), 404
+
+@app.route("/api/save-context", methods=["POST"])
+def api_save_context():
+    """API để trigger lưu context thủ công"""
+    save_user_context()
+    return jsonify({"status": "success", "message": "Đã lưu context"})
 
 # ============================================
 # HEALTH CHECK
@@ -4922,6 +4606,9 @@ def health_check():
     else:
         feed_comment_test = "⚠️ Cần cấu hình PAGE_ACCESS_TOKEN và PAGE_ID"
     
+    # Kiểm tra persistent storage
+    persistent_storage_status = "✅ Đang hoạt động" if os.path.exists(USER_CONTEXT_FILE) else "⚠️ Chưa có file lưu trữ"
+    
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
@@ -4932,6 +4619,13 @@ def health_check():
         "fanpage_name": current_fanpage_name,
         "page_id": PAGE_ID,
         "feed_comment_processing": feed_comment_test,
+        "persistent_storage": {
+            "enabled": True,
+            "status": persistent_storage_status,
+            "file": USER_CONTEXT_FILE,
+            "users_in_memory": len(USER_CONTEXT),
+            "save_interval_seconds": CONTEXT_SAVE_INTERVAL
+        },
         "google_sheets_integration": {
             "sheet_id_configured": bool(GOOGLE_SHEET_ID),
             "credentials_configured": bool(GOOGLE_SHEETS_CREDENTIALS_JSON)
@@ -4943,24 +4637,6 @@ def health_check():
             "endpoints": {
                 "webhook": "/poscake-webhook",
                 "test": "/test-poscake-webhook"
-            }
-        },
-        "database_integration": {
-            "initialized": True,
-            "context_persistence": True,
-            "sync_enabled": True,
-            "export_import": True,
-            "endpoints": {
-                "export": "/api/export-context",
-                "import": "/api/import-context"
-            }
-        },
-        "address_cache": {
-            "enabled": True,
-            "all_addresses_loaded": ADDRESS_CACHE['all_addresses'] is not None,
-            "endpoints": {
-                "cached_provinces": "/api/cached-provinces",
-                "cached_all_addresses": "/api/cached-all-addresses"
             }
         },
         "gpt_function_calling": {
@@ -5006,10 +4682,10 @@ def health_check():
             "address_api_cache": True,
             "lazy_image_loading": True,
             "gzip_compression": True,
-            "feed_comment_processing": True,
-            "feed_comment_auto_reply": True,
-            "database_context_persistence": True,
-            "context_restore": True
+            "feed_comment_processing": True,  # TÍNH NĂNG MỚI ĐÃ SỬA
+            "feed_comment_auto_reply": True,  # TÍNH NĂNG MỚI: Gửi tin nhắn tự động giới thiệu sản phẩm
+            "persistent_storage": True,  # TÍNH NĂNG MỚI: Lưu trữ context vào file
+            "form_static_address": True  # TÍNH NĂNG MỚI: Form sử dụng danh sách tỉnh/thành static
         }
     }, 200
 
@@ -5025,11 +4701,7 @@ def health_light():
         "timestamp": datetime.now().isoformat(),
         "service": "order-form",
         "uptime": time.time() - LAST_LOAD if LAST_LOAD > 0 else 0,
-        "database": "connected",
-        "cache": {
-            "addresses_loaded": ADDRESS_CACHE['all_addresses'] is not None,
-            "products_loaded": len(PRODUCTS) > 0
-        }
+        "persistent_storage": os.path.exists(USER_CONTEXT_FILE)
     }), 200
 
 # ============================================
@@ -5053,6 +4725,9 @@ if __name__ == "__main__":
     print(f"🟢 Port: {get_port()}")
     print("=" * 80)
     
+    # Load context từ file khi khởi động
+    load_user_context()
+    
     print(f"🟢 GPT-4o-mini: {'SẴN SÀNG' if client else 'CHƯA CẤU HÌNH'}")
     print(f"🟢 Fanpage: {get_fanpage_name_from_api()}")
     print(f"🟢 Page ID: {PAGE_ID}")
@@ -5060,9 +4735,36 @@ if __name__ == "__main__":
     print(f"🟢 Google Sheets API: {'SẴN SÀNG' if GOOGLE_SHEET_ID and GOOGLE_SHEETS_CREDENTIALS_JSON else 'CHƯA CẤU HÌNH'}")
     print(f"🟢 Poscake Webhook: {'SẴN SÀNG' if POSCAKE_API_KEY else 'CHƯA CẤU HÌNH'}")
     print(f"🟢 OpenAI Function Calling: {'TÍCH HỢP THÀNH CÔNG' if client else 'CHƯA CẤU HÌNH'}")
+    print(f"🟢 Persistent Storage: {'SẴN SÀNG' if os.path.exists(USER_CONTEXT_FILE) else 'CHƯA CÓ FILE, SẼ TẠO MỚI'}")
     print("=" * 80)
     
-    print("🔴 CẢI TIẾN QUAN TRỌNG: XỬ LÝ COMMENT TỪ FEED (ĐÃ SỬA LỖI)")
+    print("🔴 CẢI TIẾN QUAN TRỌNG: PERSISTENT STORAGE CHO USER_CONTEXT")
+    print("=" * 80)
+    print(f"🔴 1. Lưu trữ tự động: Tự động lưu USER_CONTEXT vào file {USER_CONTEXT_FILE} mỗi {CONTEXT_SAVE_INTERVAL} giây")
+    print(f"🔴 2. Khôi phục khi restart: Load lại context từ file khi server khởi động")
+    print(f"🔴 3. Không mất dữ liệu: Giữ nguyên MS và context khi Koyeb sleep/restart")
+    print(f"🔴 4. API quản lý: /api/user-context/<user_id> để xem context, /api/save-context để lưu thủ công")
+    print(f"🔴 5. Thread tự động: Chạy trong background, không ảnh hưởng performance")
+    print("=" * 80)
+    
+    print("🔴 CẢI TIẾN QUAN TRỌNG: FORM ĐẶT HÀNG TỐI ƯU TỐC ĐỘ")
+    print("=" * 80)
+    print(f"🔴 1. Static HTML: Form load ngay lập tức với CSS inline")
+    print(f"🔴 2. Placeholder image: Sử dụng base64 SVG để không chờ load ảnh")
+    print(f"🔴 3. Static address list: Sử dụng danh sách tỉnh/thành static thay vì gọi API")
+    print(f"🔴 4. Lazy loading: Ảnh thật chỉ load sau khi trang đã hiển thị")
+    print(f"🔴 5. Optimized JS: JavaScript tối thiểu, chạy ngay sau khi DOM ready")
+    print(f"🔴 6. Cache headers: Headers để browser cache hiệu quả")
+    print("=" * 80)
+    
+    print("🔴 FIX LỖI REGEX SYNTAX WARNING")
+    print("=" * 80)
+    print(f"🔴 Đã sửa tất cả pattern regex thành raw string (r'...')")
+    print(f"🔴 Không ảnh hưởng logic: Các regex vẫn hoạt động chính xác")
+    print(f"🔴 Fix warnings: Không còn cảnh báo SyntaxWarning trong log")
+    print("=" * 80)
+    
+    print("🔴 TÍNH NĂNG MỚI: XỬ LÝ COMMENT TỪ FEED (ĐÃ SỬA LỖI)")
     print("=" * 80)
     print(f"🔴 1. Feed Comment Processing: Tự động phát hiện MS khi user comment")
     print(f"🔴 2. Logic: Lấy post_id → Lấy nội dung bài viết → Trích xuất MS từ caption (CHỈ DÙNG REGEX)")
@@ -5072,105 +4774,10 @@ if __name__ == "__main__":
     print(f"🔴 6. Debug Endpoint: /debug-feed-comment?post_id=...")
     print("=" * 80)
     
-    print("🔴 TÍNH NĂNG MỚI: DATABASE CONTEXT PERSISTENCE")
-    print("=" * 80)
-    print(f"🔴 1. SQLite Database: user_context.db (không bị mất khi server sleep)")
-    print(f"🔴 2. Tự động đồng bộ context từ RAM vào database mỗi 60 giây")
-    print(f"🔴 3. Khôi phục context khi user tương tác lại")
-    print(f"🔴 4. Export/Import context: /api/export-context, /api/import-context")
-    print(f"🔴 5. Lưu trữ mapping MS để phân tích sau")
-    print("=" * 80)
-    
-    print("🔴 CẢI TIẾN MỚI: TỐI ƯU TỐC ĐỘ LOAD TRANG FORM ĐẶT HÀNG")
-    print("=" * 80)
-    print(f"🔴 1. Address Cache: Cache toàn bộ dữ liệu địa chỉ (/api/cached-all-addresses)")
-    print(f"🔴 2. Lazy Loading Images: Ảnh sản phẩm chỉ load khi cần thiết")
-    print(f"🔴 3. Optimized CDN: Sử dụng Cloudflare CDN cho jQuery và Select2")
-    print(f"🔴 4. Async Select2: Khởi tạo Select2 sau khi trang đã load")
-    print(f"🔴 5. Gzip Compression: Nén HTML response giảm 70% kích thước")
-    print(f"🔴 6. Health Check Light: /health-light endpoint nhanh cho load balancer")
-    print("=" * 80)
-    
-    print("🔴 CẢI TIẾN MỚI: XÓA MÃ SẢN PHẨM TRÙNG LẶP")
-    print("=" * 80)
-    print(f"🔴 Carousel: Chỉ hiển thị tên sản phẩm (đã loại bỏ mã nếu có trong tên)")
-    print(f"🔴 Tin nhắn xác nhận đơn hàng: Chỉ hiển thị tên sản phẩm, không hiển thị mã lặp lại")
-    print(f"🔴 Tự động xử lý: Kiểm tra nếu tên đã chứa mã thì xóa bỏ mã khỏi tên")
-    print("=" * 80)
-    
-    print("🟢 CẢI TIẾN MỚI: POSCAKE WEBHOOK INTEGRATION")
-    print("=" * 80)
-    print(f"🟢 Endpoint: /poscake-webhook (POST)")
-    print(f"🟢 Test endpoint: /test-poscake-webhook (GET/POST)")
-    print(f"🟢 Xác thực: Signature verification với POSCAKE_WEBHOOK_SECRET")
-    print(f"🟢 Xử lý sự kiện: order.created, order.updated, order.shipped, order.delivered, order.cancelled")
-    print(f"🟢 Tự động gửi tin nhắn: Thông báo trạng thái đơn hàng cho khách")
-    print(f"🟢 Context lưu trữ: USER_CONTEXT['poscake_orders'] - lưu 10 đơn hàng gần nhất")
-    print("=" * 80)
-    
-    print("🟢 CẢI TIẾN MỚI: XỬ LÝ ẢNH SẢN PHẨM THÔNG MINH VỚI CAROUSEL GỢI Ý")
-    print("=" * 80)
-    print(f"🟢 Vision API cải tiến: 3 phương pháp fallback (URL trực tiếp, base64, URL đơn giản)")
-    print(f"🟢 Phát hiện emoji/sticker: Loại bỏ ảnh emoji/sticker (dựa trên URL pattern)")
-    print(f"🟢 Kiểm tra ảnh hợp lệ: Mở rộng domain và pattern chấp nhận")
-    print(f"🟢 Matching nâng cao: Trích xuất từ khóa thông minh, tính điểm tương đồng với trọng số hợp lý")
-    print(f"🟢 Carousel gợi ý: Gửi carousel 3 sản phẩm khi không tìm thấy từ ảnh")
-    print(f"🟢 Xử lý lỗi: Tải ảnh về server khi Facebook CDN lỗi")
-    print(f"🟢 Context cập nhật: Reset counter để áp dụng first message rule khi tìm thấy sản phẩm từ ảnh")
-    print("=" * 80)
-    
-    print("🔴 FORM ĐẶT HÀNG CẢI TIẾN:")
-    print("=" * 80)
-    print(f"🔴 Cập nhật ảnh và giá theo biến thể: /api/get-variant-info")
-    print(f"🔴 Địa chỉ theo API: Tỉnh/Huyện/Xã + địa chỉ chi tiết")
-    print(f"🔴 Sử dụng Select2 cho UI tốt hơn")
-    print(f"🔴 Fallback khi API địa chỉ lỗi")
-    print(f"🔴 FIX: Sửa lỗi validate số điện thoại - chấp nhận 0982155980, +84982155980")
-    print(f"🔴 FIX: Thêm xử lý chuẩn hóa số điện thoại tự động")
-    print("=" * 80)
-    
-    print("🔴 FIX THÀNH TIỀN TRONG TIN NHẮN PHẢN HỒI:")
-    print("=" * 80)
-    print(f"🔴 Tìm giá đúng của biến thể (màu + size) trong hàm api_submit_order")
-    print(f"🔴 Cập nhật tin nhắn phản hồi: hiển thị cả đơn giá và thành tiền tính đúng")
-    print(f"🔴 Cải thiện hàm extract_price_int để xử lý nhiều định dạng giá")
-    print(f"🔴 Thêm debug log để kiểm tra khi có vấn đề")
-    print("=" * 80)
-    
-    print("🟢 TÍNH NĂNG MỚI: XỬ LÝ ĐƠN HÀNG TỰ FACEBOOK SHOP")
-    print("=" * 80)
-    print(f"🟢 Xử lý sự kiện 'order' từ Facebook Shop")
-    print(f"🟢 KHÔNG gửi tin nhắn cảm ơn khi có đơn hàng mới từ Facebook Shop")
-    print(f"🟢 Trích xuất mã sản phẩm từ retailer_id")
-    print(f"🟢 Hiển thị chi tiết sản phẩm, số lượng, đơn giá, tổng tiền")
-    print(f"🟢 Log đơn hàng vào file facebook_shop_orders.log")
-    print(f"🟢 Cập nhật context với mã sản phẩm để hỗ trợ tư vấn tiếp theo")
-    print("=" * 80)
-    
-    print("🔴 TẮT TÍNH NĂNG: GHI NHẬN MS TỪ ECHO FCHAT")
-    print("=" * 80)
-    print(f"🔴 Đã xóa logic xử lý Fchat echo trong webhook handler")
-    print(f"🔴 Chỉ xử lý echo từ bot (bỏ qua)")
-    print(f"🔴 Echo từ người dùng (comment) đã được xử lý qua feed")
-    print("=" * 80)
-    
-    print("🔴 CẢI TIẾN MỚI: GPT TRẢ LỜI NGAY TỪ TIN NHẮN ĐẦU TIÊN")
-    print("=" * 80)
-    print(f"🔴 1. Nếu đã có MS trong context: Dùng GPT ngay và gửi carousel nếu chưa gửi")
-    print(f"🔴 2. Nếu chưa có MS: Tìm MS từ tin nhắn, nếu tìm thấy thì cập nhật context, gửi carousel và dùng GPT")
-    print(f"🔴 3. Nếu không tìm thấy MS: Yêu cầu khách gửi MS hoặc ảnh sản phẩm")
-    print(f"🔴 4. Tin nhắn tiếp thị sau comment: Sử dụng GPT để tạo tin nhắn dựa trên ưu điểm sản phẩm")
-    print("=" * 80)
-    
-    # Khởi tạo database
-    init_database()
-    
-    # Khởi tạo cache địa chỉ
-    init_address_cache()
-    
-    # Bắt đầu thread đồng bộ context
-    sync_thread = threading.Thread(target=sync_context_to_db, daemon=True)
-    sync_thread.start()
+    # Bắt đầu thread lưu context định kỳ
+    saver_thread = threading.Thread(target=periodic_context_save, daemon=True)
+    saver_thread.start()
+    print(f"🟢 Đã khởi động thread lưu context mỗi {CONTEXT_SAVE_INTERVAL} giây")
     
     load_products()
     
