@@ -185,6 +185,66 @@ def get_fanpage_name_from_api():
         return FANPAGE_NAME_CACHE
 
 # ============================================
+# HÀM TẠO TIN NHẮN TIẾP THỊ BẰNG GPT
+# ============================================
+def generate_marketing_message(ms: str, user_name: str) -> str:
+    """
+    Tạo tin nhắn tiếp thị bằng GPT dựa trên ưu điểm sản phẩm
+    """
+    if ms not in PRODUCTS:
+        return None
+    
+    product = PRODUCTS[ms]
+    product_name = product.get('Ten', '')
+    # Làm sạch tên sản phẩm (loại bỏ mã nếu có)
+    if f"[{ms}]" in product_name or ms in product_name:
+        product_name = product_name.replace(f"[{ms}]", "").replace(ms, "").strip()
+    
+    mo_ta = product.get("MoTa", "")
+    
+    if not client:
+        # Fallback nếu không có GPT
+        return f"Chào {user_name}! 👋\n\nEm thấy bạn đã bình luận trên bài viết của shop và quan tâm đến sản phẩm:\n\n📦 **{product_name}**\n📌 Mã sản phẩm: {ms}\n\nĐây là sản phẩm rất được yêu thích tại shop với nhiều ưu điểm nổi bật! Bạn có thể hỏi em bất kỳ thông tin gì về sản phẩm này ạ!"
+    
+    try:
+        system_prompt = f"""Bạn là nhân viên bán hàng của {get_fanpage_name_from_api()}.
+Hãy tạo một lời chào mời khách hàng dựa trên sản phẩm {product_name} (mã {ms}).
+Lời chào cần:
+1. Thân thiện, nhiệt tình, chào đón khách hàng
+2. Nhấn mạnh vào ưu điểm, điểm nổi bật của sản phẩm dựa trên mô tả
+3. Mời gọi khách hàng hỏi thêm thông tin hoặc đặt hàng
+4. KHÔNG liệt kê các câu lệnh như "gửi giá bao nhiêu", "xem ảnh", v.v.
+5. KHÔNG hướng dẫn khách cách hỏi
+6. Tập trung vào ưu điểm và lợi ích sản phẩm
+7. Độ dài khoảng 4-5 dòng, tự nhiên
+"""
+        
+        user_prompt = f"""Hãy tạo lời chào cho khách hàng {user_name} vừa bình luận trên bài viết về sản phẩm:
+Tên sản phẩm: {product_name}
+Mã sản phẩm: {ms}
+Mô tả sản phẩm: {mo_ta[:300] if mo_ta else "Chưa có mô tả"}
+
+Hãy tạo lời chào mời thân thiện, tập trung vào ưu điểm sản phẩm."""
+        
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.7,
+            max_tokens=300
+        )
+        
+        intro = response.choices[0].message.content
+        return f"Chào {user_name}! 👋\n\n{intro}"
+    
+    except Exception as e:
+        print(f"[GPT MARKETING ERROR] Lỗi khi tạo tin nhắn tiếp thị: {e}")
+        # Fallback
+        return f"Chào {user_name}! 👋\n\nEm thấy bạn đã bình luận trên bài viết của shop và quan tâm đến sản phẩm:\n\n📦 **{product_name}**\n📌 Mã sản phẩm: {ms}\n\nĐây là sản phẩm rất được yêu thích tại shop với nhiều ưu điểm nổi bật! Bạn có thể hỏi em bất kỳ thông tin gì về sản phẩm này ạ!"
+
+# ============================================
 # HÀM CẬP NHẬT CONTEXT VỚI MS MỚI VÀ RESET COUNTER
 # ============================================
 
@@ -1078,12 +1138,6 @@ def handle_feed_comment(change_data: dict):
         # 6. Cập nhật context cho user (RESET COUNTER để áp dụng first message rule)
         print(f"[FEED COMMENT MS] Phát hiện MS {detected_ms} từ post {post_id} cho user {user_id}")
         
-        # Lấy tên sản phẩm (loại bỏ mã nếu có trong tên)
-        product = PRODUCTS[detected_ms]
-        product_name = product.get('Ten', '')
-        if f"[{detected_ms}]" in product_name or detected_ms in product_name:
-            product_name = product_name.replace(f"[{detected_ms}]", "").replace(detected_ms, "").strip()
-        
         # Gọi hàm cập nhật context mới (reset counter)
         update_context_with_new_ms(user_id, detected_ms, "feed_comment")
         
@@ -1093,32 +1147,24 @@ def handle_feed_comment(change_data: dict):
         ctx["source_post_content"] = post_data.get('message', '')[:300]
         ctx["source_post_url"] = post_data.get('permalink_url', '')
         
-        # 7. GỬI TIN NHẮN TỰ ĐỘNG GIỚI THIỆU SẢN PHẨM
+        # 7. GỬI TIN NHẮN TỰ ĐỘNG TIẾP THỊ SẢN PHẨM BẰNG GPT
         # Chỉ gửi nếu user chưa nhắn tin trước đó hoặc real_message_count = 0
         if ctx.get("real_message_count", 0) == 0:
             try:
-                # Gửi tin nhắn giới thiệu sản phẩm chi tiết
-                intro_message = f"""Chào {user_name}! 👋 
-
-Em thấy bạn đã bình luận trên bài viết của shop và quan tâm đến sản phẩm:
-
-📦 **{product_name}**
-📌 Mã sản phẩm: {detected_ms}
-
-Đây là sản phẩm rất được yêu thích tại shop! Để em tư vấn chi tiết cho bạn:
-
-• Gửi "giá bao nhiêu" để xem giá sản phẩm
-• Gửi "xem ảnh" để xem hình ảnh thực tế sản phẩm
-• Gửi "màu gì có" để xem các màu sắc có sẵn
-• Gửi "size nào" để xem các size có sẵn
-• Gửi "đặt hàng" để mua sản phẩm này
-
-Hoặc bạn có thể hỏi bất kỳ thông tin gì về sản phẩm, em sẵn sàng tư vấn ạ! 😊
-
-Nếu bạn quan tâm đến sản phẩm khác, vui lòng gửi mã sản phẩm (ví dụ: MS000034) nhé!"""
-                
-                send_message(user_id, intro_message)
-                print(f"[FEED COMMENT AUTO REPLY] Đã gửi tin nhắn tự động giới thiệu sản phẩm cho user {user_id}")
+                # Sử dụng GPT để tạo tin nhắn tiếp thị dựa trên ưu điểm sản phẩm
+                marketing_message = generate_marketing_message(detected_ms, user_name)
+                if marketing_message:
+                    send_message(user_id, marketing_message)
+                    print(f"[FEED COMMENT AUTO REPLY] Đã gửi tin nhắn tiếp thị bằng GPT cho user {user_id}")
+                else:
+                    # Fallback nếu không tạo được tin nhắn
+                    # Lấy tên sản phẩm (loại bỏ mã nếu có trong tên)
+                    product = PRODUCTS[detected_ms]
+                    product_name = product.get('Ten', '')
+                    if f"[{detected_ms}]" in product_name or detected_ms in product_name:
+                        product_name = product_name.replace(f"[{detected_ms}]", "").replace(detected_ms, "").strip()
+                    
+                    send_message(user_id, f"Chào {user_name}! 👋\n\nCảm ơn bạn đã bình luận. Sản phẩm bạn quan tâm là {product_name}. Bạn có thể hỏi em bất kỳ thông tin gì về sản phẩm này ạ!")
                 
                 # Tăng counter để không gửi lại lần nữa
                 ctx["real_message_count"] = 1
@@ -2332,11 +2378,13 @@ Vui lòng gửi mã sản phẩm (ví dụ: MS123456) hoặc mô tả sản ph�
     return False
 
 # ============================================
-# HANDLE TEXT MESSAGES
+# HANDLE TEXT MESSAGES - ĐÃ SỬA ĐỔI LOGIC
 # ============================================
 
 def handle_text(uid: str, text: str):
-    """Xử lý tin nhắn văn bản với logic: chưa gửi carousel → carousel, đã gửi → GPT"""
+    """Xử lý tin nhắn văn bản với logic mới: 
+       1. Nếu đã có MS trong context: dùng GPT ngay và gửi carousel nếu chưa gửi
+       2. Nếu chưa có MS: cố gắng phát hiện MS từ tin nhắn, nếu có thì cập nhật context, gửi carousel và dùng GPT, nếu không thì yêu cầu MS"""
     if not text or len(text.strip()) == 0:
         return
     
@@ -2373,32 +2421,81 @@ def handle_text(uid: str, text: str):
         
         print(f"[MESSAGE COUNT] User {uid}: tin nhắn thứ {message_count}")
         
-        # QUY TẮC QUAN TRỌNG:
-        # 1. Nếu chưa gửi carousel cho sản phẩm hiện tại (has_sent_first_carousel = False): Gửi carousel, KHÔNG GPT
-        # 2. Nếu đã gửi carousel rồi: LUÔN dùng GPT Function Calling
-        last_ms = ctx.get("last_ms")
-        
-        if not ctx.get("has_sent_first_carousel") and last_ms and last_ms in PRODUCTS:
-            print(f"🚨 [FIRST CAROUSEL FOR PRODUCT] Chưa gửi carousel cho sản phẩm {last_ms}")
-            print(f"🚨 [FIRST CAROUSEL RULE] BỎ QUA nội dung '{text[:50]}...', gửi carousel cho {last_ms}")
-            
-            # GỬI CAROUSEL CHO SẢN PHẨM ĐÃ ĐƯỢC XÁC ĐỊNH
-            send_single_product_carousel(uid, last_ms)
-            
-            # KHÔNG XỬ LÝ TIN NHẮN NÀY BẰNG GPT
-            ctx["processing_lock"] = False
-            return
-        
-        # TỪ TIN NHẮN THỨ 2 TRỞ ĐI: LUÔN DÙNG GPT FUNCTION CALLING
-        print(f"✅ [GPT REQUIRED] Tin nhắn thứ {message_count} từ user {uid}, BẮT BUỘC dùng GPT")
-        
         # Xử lý order state nếu có
         if handle_order_form_step(uid, text):
             ctx["processing_lock"] = False
             return
         
-        # Gọi GPT function calling
-        handle_text_with_function_calling(uid, text)
+        # Xác định MS hiện tại
+        current_ms = ctx.get("last_ms")
+        
+        # ƯU TIÊN 1: Kiểm tra nếu đã có MS từ trước (từ feed comment, catalog, ads, v.v.)
+        if current_ms and current_ms in PRODUCTS:
+            print(f"[HAS MS FROM CONTEXT] User {uid} đã có MS từ context: {current_ms}")
+            
+            # Gửi carousel nếu chưa gửi
+            if not ctx.get("has_sent_first_carousel"):
+                print(f"🚨 [FIRST CAROUSEL FOR PRODUCT] Chưa gửi carousel cho sản phẩm {current_ms}")
+                send_single_product_carousel(uid, current_ms)
+                ctx["has_sent_first_carousel"] = True
+            
+            # Dùng GPT để trả lời ngay
+            print(f"✅ [GPT REQUIRED] User {uid} đã có MS {current_ms}, dùng GPT trả lời")
+            handle_text_with_function_calling(uid, text)
+            ctx["processing_lock"] = False
+            return
+        
+        # ƯU TIÊN 2: Tìm MS từ text (nếu có tiền tố)
+        detected_ms = detect_ms_from_text(text)
+        if detected_ms and detected_ms in PRODUCTS:
+            print(f"[MS DETECTED FROM TEXT] Phát hiện MS từ tin nhắn: {detected_ms}")
+            
+            # Cập nhật context với MS mới
+            update_context_with_new_ms(uid, detected_ms, "text_detection")
+            
+            # Gửi carousel
+            send_single_product_carousel(uid, detected_ms)
+            ctx["has_sent_first_carousel"] = True
+            
+            # Dùng GPT để trả lời ngay
+            print(f"✅ [GPT REQUIRED] MS mới được phát hiện, dùng GPT trả lời")
+            handle_text_with_function_calling(uid, text)
+            ctx["processing_lock"] = False
+            return
+        
+        # ƯU TIÊN 3: Tìm số trong tin nhắn với tiền tố
+        text_norm = normalize_vietnamese(text.lower())
+        numbers = re.findall(r'\b(?:ms|mã|sp|ma|san pham)\s*(\d{1,6})\b', text_norm, re.IGNORECASE)
+        for num in numbers:
+            clean_num = num.lstrip('0')
+            if clean_num and clean_num in PRODUCTS_BY_NUMBER:
+                detected_ms = PRODUCTS_BY_NUMBER[clean_num]
+                print(f"[MS FALLBACK] Tìm thấy MS từ tiền tố + số: {detected_ms}")
+                
+                # Cập nhật context với MS mới
+                update_context_with_new_ms(uid, detected_ms, "text_detection")
+                
+                # Gửi carousel
+                send_single_product_carousel(uid, detected_ms)
+                ctx["has_sent_first_carousel"] = True
+                
+                # Dùng GPT để trả lời ngay
+                print(f"✅ [GPT REQUIRED] MS mới được phát hiện từ fallback, dùng GPT trả lời")
+                handle_text_with_function_calling(uid, text)
+                ctx["processing_lock"] = False
+                return
+        
+        # Nếu không tìm thấy MS từ bất kỳ nguồn nào
+        print(f"[NO MS DETECTED] Không tìm thấy MS từ tin nhắn: {text}")
+        
+        # Kiểm tra nếu tin nhắn là câu hỏi chung (không có MS)
+        general_questions = ['giá', 'bao nhiêu', 'màu gì', 'size nào', 'còn hàng', 'đặt hàng', 'mua', 'tư vấn']
+        if any(keyword in text_norm for keyword in general_questions):
+            # Yêu cầu khách gửi MS cụ thể
+            send_message(uid, "Dạ, để em tư vấn chính xác cho anh/chị, vui lòng cho em biết mã sản phẩm (ví dụ: MS000034) hoặc gửi ảnh sản phẩm ạ! 🤗")
+        else:
+            # Gợi ý khách gửi MS hoặc ảnh
+            send_message(uid, "Dạ em chưa biết anh/chị đang hỏi về sản phẩm nào. Vui lòng cho em biết mã sản phẩm (ví dụ: MS000034) hoặc gửi ảnh sản phẩm ạ! 🤗")
 
     except Exception as e:
         print(f"Error in handle_text for {uid}: {e}")
@@ -2447,40 +2544,15 @@ def handle_image(uid: str, image_url: str):
     if found_ms:
         print(f"[IMAGE PRODUCT FOUND] Tìm thấy sản phẩm {found_ms} từ ảnh")
         
-        # SỬ DỤNG HÀM MỚI ĐỂ CẬP NHẬT MS VÀ RESET COUNTER
+        # Cập nhật context với MS mới
         update_context_with_new_ms(uid, found_ms, "image_search")
-        
-        # Gửi thông báo tìm thấy
-        # LẤY TÊN SẢN PHẨM (KHÔNG BAO GỒM MÃ SẢN PHẨM)
-        product_name = PRODUCTS[found_ms].get("Ten", "")
-        if f"[{found_ms}]" in product_name or found_ms in product_name:
-            product_name = product_name.replace(f"[{found_ms}]", "").replace(found_ms, "").strip()
-        
-        send_message(uid, f"✅ Em đã tìm thấy sản phẩm phù hợp với ảnh!\n\n📦 **{product_name}**")
         
         # Gửi carousel sản phẩm đã tìm thấy
         send_single_product_carousel(uid, found_ms)
         
-        # Gửi quick reply để hỏi thêm thông tin
-        quick_replies = [
-            {
-                "content_type": "text",
-                "title": "💰 Giá bao nhiêu?",
-                "payload": f"PRICE_{found_ms}"
-            },
-            {
-                "content_type": "text",
-                "title": "🎨 Màu gì có?",
-                "payload": f"COLOR_{found_ms}"
-            },
-            {
-                "content_type": "text",
-                "title": "📏 Size nào?",
-                "payload": f"SIZE_{found_ms}"
-            }
-        ]
-        
-        send_quick_replies(uid, "Anh/chị muốn hỏi thêm thông tin gì về sản phẩm này ạ?", quick_replies)
+        # Dùng GPT để giới thiệu sản phẩm
+        print(f"✅ [GPT REQUIRED] Tìm thấy sản phẩm từ ảnh, dùng GPT giới thiệu")
+        handle_text_with_function_calling(uid, "Giới thiệu sản phẩm này cho tôi")
         
     else:
         print(f"[IMAGE PRODUCT NOT FOUND] Không tìm thấy sản phẩm từ ảnh")
@@ -4696,6 +4768,14 @@ if __name__ == "__main__":
     print(f"🔴 Đã xóa logic xử lý Fchat echo trong webhook handler")
     print(f"🔴 Chỉ xử lý echo từ bot (bỏ qua)")
     print(f"🔴 Echo từ người dùng (comment) đã được xử lý qua feed")
+    print("=" * 80)
+    
+    print("🔴 CẢI TIẾN MỚI: GPT TRẢ LỜI NGAY TỪ TIN NHẮN ĐẦU TIÊN")
+    print("=" * 80)
+    print(f"🔴 1. Nếu đã có MS trong context: Dùng GPT ngay và gửi carousel nếu chưa gửi")
+    print(f"🔴 2. Nếu chưa có MS: Tìm MS từ tin nhắn, nếu tìm thấy thì cập nhật context, gửi carousel và dùng GPT")
+    print(f"🔴 3. Nếu không tìm thấy MS: Yêu cầu khách gửi MS hoặc ảnh sản phẩm")
+    print(f"🔴 4. Tin nhắn tiếp thị sau comment: Sử dụng GPT để tạo tin nhắn dựa trên ưu điểm sản phẩm")
     print("=" * 80)
     
     load_products()
