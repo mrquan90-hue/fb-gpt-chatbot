@@ -4890,7 +4890,7 @@ def order_form():
                             <option value="Trà Vinh">Trà Vinh</option>
                             <option value="Tuyên Quang">Tuyên Quang</option>
                             <option value="Vĩnh Long">Vĩnh Long</option>
-            <option value="Vĩnh Phúc">Vĩnh Phúc</option>
+                            <option value="Vĩnh Phúc">Vĩnh Phúc</option>
                             <option value="Yên Bái">Yên Bái</option>
                             <option value="Phú Yên">Phú Yên</option>
                         </select>
@@ -5746,42 +5746,25 @@ if __name__ == "__main__":
     print(f"🔴 1. Static HTML: Form load ngay lập tức với CSS inline")
     print(f"🔴 2. Placeholder image: Sử dụng base64 SVG để không chờ load ảnh")
     print(f"🔴 3. Static address list: Sử dụng danh sách tỉnh/thành static thay vì gọi API")
-    print(f"🔴 4. Lazy loading: Ảnh thật chỉ load sau khi trang đã hiển thị")
-    print(f"🔴 5. Optimized JS: JavaScript tối thiểu, chạy ngay sau khi DOM ready")
-    print(f"🔴 6. Cache headers: Headers để browser cache hiệu quả")
+    print(f"🔴 4. Lazy loading: Ảnh sản phẩm load sau khi page hiển thị")
     print("=" * 80)
     
-    print("🔴 FIX LỖI REGEX SYNTAX WARNING")
+    print("🔴 CẢI TIẾN QUAN TRỌNG: FEED COMMENT PROCESSING")
     print("=" * 80)
-    print(f"🔴 Đã sửa tất cả pattern regex thành raw string (r'...')")
-    print(f"🔴 Không ảnh hưởng logic: Các regex vẫn hoạt động chính xác")
-    print(f"🔴 Fix warnings: Không còn cảnh báo SyntaxWarning trong log")
-    print("=" * 80)
-    
-    print("🔴 TÍNH NĂNG MỚI: XỬ LÝ COMMENT TỪ FEED (ĐÃ SỬA LỖI)")
-    print("=" * 80)
-    print(f"🔴 1. Feed Comment Processing: Tự động phát hiện MS khi user comment")
-    print(f"🔴 2. Logic: Lấy post_id → Lấy nội dung bài viết → Trích xuất MS từ caption (CHỈ DÙNG REGEX)")
-    print(f"🔴 3. Auto Reply: Gửi tin nhắn giới thiệu sản phẩm chi tiết khi user comment lần đầu")
-    print(f"🔴 4. Context Update: Reset counter để áp dụng first message rule")
-    print(f"🔴 5. Test Endpoint: /test-feed-comment?post_id=...")
-    print(f"🔴 6. Debug Endpoint: /debug-feed-comment?post_id=...")
+    print(f"🔴 1. Nhận comment từ feed: Lấy MS từ caption bài viết gốc")
+    print(f"🔴 2. Chỉ dùng regex: Không phụ thuộc vào việc load products")
+    print(f"🔴 3. Auto reply thông minh: GPT tạo tin nhắn tiếp thị dựa trên ưu điểm sản phẩm")
+    print(f"🔴 4. Chỉ reply 1 lần: Chỉ gửi tin nhắn đầu tiên, sau đó để khách chủ động nhắn tin")
+    print(f"🔴 5. Cập nhật context: Tự động cập nhật MS và reset counter khi có comment mới")
     print("=" * 80)
     
-    print("🔴 TÍNH NĂNG MỚI: FACEBOOK CONVERSION API TỐI ƯU QUẢNG CÁO")
+    print("🔴 CẢI TIẾN QUAN TRỌNG: FACEBOOK CONVERSION API (ASYNC)")
     print("=" * 80)
-    print(f"🔴 1. Async Processing: Xử lý sự kiện bất đồng bộ qua queue, không làm chậm bot")
-    print(f"🔴 2. Smart Cache: Chỉ gửi ViewContent 1 lần mỗi 30 phút cho cùng user + product")
-    print(f"🔴 3. Funnel đầy đủ: ViewContent → AddToCart → InitiateCheckout → Purchase")
-    print(f"🔴 4. Queue Management: Giới hạn 1000 sự kiện, tự động bỏ qua khi queue đầy")
-    print(f"🔴 5. Test Endpoint: /test-facebook-capi?uid=...&ms=...")
-    print(f"🔴 6. Queue Status: /facebook-queue-status")
-    print(f"🔴 7. Biến môi trường cần: FACEBOOK_PIXEL_ID, FACEBOOK_ACCESS_TOKEN")
+    print(f"🔴 1. Async processing: Queue events để xử lý bất đồng bộ, không block bot")
+    print(f"🔴 2. Smart cache: ViewContent chỉ gửi 1 lần mỗi 30 phút cho cùng user + product")
+    print(f"🔴 3. All events tracked: ViewContent, AddToCart, InitiateCheckout, Purchase")
+    print(f"🔴 4. Thông minh: Tự động gửi từ carousel, order button, order form, order completion")
     print("=" * 80)
     
-    load_products()
-    
-    # Lấy port từ biến môi trường
     port = get_port()
-    print(f"🟢 Đang khởi động server trên port: {port}")
     app.run(host="0.0.0.0", port=port, debug=False)
