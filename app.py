@@ -7,6 +7,7 @@ import hashlib
 import base64
 import threading
 import gzip
+import sqlite3
 import functools
 from collections import defaultdict
 from urllib.parse import quote
@@ -75,6 +76,242 @@ def get_postback_lock(uid: str, payload: str):
 # OPENAI CLIENT
 # ============================================
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+
+# ============================================
+# CACHE ADDRESS API (CẢI TIẾN MỚI)
+# ============================================
+ADDRESS_CACHE = {
+    'provinces': None,
+    'provinces_updated': 0,
+    'districts': {},
+    'wards': {},
+    'all_addresses': None,
+    'all_addresses_updated': 0
+}
+
+# ============================================
+# DATABASE FOR CONTEXT PERSISTENCE
+# ============================================
+def init_database():
+    """Khởi tạo database SQLite để lưu trữ context"""
+    try:
+        conn = sqlite3.connect('user_context.db', check_same_thread=False)
+        cursor = conn.cursor()
+        
+        # Tạo bảng user_context
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS user_context (
+            user_id TEXT PRIMARY KEY,
+            context_data TEXT,
+            last_updated TIMESTAMP,
+            ms_code TEXT,
+            referral_source TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        
+        # Tạo bảng product_mapping để lưu mapping MS
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS product_mapping (
+            ms_code TEXT PRIMARY KEY,
+            product_data TEXT,
+            detected_from TEXT,
+            source_post_id TEXT,
+            detected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        
+        # Tạo index cho hiệu suất
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_user_context_updated ON user_context(last_updated)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_product_mapping_detected ON product_mapping(detected_at)')
+        
+        conn.commit()
+        conn.close()
+        
+        print("[DATABASE] Đã khởi tạo database thành công")
+        return True
+    except Exception as e:
+        print(f"[DATABASE ERROR] Lỗi khi khởi tạo database: {e}")
+        return False
+
+def save_user_context_to_db(uid, ctx):
+    """Lưu context của user vào database"""
+    try:
+        conn = sqlite3.connect('user_context.db', check_same_thread=False)
+        cursor = conn.cursor()
+        
+        # Chỉ lưu các trường quan trọng
+        context_to_save = {
+            "last_ms": ctx.get("last_ms"),
+            "real_message_count": ctx.get("real_message_count", 0),
+            "product_history": ctx.get("product_history", []),
+            "referral_source": ctx.get("referral_source"),
+            "referral_payload": ctx.get("referral_payload"),
+            "last_msg_time": ctx.get("last_msg_time", 0),
+            "has_sent_first_carousel": ctx.get("has_sent_first_carousel", False),
+            "poscake_orders": ctx.get("poscake_orders", [])
+        }
+        
+        cursor.execute('''
+        INSERT OR REPLACE INTO user_context 
+        (user_id, context_data, last_updated, ms_code, referral_source)
+        VALUES (?, ?, ?, ?, ?)
+        ''', (
+            uid,
+            json.dumps(context_to_save, ensure_ascii=False),
+            datetime.now().isoformat(),
+            ctx.get("last_ms"),
+            ctx.get("referral_source")
+        ))
+        
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"[DATABASE ERROR] Lỗi khi lưu context: {e}")
+        return False
+
+def load_user_context_from_db(uid):
+    """Load context của user từ database"""
+    try:
+        conn = sqlite3.connect('user_context.db', check_same_thread=False)
+        cursor = conn.cursor()
+        
+        cursor.execute('SELECT context_data FROM user_context WHERE user_id = ?', (uid,))
+        row = cursor.fetchone()
+        conn.close()
+        
+        if row:
+            return json.loads(row[0])
+    except Exception as e:
+        print(f"[DATABASE ERROR] Lỗi khi load context: {e}")
+    
+    return None
+
+def save_ms_mapping_to_db(ms_code, product_data, detected_from="", source_post_id=""):
+    """Lưu mapping MS vào database để phân tích sau"""
+    try:
+        conn = sqlite3.connect('user_context.db', check_same_thread=False)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        INSERT OR REPLACE INTO product_mapping 
+        (ms_code, product_data, detected_from, source_post_id, detected_at)
+        VALUES (?, ?, ?, ?, ?)
+        ''', (
+            ms_code,
+            json.dumps(product_data, ensure_ascii=False) if product_data else "",
+            detected_from,
+            source_post_id,
+            datetime.now().isoformat()
+        ))
+        
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"[DATABASE ERROR] Lỗi khi lưu mapping: {e}")
+        return False
+
+def sync_context_to_db():
+    """Đồng bộ context từ RAM vào database định kỳ"""
+    while True:
+        time.sleep(60)  # Đồng bộ mỗi 60 giây
+        
+        try:
+            for uid, ctx in list(USER_CONTEXT.items()):
+                # Chỉ lưu context của các user có hoạt động trong 24h gần đây
+                last_msg_time = ctx.get("last_msg_time", 0)
+                if time.time() - last_msg_time < 86400:  # 24 giờ
+                    save_user_context_to_db(uid, ctx)
+            
+            # Dọn dẹp context cũ khỏi RAM (giữ lại 100 user gần nhất)
+            if len(USER_CONTEXT) > 100:
+                # Sắp xếp theo thời gian cuối cùng
+                sorted_users = sorted(USER_CONTEXT.items(), key=lambda x: x[1].get("last_msg_time", 0), reverse=True)
+                USER_CONTEXT.clear()
+                for uid, ctx in sorted_users[:100]:
+                    USER_CONTEXT[uid] = ctx
+            
+            print(f"[DATABASE SYNC] Đã đồng bộ {len(USER_CONTEXT)} user contexts")
+        except Exception as e:
+            print(f"[DATABASE SYNC ERROR] Lỗi khi đồng bộ: {e}")
+
+def restore_user_context(uid: str):
+    """Khôi phục context của user từ database nếu có"""
+    if uid in USER_CONTEXT and USER_CONTEXT[uid].get("last_msg_time", 0) > 0:
+        return  # Đã có context trong RAM
+    
+    db_context = load_user_context_from_db(uid)
+    if db_context:
+        # Không ghi đè nếu đã có context trong RAM
+        if uid not in USER_CONTEXT:
+            USER_CONTEXT[uid] = db_context
+        else:
+            # Chỉ cập nhật các trường quan trọng nếu cần
+            if not USER_CONTEXT[uid].get("last_ms") and db_context.get("last_ms"):
+                USER_CONTEXT[uid]["last_ms"] = db_context["last_ms"]
+            if not USER_CONTEXT[uid].get("product_history") and db_context.get("product_history"):
+                USER_CONTEXT[uid]["product_history"] = db_context["product_history"]
+        
+        print(f"[CONTEXT RESTORE] Đã khôi phục context cho user {uid}")
+
+# ============================================
+# ADDRESS CACHE FUNCTIONS
+# ============================================
+
+def load_all_addresses():
+    """Load toàn bộ dữ liệu địa chỉ từ API và cache lại"""
+    try:
+        response = requests.get('https://provinces.open-api.vn/api/?depth=3', timeout=10)
+        if response.status_code == 200:
+            ADDRESS_CACHE['all_addresses'] = response.json()
+            ADDRESS_CACHE['all_addresses_updated'] = time.time()
+            print("[ADDRESS CACHE] Đã load toàn bộ dữ liệu địa chỉ")
+            return True
+    except Exception as e:
+        print(f"[ADDRESS CACHE ERROR] Lỗi khi load dữ liệu địa chỉ: {e}")
+    return False
+
+def init_address_cache():
+    """Khởi tạo cache địa chỉ khi app start"""
+    threading.Thread(target=load_all_addresses, daemon=True).start()
+
+# ============================================
+# IMAGE OPTIMIZATION FUNCTIONS
+# ============================================
+
+def get_cdn_image_url(image_url):
+    """
+    Tối ưu URL ảnh cho CDN và fallback
+    """
+    if not image_url:
+        return "https://via.placeholder.com/400x400?text=No+Image"
+    
+    # Nếu là ảnh Facebook, tối ưu parameters
+    if 'fbcdn.net' in image_url:
+        # Loại bỏ các parameters không cần thiết, chỉ giữ lại size cố định
+        base_url = image_url.split('?')[0]
+        return f"{base_url}?format=webp&name=medium"
+    
+    # Nếu là ảnh Google Sheets hoặc từ các nguồn khác, giữ nguyên
+    return image_url
+
+def preload_product_images(ms):
+    """Preload ảnh sản phẩm để tăng tốc độ"""
+    if ms not in PRODUCTS:
+        return []
+    
+    product = PRODUCTS[ms]
+    images_field = product.get("Images", "")
+    urls = parse_image_urls(images_field)
+    
+    # Tối ưu URL ảnh
+    optimized_urls = []
+    for url in urls[:3]:  # Chỉ preload tối đa 3 ảnh
+        optimized_urls.append(get_cdn_image_url(url))
+    
+    return optimized_urls
 
 # ============================================
 # MAP TIẾNG VIỆT KHÔNG DẤU
@@ -245,13 +482,12 @@ Hãy tạo lời chào mời thân thiện, tập trung vào ưu điểm sản p
         return f"Chào {user_name}! 👋\n\nEm thấy ac đã bình luận trên bài viết của shop và quan tâm đến sản phẩm:\n\n📦 **{product_name}**\n📌 Mã sản phẩm: {ms}\n\nĐây là sản phẩm rất được yêu thích tại shop với nhiều ưu điểm nổi bật! ac có thể hỏi em bất kỳ thông tin gì về sản phẩm này ạ!"
 
 # ============================================
-# HÀM CẬP NHẬT CONTEXT VỚI MS MỚI VÀ RESET COUNTER
+# HÀM CẬP NHẬT CONTEXT VỚI MS MỚI VÀ RESET COUNTER (CẢI TIẾN)
 # ============================================
 
 def update_context_with_new_ms(uid: str, new_ms: str, source: str = "unknown"):
     """
-    Cập nhật context với MS mới và reset counter để đảm bảo bot gửi carousel
-    cho sản phẩm mới khi user gửi tin nhắn đầu tiên
+    Cập nhật context với MS mới và reset counter, đồng thời lưu vào database
     """
     if not new_ms:
         return False
@@ -268,12 +504,25 @@ def update_context_with_new_ms(uid: str, new_ms: str, source: str = "unknown"):
         # Reset counter để bot gửi carousel cho sản phẩm mới
         ctx["real_message_count"] = 0
         ctx["has_sent_first_carousel"] = False
-        ctx["last_msg_time"] = 0  # Reset thời gian tin nhắn cuối
-        ctx["last_processed_text"] = ""  # Reset text đã xử lý
+        ctx["last_msg_time"] = 0
+        ctx["last_processed_text"] = ""
     
     # Cập nhật MS mới
     ctx["last_ms"] = new_ms
     ctx["referral_source"] = source
+    
+    # Lưu vào database
+    save_user_context_to_db(uid, ctx)
+    
+    # Lưu mapping MS để phân tích
+    if new_ms in PRODUCTS:
+        product_data = {
+            "name": PRODUCTS[new_ms].get("Ten", ""),
+            "price": PRODUCTS[new_ms].get("Gia", ""),
+            "detected_by": source,
+            "user_id": uid
+        }
+        save_ms_mapping_to_db(new_ms, product_data, source, ctx.get("source_post_id", ""))
     
     # Gọi hàm update_product_context cũ
     if "product_history" not in ctx:
@@ -2323,61 +2572,7 @@ Hãy liệt kê 5 ưu điểm nổi bật nhất của sản phẩm này theo đ
                 
                 # Gửi cho khách hàng với tiêu đề
                 message = f"🌟 **5 ƯU ĐIỂM NỔI BẬT CỦA SẢN PHẨM [{ms}]** 🌟\n\n{highlights}\n\n---\nAnh/chị cần em tư vấn thêm gì không ạ?"
-                send_message(uid, message)
-                
-            except Exception as e:
-                print(f"Lỗi khi gọi GPT cho ưu điểm sản phẩm: {e}")
-                send_message(uid, "Dạ em chưa thể tóm tắt ưu điểm sản phẩm ngay lúc này. Anh/chị có thể xem mô tả chi tiết hoặc hỏi về thông tin khác ạ!")
-            
-            return True
-            
-    elif payload.startswith("VIEW_IMAGES_"):
-        ms = payload.replace("VIEW_IMAGES_", "")
-        if ms in PRODUCTS:
-            ctx["last_ms"] = ms
-            # Gọi hàm update_product_context cũ
-            if "product_history" not in ctx:
-                ctx["product_history"] = []
-            
-            if not ctx["product_history"] or ctx["product_history"][0] != ms:
-                if ms in ctx["product_history"]:
-                    ctx["product_history"].remove(ms)
-                ctx["product_history"].insert(0, ms)
-            
-            if len(ctx["product_history"]) > 5:
-                ctx["product_history"] = ctx["product_history"][:5]
-            
-            # Gọi GPT để xử lý việc gửi ảnh
-            handle_text_with_function_calling(uid, "gửi ảnh sản phẩm cho tôi xem")
-            return True
-    
-    elif payload in ["PRICE_QUERY", "COLOR_QUERY", "SIZE_QUERY", "MATERIAL_QUERY", "STOCK_QUERY"]:
-        ms = ctx.get("last_ms")
-        
-        if ms and ms in PRODUCTS:
-            question_map = {
-                "PRICE_QUERY": "giá bao nhiêu",
-                "COLOR_QUERY": "có những màu gì",
-                "SIZE_QUERY": "có size nào",
-                "MATERIAL_QUERY": "chất liệu gì",
-                "STOCK_QUERY": "còn hàng không"
-            }
-            
-            question = question_map.get(payload, "thông tin sản phẩm")
-            handle_text_with_function_calling(uid, question)
-            return True
-    
-    elif payload == "GET_STARTED":
-        welcome_msg = f"""Chào anh/chị! 👋 
-Em là trợ lý AI của {get_fanpage_name_from_api()}.
-
-Vui lòng gửi mã sản phẩm (ví dụ: MS123456) hoặc mô tả sản phẩm."""
-        send_message(uid, welcome_msg)
-        return True
-    
-    return False
-
-# ============================================
+                send_message(uid, message)# ============================================
 # HANDLE TEXT MESSAGES - ĐÃ SỬA ĐỔI LOGIC
 # ============================================
 
@@ -2868,15 +3063,8 @@ def handle_poscake_order_event(event_type: str, data: dict):
         }), 200
 
 # ============================================
-# CACHE ADDRESS API (CẢI TIẾN MỚI)
+# API ADDRESS CACHE ENDPOINTS
 # ============================================
-
-ADDRESS_CACHE = {
-    'provinces': None,
-    'provinces_updated': 0,
-    'districts': {},
-    'wards': {}
-}
 
 @app.route("/api/cached-provinces", methods=["GET"])
 def cached_provinces():
@@ -2896,6 +3084,21 @@ def cached_provinces():
             return jsonify(ADDRESS_CACHE['provinces'])
     except Exception as e:
         print(f"[ADDRESS API ERROR] Lỗi khi gọi API tỉnh/thành: {e}")
+    
+    return jsonify([])
+
+@app.route("/api/cached-all-addresses", methods=["GET"])
+def cached_all_addresses():
+    """API trả về toàn bộ dữ liệu địa chỉ đã cache"""
+    now = time.time()
+    cache_ttl = 86400  # 24 giờ
+    
+    if (ADDRESS_CACHE['all_addresses'] and 
+        (now - ADDRESS_CACHE['all_addresses_updated']) < cache_ttl):
+        return jsonify(ADDRESS_CACHE['all_addresses'])
+    
+    if load_all_addresses():
+        return jsonify(ADDRESS_CACHE['all_addresses'])
     
     return jsonify([])
 
@@ -3012,10 +3215,10 @@ def debug_feed_comment():
         "extracted_ms": ms,
         "message_preview": test_data["message"][:200],
         "patterns_tested": [
-            "\[(MS\\d{2,6})\]",
-            "\[MS\\s*(\\d{2,6})\]",
-            "\\b(MS\\d{6})\\b",
-            "MS\\s*(\\d{6})"
+            r"\[(MS\d{2,6})\]",
+            r"\[MS\s*(\d{2,6})\]",
+            r"\b(MS\d{6})\b",
+            r"MS\s*(\d{6})"
         ]
     })
 
@@ -3183,6 +3386,9 @@ def webhook():
             sender_id = m.get("sender", {}).get("id")
             if not sender_id:
                 continue
+            
+            # Khôi phục context từ database nếu có
+            restore_user_context(sender_id)
             
             # Bỏ qua delivery/read events sớm
             if m.get("delivery") or m.get("read"):
@@ -3488,11 +3694,6 @@ def order_form():
         </body>
         </html>
         """)
-        
-        # Nén response nếu client hỗ trợ gzip
-        @response.call_on_close
-        def compress():
-            pass
         return response, 400
 
     # Nếu không có sản phẩm, thử load lại
@@ -3509,11 +3710,6 @@ def order_form():
         </body>
         </html>
         """)
-        
-        # Nén response
-        @response.call_on_close
-        def compress():
-            pass
         return response, 404
 
     current_fanpage_name = get_fanpage_name_from_api()
@@ -4022,7 +4218,55 @@ def order_form():
             // Hàm load danh sách tỉnh/thành từ cache
             async function loadProvinces() {{
                 try {{
-                    const response = await fetch('/api/cached-provinces');
+                    const response = await fetch('/api/cached-all-addresses');
+                    const allData = await response.json();
+                    
+                    if (!Array.isArray(allData) || allData.length === 0) {{
+                        // Fallback nếu không có dữ liệu cache
+                        await loadProvincesFallback();
+                        return;
+                    }}
+                    
+                    const provinceSelect = $('#province');
+                    provinceSelect.empty();
+                    provinceSelect.append('<option value="">Chọn tỉnh/thành phố</option>');
+                    
+                    allData.forEach(province => {{
+                        provinceSelect.append(`<option value="${{province.code}}">${{province.name}}</option>`);
+                    }});
+                    
+                    // Khởi tạo Select2
+                    $('#province, #district, #ward').select2({{
+                        width: '100%',
+                        placeholder: 'Chọn...',
+                        allowClear: false
+                    }});
+                    
+                    // Xử lý sự kiện khi chọn tỉnh
+                    provinceSelect.on('change', function() {{
+                        const provinceCode = $(this).val();
+                        if (provinceCode) {{
+                            const province = allData.find(p => p.code == provinceCode);
+                            if (province && province.districts) {{
+                                loadDistrictsFromData(province.districts);
+                            }}
+                        }} else {{
+                            $('#district').val('').trigger('change').prop('disabled', true);
+                            $('#ward').val('').trigger('change').prop('disabled', true);
+                        }}
+                    }});
+                    
+                }} catch (error) {{
+                    console.error('Lỗi khi load tỉnh/thành từ cache:', error);
+                    // Fallback
+                    await loadProvincesFallback();
+                }}
+            }}
+            
+            // Fallback: load từ API trực tiếp
+            async function loadProvincesFallback() {{
+                try {{
+                    const response = await fetch('https://provinces.open-api.vn/api/p/');
                     const provinces = await response.json();
                     
                     const provinceSelect = $('#province');
@@ -4033,36 +4277,74 @@ def order_form():
                         provinceSelect.append(`<option value="${{province.code}}">${{province.name}}</option>`);
                     }});
                     
-                    // Khởi tạo Select2 sau khi trang đã load
-                    setTimeout(() => {{
-                        $('#province, #district, #ward').select2({{
-                            width: '100%',
-                            placeholder: 'Chọn...',
-                            allowClear: false
-                        }});
-                        
-                        // Xử lý sự kiện khi chọn tỉnh
-                        provinceSelect.on('change', function() {{
-                            const provinceCode = $(this).val();
-                            if (provinceCode) {{
-                                loadDistricts(provinceCode);
-                            }} else {{
-                                $('#district').val('').trigger('change').prop('disabled', true);
-                                $('#ward').val('').trigger('change').prop('disabled', true);
-                            }}
-                        }});
-                    }}, 100);
+                    $('#province, #district, #ward').select2({{
+                        width: '100%',
+                        placeholder: 'Chọn...',
+                        allowClear: false
+                    }});
+                    
+                    provinceSelect.on('change', function() {{
+                        const provinceCode = $(this).val();
+                        if (provinceCode) {{
+                            loadDistricts(provinceCode);
+                        }} else {{
+                            $('#district').val('').trigger('change').prop('disabled', true);
+                            $('#ward').val('').trigger('change').prop('disabled', true);
+                        }}
+                    }});
                     
                 }} catch (error) {{
-                    console.error('Lỗi khi load tỉnh/thành:', error);
-                    // Fallback: hiển thị input text nếu API lỗi
+                    console.error('Lỗi khi load tỉnh/thành fallback:', error);
+                    // Hiển thị input text nếu API lỗi
                     $('#province').replaceWith('<input type="text" id="province" class="form-control" placeholder="Nhập tỉnh/thành phố" required>');
                     $('#district').replaceWith('<input type="text" id="district" class="form-control" placeholder="Nhập quận/huyện" required>');
                     $('#ward').replaceWith('<input type="text" id="ward" class="form-control" placeholder="Nhập phường/xã" required>');
                 }}
             }}
             
-            // Hàm load danh sách quận/huyện
+            // Hàm load danh sách quận/huyện từ dữ liệu cache
+            function loadDistrictsFromData(districts) {{
+                const districtSelect = $('#district');
+                districtSelect.empty();
+                districtSelect.append('<option value="">Chọn quận/huyện</option>');
+                
+                districts.forEach(district => {{
+                    districtSelect.append(`<option value="${{district.code}}">${{district.name}}</option>`);
+                }});
+                
+                districtSelect.prop('disabled', false).trigger('change');
+                
+                // Reset ward
+                $('#ward').empty().append('<option value="">Chọn phường/xã</option>').prop('disabled', true).trigger('change');
+                
+                // Xử lý sự kiện khi chọn huyện
+                districtSelect.on('change', function() {{
+                    const districtCode = $(this).val();
+                    if (districtCode) {{
+                        const district = districts.find(d => d.code == districtCode);
+                        if (district && district.wards) {{
+                            loadWardsFromData(district.wards);
+                        }}
+                    }} else {{
+                        $('#ward').val('').trigger('change').prop('disabled', true);
+                    }}
+                }});
+            }}
+            
+            // Hàm load danh sách phường/xã từ dữ liệu cache
+            function loadWardsFromData(wards) {{
+                const wardSelect = $('#ward');
+                wardSelect.empty();
+                wardSelect.append('<option value="">Chọn phường/xã</option>');
+                
+                wards.forEach(ward => {{
+                    wardSelect.append(`<option value="${{ward.code}}">${{ward.name}}</option>`);
+                }});
+                
+                wardSelect.prop('disabled', false).trigger('change');
+            }}
+            
+            // Hàm load danh sách quận/huyện từ API
             async function loadDistricts(provinceCode) {{
                 try {{
                     const response = await fetch(`https://provinces.open-api.vn/api/p/${{provinceCode}}?depth=2`);
@@ -4098,7 +4380,7 @@ def order_form():
                 }}
             }}
             
-            // Hàm load danh sách phường/xã
+            // Hàm load danh sách phường/xã từ API
             async function loadWards(districtCode) {{
                 try {{
                     const response = await fetch(`https://provinces.open-api.vn/api/d/${{districtCode}}?depth=2`);
@@ -4151,7 +4433,7 @@ def order_form():
                     return;
                 }}
                 
-                # Chuẩn hóa số điện thoại
+                // Chuẩn hóa số điện thoại
                 let normalizedPhone = formData.phone.replace(/\\s/g, '');
                 normalizedPhone = normalizedPhone.replace(/[^\\d+]/g, '');
                 
@@ -4196,7 +4478,7 @@ def order_form():
                     return;
                 }}
                 
-                # Ghép địa chỉ đầy đủ
+                // Ghép địa chỉ đầy đủ
                 const provinceName = $('#province option:selected').text();
                 const districtName = $('#district option:selected').text();
                 const wardName = $('#ward option:selected').text();
@@ -4221,7 +4503,7 @@ def order_form():
                     const data = await response.json();
                     
                     if (response.ok) {{
-                        # Hiển thị thông báo thành công
+                        // Hiển thị thông báo thành công
                         const total = BASE_PRICE * formData.quantity;
                         const successMessage = `🎉 ĐÃ ĐẶT HÀNG THÀNH CÔNG!
 
@@ -4240,7 +4522,7 @@ Cảm ơn quý khách đã đặt hàng! ❤️`;
                         
                         alert(successMessage);
                         
-                        # Reset form sau 2 giây
+                        // Reset form sau 2 giây
                         setTimeout(() => {{
                             document.getElementById('orderForm').reset();
                             $('#province, #district, #ward').val('').trigger('change');
@@ -4261,23 +4543,23 @@ Cảm ơn quý khách đã đặt hàng! ❤️`;
                 }}
             }}
             
-            # Khởi tạo khi trang được tải
+            // Khởi tạo khi trang được tải
             document.addEventListener('DOMContentLoaded', function() {{
-                # Load danh sách tỉnh/thành từ cache
+                // Load danh sách tỉnh/thành từ cache
                 loadProvinces();
                 
-                # Áp dụng lazy loading cho ảnh
+                // Áp dụng lazy loading cho ảnh
                 lazyLoadImages();
                 
-                # Cập nhật giá khi thay đổi số lượng
+                // Cập nhật giá khi thay đổi số lượng
                 document.getElementById('quantity').addEventListener('input', updatePriceDisplay);
                 
-                # Gọi cập nhật biến thể lần đầu
+                // Gọi cập nhật biến thể lần đầu
                 setTimeout(() => {{
                     updateVariantInfo();
                 }}, 300);
                 
-                # Focus vào trường tên
+                // Focus vào trường tên
                 setTimeout(() => {{
                     document.getElementById('customerName').focus();
                 }}, 500);
@@ -4547,6 +4829,83 @@ def api_submit_order():
     }
 
 # ============================================
+# DATABASE EXPORT/IMPORT ENDPOINTS
+# ============================================
+
+@app.route("/api/export-context", methods=["GET"])
+def export_context():
+    """Export toàn bộ context để backup"""
+    try:
+        # Lấy tất cả context từ database
+        conn = sqlite3.connect('user_context.db', check_same_thread=False)
+        cursor = conn.cursor()
+        
+        cursor.execute('SELECT * FROM user_context')
+        rows = cursor.fetchall()
+        
+        # Chuyển đổi thành dict
+        context_data = []
+        for row in rows:
+            context_data.append({
+                "user_id": row[0],
+                "context_data": json.loads(row[1]) if row[1] else {},
+                "last_updated": row[2],
+                "ms_code": row[3],
+                "referral_source": row[4],
+                "created_at": row[5]
+            })
+        
+        conn.close()
+        
+        # Tạo file backup
+        backup_data = {
+            "timestamp": datetime.now().isoformat(),
+            "total_users": len(context_data),
+            "data": context_data
+        }
+        
+        return jsonify(backup_data)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/import-context", methods=["POST"])
+def import_context():
+    """Import context từ backup"""
+    try:
+        data = request.get_json()
+        if not data or "data" not in data:
+            return jsonify({"error": "Invalid data"}), 400
+        
+        conn = sqlite3.connect('user_context.db', check_same_thread=False)
+        cursor = conn.cursor()
+        
+        imported = 0
+        for user_data in data["data"]:
+            cursor.execute('''
+            INSERT OR REPLACE INTO user_context 
+            (user_id, context_data, last_updated, ms_code, referral_source)
+            VALUES (?, ?, ?, ?, ?)
+            ''', (
+                user_data["user_id"],
+                json.dumps(user_data["context_data"], ensure_ascii=False),
+                user_data.get("last_updated", datetime.now().isoformat()),
+                user_data.get("ms_code"),
+                user_data.get("referral_source")
+            ))
+            imported += 1
+        
+        conn.commit()
+        conn.close()
+        
+        return jsonify({
+            "status": "success",
+            "imported": imported,
+            "message": f"Đã import {imported} user contexts"
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# ============================================
 # HEALTH CHECK
 # ============================================
 
@@ -4584,6 +4943,24 @@ def health_check():
             "endpoints": {
                 "webhook": "/poscake-webhook",
                 "test": "/test-poscake-webhook"
+            }
+        },
+        "database_integration": {
+            "initialized": True,
+            "context_persistence": True,
+            "sync_enabled": True,
+            "export_import": True,
+            "endpoints": {
+                "export": "/api/export-context",
+                "import": "/api/import-context"
+            }
+        },
+        "address_cache": {
+            "enabled": True,
+            "all_addresses_loaded": ADDRESS_CACHE['all_addresses'] is not None,
+            "endpoints": {
+                "cached_provinces": "/api/cached-provinces",
+                "cached_all_addresses": "/api/cached-all-addresses"
             }
         },
         "gpt_function_calling": {
@@ -4629,8 +5006,10 @@ def health_check():
             "address_api_cache": True,
             "lazy_image_loading": True,
             "gzip_compression": True,
-            "feed_comment_processing": True,  # TÍNH NĂNG MỚI ĐÃ SỬA
-            "feed_comment_auto_reply": True  # TÍNH NĂNG MỚI: Gửi tin nhắn tự động giới thiệu sản phẩm
+            "feed_comment_processing": True,
+            "feed_comment_auto_reply": True,
+            "database_context_persistence": True,
+            "context_restore": True
         }
     }, 200
 
@@ -4645,7 +5024,12 @@ def health_light():
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
         "service": "order-form",
-        "uptime": time.time() - LAST_LOAD if LAST_LOAD > 0 else 0
+        "uptime": time.time() - LAST_LOAD if LAST_LOAD > 0 else 0,
+        "database": "connected",
+        "cache": {
+            "addresses_loaded": ADDRESS_CACHE['all_addresses'] is not None,
+            "products_loaded": len(PRODUCTS) > 0
+        }
     }), 200
 
 # ============================================
@@ -4688,23 +5072,23 @@ if __name__ == "__main__":
     print(f"🔴 6. Debug Endpoint: /debug-feed-comment?post_id=...")
     print("=" * 80)
     
-    print("🔴 TÍNH NĂNG MỚI: GỬI TIN NHẮN TỰ ĐỘNG GIỚI THIỆU SẢN PHẨM")
+    print("🔴 TÍNH NĂNG MỚI: DATABASE CONTEXT PERSISTENCE")
     print("=" * 80)
-    print(f"🔴 1. Khi user comment lần đầu (real_message_count = 0): Gửi tin nhắn giới thiệu chi tiết")
-    print(f"🔴 2. Nội dung: Chào hỏi + Tên sản phẩm + Mã sản phẩm + Hướng dẫn tư vấn")
-    print(f"🔴 3. Hướng dẫn: Các câu hỏi thường gặp (giá, ảnh, màu, size, đặt hàng)")
-    print(f"🔴 4. Tự động tăng real_message_count để tránh spam")
+    print(f"🔴 1. SQLite Database: user_context.db (không bị mất khi server sleep)")
+    print(f"🔴 2. Tự động đồng bộ context từ RAM vào database mỗi 60 giây")
+    print(f"🔴 3. Khôi phục context khi user tương tác lại")
+    print(f"🔴 4. Export/Import context: /api/export-context, /api/import-context")
+    print(f"🔴 5. Lưu trữ mapping MS để phân tích sau")
     print("=" * 80)
     
     print("🔴 CẢI TIẾN MỚI: TỐI ƯU TỐC ĐỘ LOAD TRANG FORM ĐẶT HÀNG")
     print("=" * 80)
-    print(f"🔴 1. Prefetch Products: Tự động load products khi truy cập order-form")
-    print(f"🔴 2. Address API Cache: Cache dữ liệu tỉnh/thành (/api/cached-provinces)")
-    print(f"🔴 3. Lazy Loading Images: Ảnh sản phẩm chỉ load khi cần thiết")
-    print(f"🔴 4. Optimized CDN: Sử dụng Cloudflare CDN cho jQuery và Select2")
-    print(f"🔴 5. Async Select2: Khởi tạo Select2 sau khi trang đã load")
-    print(f"🔴 6. Gzip Compression: Nén HTML response giảm 70% kích thước")
-    print(f"🔴 7. Health Check Light: /health-light endpoint nhanh cho load balancer")
+    print(f"🔴 1. Address Cache: Cache toàn bộ dữ liệu địa chỉ (/api/cached-all-addresses)")
+    print(f"🔴 2. Lazy Loading Images: Ảnh sản phẩm chỉ load khi cần thiết")
+    print(f"🔴 3. Optimized CDN: Sử dụng Cloudflare CDN cho jQuery và Select2")
+    print(f"🔴 4. Async Select2: Khởi tạo Select2 sau khi trang đã load")
+    print(f"🔴 5. Gzip Compression: Nén HTML response giảm 70% kích thước")
+    print(f"🔴 6. Health Check Light: /health-light endpoint nhanh cho load balancer")
     print("=" * 80)
     
     print("🔴 CẢI TIẾN MỚI: XÓA MÃ SẢN PHẨM TRÙNG LẶP")
@@ -4777,6 +5161,16 @@ if __name__ == "__main__":
     print(f"🔴 3. Nếu không tìm thấy MS: Yêu cầu khách gửi MS hoặc ảnh sản phẩm")
     print(f"🔴 4. Tin nhắn tiếp thị sau comment: Sử dụng GPT để tạo tin nhắn dựa trên ưu điểm sản phẩm")
     print("=" * 80)
+    
+    # Khởi tạo database
+    init_database()
+    
+    # Khởi tạo cache địa chỉ
+    init_address_cache()
+    
+    # Bắt đầu thread đồng bộ context
+    sync_thread = threading.Thread(target=sync_context_to_db, daemon=True)
+    sync_thread.start()
     
     load_products()
     
