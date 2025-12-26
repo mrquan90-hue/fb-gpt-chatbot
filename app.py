@@ -1,5 +1,3 @@
-[file name]: app.py
-[file content begin]
 import os
 import json
 import re
