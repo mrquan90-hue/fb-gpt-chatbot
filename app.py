@@ -204,7 +204,7 @@ def generate_marketing_message(ms: str, user_name: str) -> str:
     
     if not client:
         # Fallback nếu không có GPT
-        return f"Chào {user_name}! 👋\n\nEm thấy bạn đã bình luận trên bài viết của shop và quan tâm đến sản phẩm:\n\n📦 **{product_name}**\n📌 Mã sản phẩm: {ms}\n\nĐây là sản phẩm rất được yêu thích tại shop với nhiều ưu điểm nổi bật! Bạn có thể hỏi em bất kỳ thông tin gì về sản phẩm này ạ!"
+        return f"Chào {user_name}! 👋\n\nEm thấy ac đã bình luận trên bài viết của shop và quan tâm đến sản phẩm:\n\n📦 **{product_name}**\n📌 Mã sản phẩm: {ms}\n\nĐây là sản phẩm rất được yêu thích tại shop với nhiều ưu điểm nổi bật! ac có thể hỏi em bất kỳ thông tin gì về sản phẩm này ạ!"
     
     try:
         system_prompt = f"""Bạn là nhân viên bán hàng của {get_fanpage_name_from_api()}.
@@ -242,7 +242,7 @@ Hãy tạo lời chào mời thân thiện, tập trung vào ưu điểm sản p
     except Exception as e:
         print(f"[GPT MARKETING ERROR] Lỗi khi tạo tin nhắn tiếp thị: {e}")
         # Fallback
-        return f"Chào {user_name}! 👋\n\nEm thấy bạn đã bình luận trên bài viết của shop và quan tâm đến sản phẩm:\n\n📦 **{product_name}**\n📌 Mã sản phẩm: {ms}\n\nĐây là sản phẩm rất được yêu thích tại shop với nhiều ưu điểm nổi bật! Bạn có thể hỏi em bất kỳ thông tin gì về sản phẩm này ạ!"
+        return f"Chào {user_name}! 👋\n\nEm thấy ac đã bình luận trên bài viết của shop và quan tâm đến sản phẩm:\n\n📦 **{product_name}**\n📌 Mã sản phẩm: {ms}\n\nĐây là sản phẩm rất được yêu thích tại shop với nhiều ưu điểm nổi bật! ac có thể hỏi em bất kỳ thông tin gì về sản phẩm này ạ!"
 
 # ============================================
 # HÀM CẬP NHẬT CONTEXT VỚI MS MỚI VÀ RESET COUNTER
@@ -1164,7 +1164,7 @@ def handle_feed_comment(change_data: dict):
                     if f"[{detected_ms}]" in product_name or detected_ms in product_name:
                         product_name = product_name.replace(f"[{detected_ms}]", "").replace(detected_ms, "").strip()
                     
-                    send_message(user_id, f"Chào {user_name}! 👋\n\nCảm ơn bạn đã bình luận. Sản phẩm bạn quan tâm là {product_name}. Bạn có thể hỏi em bất kỳ thông tin gì về sản phẩm này ạ!")
+                    send_message(user_id, f"Chào {user_name}! 👋\n\nCảm ơn ac đã bình luận. Sản phẩm ac quan tâm là {product_name}. ac có thể hỏi em bất kỳ thông tin gì về sản phẩm này ạ!")
                 
                 # Tăng counter để không gửi lại lần nữa
                 ctx["real_message_count"] = 1
