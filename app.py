@@ -1,21 +1,24 @@
 import os
 import json
-import logging
-from flask import Flask, request, jsonify
+import re
+import time
+import csv
+import hashlib
+import base64
+import threading
+import functools
+from collections import defaultdict
+from urllib.parse import quote
 from datetime import datetime
+from typing import Optional, Dict, Any, List, Tuple
+from io import BytesIO
+import numpy as np
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
-# ============================================
-# CẤU HÌNH LOGGING CHI TIẾT
-# ============================================
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler('webhook_debug.log')
-    ]
-)
-logger = logging.getLogger(__name__)
+import requests
+from flask import Flask, request, send_from_directory, jsonify, render_template_string, make_response
+from openai import OpenAI
 
 # ============================================
 # FLASK APP
@@ -23,319 +26,5745 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 # ============================================
-# BIẾN MÔI TRƯỜNG
+# ENV & CONFIG - THÊM POSCAKE, PAGE_ID VÀ FACEBOOK CAPI
 # ============================================
-VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "").strip()
 PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN", "").strip()
-PAGE_ID = os.getenv("PAGE_ID", "").strip()
+VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "").strip()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+GOOGLE_SHEET_CSV_URL = os.getenv("SHEET_CSV_URL", "").strip()
+DOMAIN = os.getenv("DOMAIN", "").strip() or "fb-gpt-chatbot.onrender.com"
+FANPAGE_NAME = os.getenv("FANPAGE_NAME", "Shop thời trang")
+FCHAT_WEBHOOK_URL = os.getenv("FCHAT_WEBHOOK_URL", "").strip()
+FCHAT_TOKEN = os.getenv("FCHAT_TOKEN", "").strip()
+
+# Cấu hình Poscake Webhook
+POSCAKE_API_KEY = os.getenv("POSCAKE_API_KEY", "").strip()
+POSCAKE_WEBHOOK_SECRET = os.getenv("POSCAKE_WEBHOOK_SECRET", "").strip()
+POSCAKE_STORE_ID = os.getenv("POSCAKE_STORE_ID", "").strip()
+
+# Page ID để xác định comment từ page
+PAGE_ID = os.getenv("PAGE_ID", "516937221685203").strip()
+
+# Facebook Conversion API Configuration
+FACEBOOK_PIXEL_ID = os.getenv("FACEBOOK_PIXEL_ID", "").strip()
+FACEBOOK_ACCESS_TOKEN = os.getenv("FACEBOOK_ACCESS_TOKEN", "").strip()
+FACEBOOK_API_VERSION = os.getenv("FACEBOOK_API_VERSION", "v18.0").strip()
 
 # ============================================
-# HÀM LOG CHI TIẾT
+# GOOGLE SHEETS API CONFIGURATION
 # ============================================
-def log_webhook_data(data, event_type="webhook"):
-    """Log chi tiết dữ liệu webhook nhận được"""
-    try:
-        logger.info(f"=== {event_type.upper()} DATA RECEIVED ===")
-        logger.info(f"Timestamp: {datetime.now().isoformat()}")
-        logger.info(f"Data type: {type(data)}")
-        logger.info(f"Data length: {len(str(data)) if data else 0}")
-        
-        if data:
-            # Log cấu trúc tổng quan
-            logger.info(f"Top-level keys: {list(data.keys())}")
+GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "").strip()
+GOOGLE_SHEETS_CREDENTIALS_JSON = os.getenv("GOOGLE_SHEETS_CREDENTIALS_JSON", "").strip()
+
+if not GOOGLE_SHEET_CSV_URL:
+    GOOGLE_SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/18eI8Yn-WG8xN0YK8mWqgIOvn-USBhmXBH3sR2drvWus/export?format=csv"
+
+# Tên sheet cho user context trong Google Sheets
+USER_CONTEXT_SHEET_NAME = "UserContext"
+
+# ============================================
+# APP ID CỦA BOT
+# ============================================
+BOT_APP_IDS = {"645956568292435"}
+
+# ============================================
+# FACEBOOK EVENT QUEUE FOR ASYNC PROCESSING
+# ============================================
+from queue import Queue
+
+# Queue cho sự kiện Facebook CAPI
+FACEBOOK_EVENT_QUEUE = Queue()
+FACEBOOK_WORKER_RUNNING = False
+
+def facebook_event_worker():
+    """Worker xử lý sự kiện Facebook bất đồng bộ"""
+    global FACEBOOK_WORKER_RUNNING
+    FACEBOOK_WORKER_RUNNING = True
+    
+    print(f"[FACEBOOK WORKER] Worker đã khởi động")
+    
+    while True:
+        try:
+            # Lấy sự kiện từ queue (blocking)
+            event_data = FACEBOOK_EVENT_QUEUE.get()
             
-            # Log entries
-            entries = data.get('entry', [])
-            logger.info(f"Number of entries: {len(entries)}")
+            # Nếu là tín hiệu dừng
+            if event_data is None:
+                break
             
-            for i, entry in enumerate(entries):
-                logger.info(f"\n--- Entry {i+1} ---")
-                logger.info(f"Entry ID: {entry.get('id', 'N/A')}")
-                logger.info(f"Entry time: {entry.get('time', 'N/A')}")
-                
-                # Messaging events
-                messaging_events = entry.get('messaging', [])
-                logger.info(f"Number of messaging events: {len(messaging_events)}")
-                
-                for j, event in enumerate(messaging_events):
-                    logger.info(f"\n  Messaging Event {j+1}:")
-                    logger.info(f"  Sender ID: {event.get('sender', {}).get('id', 'N/A')}")
-                    logger.info(f"  Recipient ID: {event.get('recipient', {}).get('id', 'N/A')}")
-                    logger.info(f"  Timestamp: {event.get('timestamp', 'N/A')}")
-                    
-                    if 'message' in event:
-                        logger.info("  Type: MESSAGE")
-                        msg = event['message']
-                        logger.info(f"    Message ID: {msg.get('mid', 'N/A')}")
-                        logger.info(f"    Text: {msg.get('text', 'N/A')[:100]}...")
-                        logger.info(f"    Is echo: {msg.get('is_echo', 'N/A')}")
-                        logger.info(f"    App ID: {msg.get('app_id', 'N/A')}")
-                        
-                        if 'attachments' in msg:
-                            logger.info(f"    Attachments: {len(msg['attachments'])}")
-                    
-                    elif 'postback' in event:
-                        logger.info("  Type: POSTBACK")
-                        logger.info(f"    Payload: {event['postback'].get('payload', 'N/A')}")
-                    
-                    elif 'referral' in event:
-                        logger.info("  Type: REFERRAL")
-                        referral = event['referral']
-                        logger.info(f"    Source: {referral.get('source', 'N/A')}")
-                        logger.info(f"    Ref: {referral.get('ref', 'N/A')}")
-                    
-                    elif 'read' in event:
-                        logger.info("  Type: READ")
-                    
-                    elif 'delivery' in event:
-                        logger.info("  Type: DELIVERY")
-                    
-                    elif 'order' in event:
-                        logger.info("  Type: ORDER")
-                        logger.info(f"    Order details: {json.dumps(event['order'], indent=2)}")
-                
-                # Changes events (cho feed)
-                changes = entry.get('changes', [])
-                logger.info(f"Number of changes events: {len(changes)}")
-                
-                for k, change in enumerate(changes):
-                    logger.info(f"\n  Change Event {k+1}:")
-                    logger.info(f"    Field: {change.get('field', 'N/A')}")
-                    value = change.get('value', {})
-                    
-                    if change.get('field') == 'feed':
-                        logger.info("    Type: FEED")
-                        logger.info(f"      Post ID: {value.get('post_id', 'N/A')}")
-                        logger.info(f"      Sender ID: {value.get('from', {}).get('id', 'N/A')}")
-                        logger.info(f"      Sender Name: {value.get('from', {}).get('name', 'N/A')}")
-                        logger.info(f"      Message: {value.get('message', 'N/A')[:100]}...")
-                        logger.info(f"      Item: {value.get('item', 'N/A')}")
-                        logger.info(f"      Verb: {value.get('verb', 'N/A')}")
-                        logger.info(f"      Parent ID: {value.get('parent_id', 'N/A')}")
-                        logger.info(f"      Comment ID: {value.get('comment_id', 'N/A')}")
+            # Xử lý sự kiện
+            event_type = event_data.get('event_type')
             
-            logger.info("=" * 50)
+            if event_type == 'ViewContent':
+                _send_view_content_async(event_data)
+            elif event_type == 'AddToCart':
+                _send_add_to_cart_async(event_data)
+            elif event_type == 'Purchase':
+                _send_purchase_async(event_data)
+            elif event_type == 'InitiateCheckout':
+                _send_initiate_checkout_async(event_data)
+            
+            # Đánh dấu task hoàn thành
+            FACEBOOK_EVENT_QUEUE.task_done()
+            
+        except Exception as e:
+            print(f"[FACEBOOK WORKER ERROR] {e}")
+            time.sleep(1)
     
-    except Exception as e:
-        logger.error(f"Error logging webhook data: {e}")
+    FACEBOOK_WORKER_RUNNING = False
+    print(f"[FACEBOOK WORKER] Worker đã dừng")
+
+def start_facebook_worker():
+    """Khởi động worker xử lý sự kiện Facebook"""
+    if not FACEBOOK_WORKER_RUNNING:
+        worker_thread = threading.Thread(target=facebook_event_worker, daemon=True)
+        worker_thread.start()
+        print(f"[FACEBOOK WORKER] Đã khởi động worker thread")
+        return worker_thread
+    return None
 
 # ============================================
-# ENDPOINTS
+# GLOBAL LOCKS
 # ============================================
-@app.route("/", methods=["GET"])
-def home():
-    """Trang chủ kiểm tra"""
-    return jsonify({
-        "status": "online",
-        "service": "Facebook Webhook Debug",
-        "timestamp": datetime.now().isoformat(),
-        "page_id": PAGE_ID,
-        "verify_token_configured": bool(VERIFY_TOKEN),
-        "page_access_token_configured": bool(PAGE_ACCESS_TOKEN),
-        "endpoints": {
-            "GET /": "This page",
-            "GET /health": "Health check",
-            "GET /webhook": "Facebook webhook verification",
-            "POST /webhook": "Facebook webhook events",
-            "GET /debug/env": "Check environment variables",
-            "GET /debug/log": "View recent logs"
-        }
-    }), 200
+POSTBACK_LOCKS = {}
 
-@app.route("/health", methods=["GET"])
-def health_check():
-    """Health check đơn giản"""
-    return jsonify({
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
-        "message": "Webhook debug service is running"
-    }), 200
+def get_postback_lock(uid: str, payload: str):
+    key = f"{uid}_{payload}"
+    if key not in POSTBACK_LOCKS:
+        POSTBACK_LOCKS[key] = threading.Lock()
+    return POSTBACK_LOCKS[key]
 
-@app.route("/debug/env", methods=["GET"])
-def debug_env():
-    """Kiểm tra biến môi trường (ẩn giá trị nhạy cảm)"""
-    return jsonify({
-        "PAGE_ID": PAGE_ID,
-        "VERIFY_TOKEN_SET": "YES" if VERIFY_TOKEN else "NO",
-        "VERIFY_TOKEN_LENGTH": len(VERIFY_TOKEN) if VERIFY_TOKEN else 0,
-        "PAGE_ACCESS_TOKEN_SET": "YES" if PAGE_ACCESS_TOKEN else "NO",
-        "PAGE_ACCESS_TOKEN_LENGTH": len(PAGE_ACCESS_TOKEN) if PAGE_ACCESS_TOKEN else 0,
-        "environment_keys": list(os.environ.keys())
-    }), 200
+# ============================================
+# OPENAI CLIENT
+# ============================================
+client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
-@app.route("/debug/log", methods=["GET"])
-def debug_log():
-    """Xem log gần đây"""
+# ============================================
+# PERSISTENT STORAGE FOR USER_CONTEXT - GOOGLE SHEETS
+# ============================================
+
+# Không dùng file JSON nữa, dùng Google Sheets làm database
+def init_user_context_sheet():
+    """Khởi tạo sheet UserContext nếu chưa tồn tại"""
+    if not GOOGLE_SHEET_ID or not GOOGLE_SHEETS_CREDENTIALS_JSON:
+        print(f"[INIT SHEET] Chưa cấu hình Google Sheets, bỏ qua khởi tạo UserContext sheet")
+        return
+    
     try:
-        with open('webhook_debug.log', 'r') as f:
-            lines = f.readlines()
-            recent_lines = lines[-100:]  # Lấy 100 dòng cuối
-        return jsonify({
-            "log_entries": recent_lines,
-            "total_lines": len(lines)
-        }), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route("/webhook", methods=["GET"])
-def verify_webhook():
-    """Xác minh webhook với Facebook"""
-    logger.info("=== WEBHOOK VERIFICATION REQUEST ===")
-    
-    # Log tất cả tham số
-    logger.info(f"Request args: {dict(request.args)}")
-    
-    mode = request.args.get("hub.mode")
-    token = request.args.get("hub.verify_token")
-    challenge = request.args.get("hub.challenge")
-    
-    logger.info(f"Mode: {mode}")
-    logger.info(f"Token: {token}")
-    logger.info(f"Expected token: {VERIFY_TOKEN}")
-    logger.info(f"Challenge: {challenge}")
-    
-    if mode == "subscribe" and token == VERIFY_TOKEN:
-        logger.info("✅ Webhook verified successfully!")
-        return challenge, 200
-    else:
-        logger.error("❌ Webhook verification failed!")
-        return jsonify({
-            "error": "Verification failed",
-            "mode": mode,
-            "token_received": token,
-            "token_expected": VERIFY_TOKEN
-        }), 403
-
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    """Nhận sự kiện từ Facebook webhook"""
-    try:
-        # Log headers
-        headers = {k: v for k, v in request.headers.items()}
-        logger.info("=== WEBHOOK POST REQUEST ===")
-        logger.info(f"Headers: {json.dumps(headers, indent=2)}")
-        logger.info(f"Content-Type: {request.content_type}")
-        logger.info(f"Content-Length: {request.content_length}")
+        service = get_google_sheets_service()
+        if not service:
+            print(f"[INIT SHEET] Không thể khởi tạo Google Sheets service")
+            return
         
-        # Nhận dữ liệu
-        data = request.get_json()
+        # Lấy thông tin tất cả sheets
+        spreadsheet = service.spreadsheets().get(spreadsheetId=GOOGLE_SHEET_ID).execute()
+        sheets = spreadsheet.get('sheets', [])
         
-        if not data:
-            # Thử đọc raw data nếu không parse được JSON
-            raw_data = request.get_data(as_text=True)
-            logger.warning(f"No JSON data, raw data: {raw_data[:500]}...")
-            return jsonify({"status": "no_data"}), 200
+        # Kiểm tra xem sheet UserContext đã tồn tại chưa
+        sheet_exists = False
+        for sheet in sheets:
+            if sheet['properties']['title'] == USER_CONTEXT_SHEET_NAME:
+                sheet_exists = True
+                break
         
-        # Log dữ liệu chi tiết
-        log_webhook_data(data, "webhook_post")
-        
-        # Xử lý đơn giản: chỉ log, không xử lý gì cả
-        logger.info("✅ Webhook received and logged successfully")
-        
-        return jsonify({"status": "ok"}), 200
-        
-    except Exception as e:
-        logger.error(f"❌ Error processing webhook: {e}", exc_info=True)
-        return jsonify({"error": str(e)}), 500
-
-# ============================================
-# THỬ NGHIỆM: ENDPOINT CHO FEED COMMENT RIÊNG
-# ============================================
-@app.route("/test-feed", methods=["POST"])
-def test_feed():
-    """Endpoint riêng để test feed comment"""
-    try:
-        logger.info("=== TEST FEED ENDPOINT ===")
-        
-        data = request.get_json()
-        if not data:
-            return jsonify({"status": "no_data"}), 200
-        
-        logger.info(f"Test feed data: {json.dumps(data, indent=2)}")
-        
-        # Kiểm tra cấu trúc feed comment
-        entries = data.get('entry', [])
-        for entry in entries:
-            changes = entry.get('changes', [])
-            for change in changes:
-                if change.get('field') == 'feed':
-                    value = change.get('value', {})
-                    logger.info("🎯 FEED COMMENT DETECTED!")
-                    logger.info(f"Post ID: {value.get('post_id')}")
-                    logger.info(f"From: {value.get('from', {}).get('name')} (ID: {value.get('from', {}).get('id')})")
-                    logger.info(f"Message: {value.get('message')}")
-                    logger.info(f"Verb: {value.get('verb')}")
-                    logger.info(f"Item: {value.get('item')}")
-        
-        return jsonify({"status": "test_feed_received"}), 200
-        
-    except Exception as e:
-        logger.error(f"Error in test feed: {e}")
-        return jsonify({"error": str(e)}), 500
-
-# ============================================
-# SIMULATE FACEBOOK WEBHOOK
-# ============================================
-@app.route("/simulate-webhook", methods=["POST"])
-def simulate_webhook():
-    """Tạo webhook mẫu để test"""
-    sample_data = {
-        "object": "page",
-        "entry": [
-            {
-                "id": PAGE_ID or "123456789",
-                "time": 1678888888,
-                "changes": [
-                    {
-                        "field": "feed",
-                        "value": {
-                            "from": {
-                                "id": "987654321",
-                                "name": "Test User"
-                            },
-                            "post_id": f"{PAGE_ID}_123456789",
-                            "message": "Sản phẩm này có mã MS000034 không shop?",
-                            "item": "comment",
-                            "verb": "add",
-                            "parent_id": f"{PAGE_ID}_123456789",
-                            "comment_id": "123456789012345"
+        if not sheet_exists:
+            # Tạo sheet mới
+            requests = [{
+                'addSheet': {
+                    'properties': {
+                        'title': USER_CONTEXT_SHEET_NAME,
+                        'gridProperties': {
+                            'rowCount': 1000,
+                            'columnCount': 10
                         }
                     }
-                ]
+                }
+            }]
+            
+            service.spreadsheets().batchUpdate(
+                spreadsheetId=GOOGLE_SHEET_ID,
+                body={'requests': requests}
+            ).execute()
+            
+            # Thêm header
+            headers = [
+                ['user_id', 'last_ms', 'product_history', 'order_data', 
+                 'conversation_history', 'real_message_count', 
+                 'referral_source', 'last_updated', 'phone', 'customer_name']
+            ]
+            
+            service.spreadsheets().values().update(
+                spreadsheetId=GOOGLE_SHEET_ID,
+                range=f"{USER_CONTEXT_SHEET_NAME}!A1:J1",
+                valueInputOption="USER_ENTERED",
+                body={'values': headers}
+            ).execute()
+            
+            print(f"[INIT SHEET] Đã tạo sheet {USER_CONTEXT_SHEET_NAME} thành công")
+        else:
+            print(f"[INIT SHEET] Sheet {USER_CONTEXT_SHEET_NAME} đã tồn tại")
+            
+    except Exception as e:
+        print(f"[INIT SHEET ERROR] Lỗi khi khởi tạo sheet: {e}")
+
+def save_user_context_to_sheets():
+    """Lưu USER_CONTEXT vào Google Sheets"""
+    if not GOOGLE_SHEET_ID or not GOOGLE_SHEETS_CREDENTIALS_JSON:
+        print("[SAVE CONTEXT] Chưa cấu hình Google Sheets, bỏ qua lưu context")
+        return
+    
+    try:
+        service = get_google_sheets_service()
+        if not service:
+            return
+        
+        # Chuẩn bị dữ liệu để ghi
+        values = []
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        for user_id, context in USER_CONTEXT.items():
+            # Chỉ lưu context có dữ liệu
+            if not context or context.get("last_updated", 0) < time.time() - 86400 * 30:  # 30 ngày
+                continue
+            
+            # Chuyển đổi dữ liệu thành chuỗi JSON để lưu
+            product_history = json.dumps(context.get("product_history", []), ensure_ascii=False)
+            order_data = json.dumps(context.get("order_data", {}), ensure_ascii=False)
+            conversation_history = json.dumps(context.get("conversation_history", []), ensure_ascii=False)
+            
+            # Lấy số điện thoại và tên từ order_data
+            phone = ""
+            customer_name = ""
+            if context.get("order_data"):
+                phone = context["order_data"].get("phone", "")
+                customer_name = context["order_data"].get("customer_name", "")
+            
+            row = [
+                user_id,
+                context.get("last_ms", ""),
+                product_history,
+                order_data,
+                conversation_history,
+                str(context.get("real_message_count", 0)),
+                context.get("referral_source", ""),
+                now,
+                phone,
+                customer_name
+            ]
+            values.append(row)
+        
+        if values:
+            # Xóa toàn bộ dữ liệu cũ và ghi mới (đơn giản)
+            # Hoặc có thể implement cập nhật từng dòng để tối ưu
+            service.spreadsheets().values().clear(
+                spreadsheetId=GOOGLE_SHEET_ID,
+                range=f"{USER_CONTEXT_SHEET_NAME}!A2:J"
+            ).execute()
+            
+            service.spreadsheets().values().update(
+                spreadsheetId=GOOGLE_SHEET_ID,
+                range=f"{USER_CONTEXT_SHEET_NAME}!A2",
+                valueInputOption="USER_ENTERED",
+                body={'values': values}
+            ).execute()
+            
+            print(f"[CONTEXT SAVED] Đã lưu {len(values)} users vào Google Sheets")
+        
+    except Exception as e:
+        print(f"[CONTEXT SAVE ERROR] Lỗi khi lưu context vào Google Sheets: {e}")
+
+def load_user_context_from_sheets():
+    """Load USER_CONTEXT từ Google Sheets"""
+    if not GOOGLE_SHEET_ID or not GOOGLE_SHEETS_CREDENTIALS_JSON:
+        print("[LOAD CONTEXT] Chưa cấu hình Google Sheets, bỏ qua load context")
+        return
+    
+    try:
+        service = get_google_sheets_service()
+        if not service:
+            return
+        
+        # Lấy dữ liệu từ sheet
+        result = service.spreadsheets().values().get(
+            spreadsheetId=GOOGLE_SHEET_ID,
+            range=f"{USER_CONTEXT_SHEET_NAME}!A2:J"
+        ).execute()
+        
+        values = result.get('values', [])
+        
+        loaded_count = 0
+        for row in values:
+            if len(row) < 8:  # Ít nhất có 8 cột bắt buộc
+                continue
+            
+            user_id = row[0]
+            if not user_id:
+                continue
+            
+            # Tạo context mặc định
+            context = default_user_context()
+            
+            # Cập nhật từ dữ liệu Google Sheets
+            if len(row) > 1 and row[1]:
+                context["last_ms"] = row[1]
+            
+            if len(row) > 2 and row[2]:
+                try:
+                    context["product_history"] = json.loads(row[2])
+                except:
+                    context["product_history"] = []
+            
+            if len(row) > 3 and row[3]:
+                try:
+                    context["order_data"] = json.loads(row[3])
+                except:
+                    context["order_data"] = {}
+            
+            if len(row) > 4 and row[4]:
+                try:
+                    context["conversation_history"] = json.loads(row[4])
+                except:
+                    context["conversation_history"] = []
+            
+            if len(row) > 5 and row[5]:
+                try:
+                    context["real_message_count"] = int(row[5])
+                except:
+                    context["real_message_count"] = 0
+            
+            if len(row) > 6 and row[6]:
+                context["referral_source"] = row[6]
+            
+            if len(row) > 9 and row[9]:
+                # Cập nhật tên khách hàng từ sheet
+                if "order_data" not in context:
+                    context["order_data"] = {}
+                context["order_data"]["customer_name"] = row[9]
+            
+            USER_CONTEXT[user_id] = context
+            loaded_count += 1
+        
+        print(f"[CONTEXT LOADED] Đã load {loaded_count} users từ Google Sheets")
+        
+    except Exception as e:
+        print(f"[CONTEXT LOAD ERROR] Lỗi khi load context từ Google Sheets: {e}")
+
+def periodic_context_save():
+    """Lưu context định kỳ vào Google Sheets"""
+    print(f"[PERIODIC SAVE THREAD] Thread lưu context đã bắt đầu")
+    
+    # Đợi app khởi động xong
+    time.sleep(30)
+    
+    while True:
+        print(f"[PERIODIC SAVE] Đang lưu context vào Google Sheets...")
+        save_user_context_to_sheets()
+        time.sleep(300)  # 5 phút
+
+def get_user_order_history_from_sheets(user_id: str, phone: str = None) -> List[Dict]:
+    """Tra cứu lịch sử đơn hàng từ Google Sheets"""
+    if not GOOGLE_SHEET_ID or not GOOGLE_SHEETS_CREDENTIALS_JSON:
+        return []
+    
+    try:
+        service = get_google_sheets_service()
+        if not service:
+            return []
+        
+        # Lấy dữ liệu từ sheet Orders
+        result = service.spreadsheets().values().get(
+            spreadsheetId=GOOGLE_SHEET_ID,
+            range="Orders!A:V"  # Lấy tất cả cột
+        ).execute()
+        
+        values = result.get('values', [])
+        if len(values) <= 1:  # Chỉ có header
+            return []
+        
+        # Tìm các cột cần thiết
+        headers = values[0]
+        col_indices = {}
+        for i, header in enumerate(headers):
+            header_lower = header.lower()
+            if 'user' in header_lower or 'uid' in header_lower:
+                col_indices['user_id'] = i
+            elif 'phone' in header_lower or 'sđt' in header_lower or 'điện thoại' in header_lower:
+                col_indices['phone'] = i
+            elif 'ms' in header_lower or 'mã' in header_lower or 'product_code' in header_lower:
+                col_indices['ms'] = i
+            elif 'name' in header_lower or 'tên' in header_lower or 'product_name' in header_lower:
+                col_indices['product_name'] = i
+            elif 'timestamp' in header_lower or 'thời gian' in header_lower:
+                col_indices['timestamp'] = i
+        
+        user_orders = []
+        
+        for row in values[1:]:
+            if len(row) < max(col_indices.values()) + 1:
+                continue
+            
+            # Kiểm tra xem có khớp user_id hoặc phone không
+            row_user_id = row[col_indices.get('user_id', 0)] if col_indices.get('user_id') else ""
+            row_phone = row[col_indices.get('phone', 0)] if col_indices.get('phone') else ""
+            
+            match = False
+            if user_id and row_user_id == user_id:
+                match = True
+            elif phone and row_phone == phone:
+                match = True
+            
+            if match:
+                order = {
+                    "timestamp": row[col_indices.get('timestamp', 0)] if col_indices.get('timestamp') else "",
+                    "ms": row[col_indices.get('ms', 0)] if col_indices.get('ms') else "",
+                    "product_name": row[col_indices.get('product_name', 0)] if col_indices.get('product_name') else "",
+                    "phone": row_phone,
+                    "user_id": row_user_id
+                }
+                user_orders.append(order)
+        
+        # Sắp xếp theo thời gian mới nhất
+        user_orders.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+        return user_orders[:5]  # Trả về 5 đơn gần nhất
+        
+    except Exception as e:
+        print(f"[ORDER HISTORY ERROR] Lỗi khi tra cứu đơn hàng: {e}")
+        return []
+
+def default_user_context():
+    """Tạo context mặc định cho user mới"""
+    return {
+        "last_msg_time": 0,
+        "last_ms": None,
+        "order_state": None,
+        "order_data": {},
+        "processing_lock": False,
+        "real_message_count": 0,
+        "product_history": [],
+        "conversation_history": [],
+        "referral_source": None,
+        "referral_payload": None,
+        "last_retailer_id": None,
+        "catalog_view_time": 0,
+        "has_sent_first_carousel": False,
+        "idempotent_postbacks": {},
+        "processed_message_mids": {},
+        "last_processed_text": "",
+        "poscake_orders": [],
+        "last_updated": time.time()
+    }
+
+# ============================================
+# MAP TIẾNG VIỆT KHÔNG DẤU
+# ============================================
+VIETNAMESE_MAP = {
+    'à': 'a', 'á': 'a', 'ả': 'a', 'ã': 'a', 'ạ': 'a',
+    'ă': 'a', 'ằ': 'a', 'ắ': 'a', 'ẳ': 'a', 'ẵ': 'a', 'ặ': 'a',
+    'â': 'a', 'ầ': 'a', 'ấ': 'a', 'ẩ': 'a', 'ẫ': 'a', 'ậ': 'a',
+    'đ': 'd',
+    'è': 'e', 'é': 'e', 'ẻ': 'e', 'ẽ': 'e', 'ẹ': 'e',
+    'ê': 'e', 'ề': 'e', 'ế': 'e', 'ể': 'e', 'ễ': 'e', 'ệ': 'e',
+    'ì': 'i', 'í': 'i', 'ỉ': 'i', 'ĩ': 'i', 'ị': 'i',
+    'ò': 'o', 'ó': 'o', 'ỏ': 'o', 'õ': 'o', 'ọ': 'o',
+    'ô': 'o', 'ồ': 'o', 'ố': 'o', 'ổ': 'o', 'ỗ': 'o', 'ộ': 'o',
+    'ơ': 'o', 'ờ': 'o', 'ớ': 'o', 'ở': 'o', 'ỡ': 'o', 'ợ': 'o',
+    'ù': 'u', 'ú': 'u', 'ủ': 'u', 'ũ': 'u', 'ụ': 'u',
+    'ư': 'u', 'ừ': 'u', 'ứ': 'u', 'ử': 'u', 'ữ': 'u', 'ự': 'u',
+    'ỳ': 'y', 'ý': 'y', 'ỷ': 'y', 'ỹ': 'y', 'ỵ': 'y',
+    'À': 'A', 'Á': 'A', 'Ả': 'A', 'Ã': 'A', 'Ạ': 'A',
+    'Ă': 'A', 'Ằ': 'A', 'Ắ': 'A', 'Ẳ': 'A', 'Ẵ': 'A', 'Ặ': 'A',
+    'Â': 'A', 'Ầ': 'A', 'Ấ': 'A', 'Ẩ': 'A', 'Ẫ': 'A', 'Ậ': 'A',
+    'Đ': 'D',
+    'È': 'E', 'É': 'E', 'Ẻ': 'E', 'Ẽ': 'E', 'Ẹ': 'E',
+    'Ê': 'E', 'Ề': 'E', 'Ế': 'E', 'Ể': 'E', 'Ễ': 'E', 'Ệ': 'E',
+    'Ì': 'I', 'Í': 'I', 'Ỉ': 'I', 'Ĩ': 'I', 'Ị': 'I',
+    'Ò': 'O', 'Ó': 'O', 'Ỏ': 'O', 'Õ': 'O', 'Ọ': 'O',
+    'Ô': 'O', 'Ồ': 'O', 'Ố': 'O', 'Ổ': 'O', 'Ỗ': 'O', 'Ộ': 'O',
+    'Ơ': 'O', 'Ờ': 'O', 'Ớ': 'O', 'Ở': 'O', 'Ỡ': 'O', 'Ợ': 'O',
+    'Ù': 'U', 'Ú': 'U', 'Ủ': 'U', 'Ũ': 'U', 'Ụ': 'U',
+    'Ư': 'U', 'Ừ': 'U', 'Ứ': 'U', 'Ử': 'U', 'Ữ': 'U', 'Ự': 'U',
+    'Ỳ': 'Y', 'Ý': 'Y', 'Ỷ': 'Y', 'Ỹ': 'Y', 'Ỵ': 'Y'
+}
+
+def normalize_vietnamese(text):
+    if not text: return ""
+    result = text
+    for char, replacement in VIETNAMESE_MAP.items():
+        result = result.replace(char, replacement)
+    return result
+
+# ============================================
+# GLOBAL STATE
+# ============================================
+USER_CONTEXT = defaultdict(default_user_context)
+
+PRODUCTS = {}
+PRODUCTS_BY_NUMBER = {}
+LAST_LOAD = 0
+LOAD_TTL = 300
+
+# ============================================
+# CACHE CHO TÊN FANPAGE
+# ============================================
+FANPAGE_NAME_CACHE = None
+FANPAGE_NAME_CACHE_TIME = 0
+FANPAGE_NAME_CACHE_TTL = 3600
+
+def get_fanpage_name_from_api():
+    global FANPAGE_NAME_CACHE, FANPAGE_NAME_CACHE_TIME
+    
+    now = time.time()
+    if (FANPAGE_NAME_CACHE and 
+        FANPAGE_NAME_CACHE_TIME and 
+        (now - FANPAGE_NAME_CACHE_TIME) < FANPAGE_NAME_CACHE_TTL):
+        return FANPAGE_NAME_CACHE
+    
+    if not PAGE_ACCESS_TOKEN:
+        FANPAGE_NAME_CACHE = FANPAGE_NAME
+        FANPAGE_NAME_CACHE_TIME = now
+        return FANPAGE_NAME_CACHE
+    
+    try:
+        url = f"https://graph.facebook.com/v12.0/me?fields=name&access_token={PAGE_ACCESS_TOKEN}"
+        response = requests.get(url, timeout=5)
+        
+        if response.status_code == 200:
+            data = response.json()
+            page_name = data.get('name', FANPAGE_NAME)
+            FANPAGE_NAME_CACHE = page_name
+            FANPAGE_NAME_CACHE_TIME = now
+            return page_name
+        else:
+            FANPAGE_NAME_CACHE = FANPAGE_NAME
+            FANPAGE_NAME_CACHE_TIME = now
+            return FANPAGE_NAME_CACHE
+    except Exception as e:
+        FANPAGE_NAME_CACHE = FANPAGE_NAME
+        FANPAGE_NAME_CACHE_TIME = now
+        return FANPAGE_NAME_CACHE
+
+# ============================================
+# HÀM TẠO TIN NHẮN TIẾP THỊ BẰNG GPT
+# ============================================
+def generate_marketing_message(ms: str, user_name: str) -> str:
+    """
+    Tạo tin nhắn tiếp thị bằng GPT dựa trên ưu điểm sản phẩm
+    """
+    if ms not in PRODUCTS:
+        return None
+    
+    product = PRODUCTS[ms]
+    product_name = product.get('Ten', '')
+    # Làm sạch tên sản phẩm (loại bỏ mã nếu có)
+    if f"[{ms}]" in product_name or ms in product_name:
+        product_name = product_name.replace(f"[{ms}]", "").replace(ms, "").strip()
+    
+    mo_ta = product.get("MoTa", "")
+    
+    if not client:
+        # Fallback nếu không có GPT
+        return f"Chào {user_name}! 👋\n\nEm thấy ac đã bình luận trên bài viết của shop và quan tâm đến sản phẩm:\n\n📦 **{product_name}**\n📌 Mã sản phẩm: {ms}\n\nĐây là sản phẩm rất được yêu thích tại shop với nhiều ưu điểm nổi bật! ac có thể hỏi em bất kỳ thông tin gì về sản phẩm này ạ!"
+    
+    try:
+        system_prompt = f"""Bạn là nhân viên bán hàng của {get_fanpage_name_from_api()}.
+Hãy tạo một lời chào mời khách hàng dựa trên sản phẩm {product_name} (mã {ms}).
+Lời chào cần:
+1. Thân thiện, nhiệt tình, chào đón khách hàng
+2. Nhấn mạnh vào ưu điểm, điểm nổi bật của sản phẩm dựa trên mô tả
+3. Mời gọi khách hàng hỏi thêm thông tin hoặc đặt hàng
+4. KHÔNG liệt kê các câu lệnh như "gửi giá bao nhiêu", "xem ảnh", v.v.
+5. KHÔNG hướng dẫn khách cách hỏi
+6. Tập trung vào ưu điểm và lợi ích sản phẩm
+7. Độ dài khoảng 4-5 dòng, tự nhiên
+"""
+        
+        user_prompt = f"""Hãy tạo lời chào cho khách hàng {user_name} vừa bình luận trên bài viết về sản phẩm:
+Tên sản phẩm: {product_name}
+Mã sản phẩm: {ms}
+Mô tả sản phẩm: {mo_ta[:300] if mo_ta else "Chưa có mô tả"}
+
+Hãy tạo lời chào mời thân thiện, tập trung vào ưu điểm sản phẩm."""
+        
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.7,
+            max_tokens=300
+        )
+        
+        intro = response.choices[0].message.content
+        return f"Chào {user_name}! 👋\n\n{intro}"
+    
+    except Exception as e:
+        print(f"[GPT MARKETING ERROR] Lỗi khi tạo tin nhắn tiếp thị: {e}")
+        # Fallback
+        return f"Chào {user_name}! 👋\n\nEm thấy ac đã bình luận trên bài viết của shop và quan tâm đến sản phẩm:\n\n📦 **{product_name}**\n📌 Mã sản phẩm: {ms}\n\nĐây là sản phẩm rất được yêu thích tại shop với nhiều ưu điểm nổi bật! ac có thể hỏi em bất kỳ thông tin gì về sản phẩm này ạ!"
+
+# ============================================
+# HÀM CẬP NHẬT CONTEXT VỚI MS MỚI VÀ RESET COUNTER
+# ============================================
+
+def update_context_with_new_ms(uid: str, new_ms: str, source: str = "unknown"):
+    """
+    Cập nhật context với MS mới và reset counter để đảm bảo bot gửi carousel
+    cho sản phẩm mới khi user gửi tin nhắn đầu tiên
+    """
+    if not new_ms:
+        return False
+    
+    ctx = USER_CONTEXT[uid]
+    
+    # Lấy MS cũ để so sánh
+    old_ms = ctx.get("last_ms")
+    
+    # Nếu MS mới khác với MS cũ, reset counter
+    if old_ms != new_ms:
+        print(f"[CONTEXT UPDATE] User {uid}: Chuyển từ {old_ms} sang {new_ms} (nguồn: {source})")
+        
+        # Reset counter để bot gửi carousel cho sản phẩm mới
+        ctx["real_message_count"] = 0
+        ctx["has_sent_first_carousel"] = False
+        ctx["last_msg_time"] = 0  # Reset thời gian tin nhắn cuối
+        ctx["last_processed_text"] = ""  # Reset text đã xử lý
+    else:
+        print(f"[CONTEXT NO CHANGE] User {uid}: Vẫn giữ MS {new_ms} (nguồn: {source})")
+    
+    # Cập nhật MS mới
+    ctx["last_ms"] = new_ms
+    ctx["referral_source"] = source
+    
+    # Gọi hàm update_product_context cũ
+    if "product_history" not in ctx:
+        ctx["product_history"] = []
+    
+    if not ctx["product_history"] or ctx["product_history"][0] != new_ms:
+        if new_ms in ctx["product_history"]:
+            ctx["product_history"].remove(new_ms)
+        ctx["product_history"].insert(0, new_ms)
+    
+    if len(ctx["product_history"]) > 5:
+        ctx["product_history"] = ctx["product_history"][:5]
+    
+    # Cập nhật thời gian
+    ctx["last_updated"] = time.time()
+    
+    print(f"[CONTEXT UPDATE COMPLETE] Đã cập nhật MS {new_ms} cho user {uid} (nguồn: {source}, real_message_count: {ctx['real_message_count']})")
+    return True
+
+def restore_user_context_on_wakeup(uid: str):
+    """Khôi phục context cho user khi app wake up từ sleep"""
+    # 1. Thử load từ USER_CONTEXT trong RAM (nếu còn)
+    if uid in USER_CONTEXT and USER_CONTEXT[uid].get("last_ms"):
+        print(f"[RESTORE CONTEXT] User {uid} đã có context trong RAM")
+        return True
+    
+    # 2. Thử tra cứu đơn hàng từ Google Sheets
+    orders = get_user_order_history_from_sheets(uid)
+    
+    if orders:
+        latest_order = orders[0]
+        last_ms = latest_order.get("ms")
+        
+        if last_ms and last_ms in PRODUCTS:
+            # Cập nhật context với MS từ đơn hàng
+            update_context_with_new_ms(uid, last_ms, "restored_from_order_history")
+            
+            # Lấy thông tin khách hàng
+            ctx = USER_CONTEXT[uid]
+            ctx["order_data"] = {
+                "phone": latest_order.get("phone", ""),
+                "customer_name": latest_order.get("customer_name", "")
+            }
+            
+            print(f"[RESTORE CONTEXT] Đã khôi phục context cho user {uid} từ đơn hàng: {last_ms}")
+            return True
+    
+    # 3. Thử tìm bằng số điện thoại trong context của user khác
+    for other_uid, other_ctx in USER_CONTEXT.items():
+        if other_uid != uid and other_ctx.get("order_data", {}).get("phone"):
+            # Kiểm tra xem có đơn hàng nào với số điện thoại này không
+            phone = other_ctx["order_data"]["phone"]
+            if phone:
+                orders_by_phone = get_user_order_history_from_sheets(None, phone)
+                if orders_by_phone:
+                    latest_order = orders_by_phone[0]
+                    last_ms = latest_order.get("ms")
+                    
+                    if last_ms and last_ms in PRODUCTS:
+                        # Cập nhật context
+                        update_context_with_new_ms(uid, last_ms, "restored_by_phone_match")
+                        
+                        # Copy order_data từ user khác
+                        ctx = USER_CONTEXT[uid]
+                        ctx["order_data"] = other_ctx["order_data"].copy()
+                        
+                        print(f"[RESTORE CONTEXT] Đã khôi phục context cho user {uid} bằng số điện thoại: {phone}")
+                        return True
+    
+    print(f"[RESTORE CONTEXT] Không thể khôi phục context cho user {uid}")
+    return False
+
+# ============================================
+# HÀM PHÁT HIỆN EMOJI/STICKER
+# ============================================
+
+def is_emoji_or_sticker_image(image_url: str) -> bool:
+    """
+    Phát hiện ảnh emoji/sticker dựa trên URL
+    """
+    if not image_url:
+        return True
+    
+    image_url_lower = image_url.lower()
+    
+    # Kiểm tra từ khóa đặc trưng của emoji/sticker Facebook
+    emoji_keywords = [
+        'emoji', 'sticker', 'stickers', 'stickerpack',
+        'facebook.com/images/stickers/',
+        'fbcdn.net/images/emoji.php',
+        'graph.facebook.com/sticker',
+        'scontent.xx.fbcdn.net/v/t39.1997-6/',  # Đường dẫn sticker Facebook
+        'cdn.jsdelivr.net/emojione/assets',  # Emojione
+        'twemoji.maxcdn.com',  # Twemoji
+        'noto-website-2.storage.googleapis.com',  # Noto Emoji
+    ]
+    
+    for keyword in emoji_keywords:
+        if keyword in image_url_lower:
+            return True
+    
+    # Kiểm tra đuôi file - emoji thường là SVG hoặc định dạng đặc biệt
+    emoji_extensions = ['.svg', '.svgs', '.svgz', '.gif', '.apng', '.webp']
+    
+    for ext in emoji_extensions:
+        if image_url_lower.endswith(ext):
+            return True
+    
+    # Kiểm tra pattern URL đặc biệt
+    emoji_patterns = [
+        r'emoji_\d+\.(png|jpg|gif)',
+        r'sticker_\d+\.(png|jpg|gif)',
+        r'emoji/[\w\-]+\.(png|jpg|gif)',
+        r'stickers/[\w\-]+\.(png|jpg|gif)',
+    ]
+    
+    for pattern in emoji_patterns:
+        if re.search(pattern, image_url_lower):
+            return True
+    
+    return False
+
+# ============================================
+# HÀM KIỂM TRA ẢNH SẢN PHẨM HỢP LỆ (CẢI TIẾN)
+# ============================================
+
+def is_valid_product_image(image_url: str) -> bool:
+    """
+    Kiểm tra xem ảnh có phải là ảnh sản phẩm hợp lệ không
+    Cải tiến để chấp nhận nhiều định dạng URL hơn
+    """
+    if not image_url:
+        return False
+    
+    image_url_lower = image_url.lower()
+    
+    # Kiểm tra đuôi file ảnh hợp lệ
+    valid_extensions = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.tiff']
+    
+    for ext in valid_extensions:
+        if ext in image_url_lower:
+            return True
+    
+    # Kiểm tra domain ảnh phổ biến (bao gồm cả Facebook)
+    valid_domains = [
+        'fbcdn.net', 'scontent.xx', 'scontent.fhan', 'cdn.shopify', 
+        'static.nike', 'lzd-img', 'shopee', 'tiki', 'content.pancake.vn',
+        'instagram.com', 'cloudinary.com', 'images.unsplash.com',
+        'graph.facebook.com', 'facebook.com'
+    ]
+    
+    for domain in valid_domains:
+        if domain in image_url_lower:
+            return True
+    
+    # Kiểm tra pattern URL chứa thông tin ảnh
+    image_patterns = [
+        r'\.(jpg|jpeg|png|webp|gif)(\?|$)',
+        r'/photos/',
+        r'/images/',
+        r'/img/',
+        r'/picture/',
+        r'/media/',
+        r'/upload/'
+    ]
+    
+    for pattern in image_patterns:
+        if re.search(pattern, image_url_lower):
+            return True
+    
+    return False
+
+# ============================================
+# HÀM TẢI ẢNH VỀ SERVER VÀ CHUYỂN THÀNH BASE64
+# ============================================
+
+def download_image_to_base64(image_url: str) -> Optional[str]:
+    """
+    Tải ảnh từ URL và chuyển thành chuỗi base64.
+    Trả về None nếu không tải được.
+    """
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'image/webp,image/*,*/*;q=0.8',
+            'Accept-Language': 'vi,en-US;q=0.9,en;q=0.8',
+            'Referer': 'https://www.facebook.com/'
+        }
+        
+        # Thử tải với timeout ngắn
+        response = requests.get(image_url, headers=headers, timeout=5)
+        
+        if response.status_code == 200:
+            # Kiểm tra content type có phải là ảnh không
+            content_type = response.headers.get('content-type', '').lower()
+            if 'image' in content_type:
+                image_data = response.content
+                base64_str = base64.b64encode(image_data).decode('utf-8')
+                return base64_str
+            else:
+                print(f"[IMAGE DOWNLOAD] Không phải ảnh: {content_type}")
+        else:
+            print(f"[IMAGE DOWNLOAD] Lỗi HTTP: {response.status_code}")
+    except Exception as e:
+        print(f"[IMAGE DOWNLOAD] Lỗi khi tải ảnh: {e}")
+    return None
+
+# ============================================
+# HÀM PHÂN TÍCH ẢNH BẰNG OPENAI VISION API (CẢI TIẾN)
+# ============================================
+
+def analyze_image_with_vision_api(image_url: str) -> str:
+    """
+    Phân tích ảnh bằng OpenAI Vision API và trả về mô tả text
+    Sử dụng base64 để tránh lỗi URL không tải được
+    """
+    if not client:
+        return ""
+    
+    print(f"[VISION API] Đang phân tích ảnh: {image_url[:100]}...")
+    
+    try:
+        # THỬ 1: Dùng URL trực tiếp (nhanh nhất)
+        print(f"[VISION API] Thử dùng URL trực tiếp...")
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": """Bạn là chuyên gia nhận diện sản phẩm thời trang. Hãy mô tả CHI TIẾT và CHÍNH XÁC sản phẩm trong ảnh theo các tiêu chí:
+
+1. LOẠI SẢN PHẨM (bắt buộc): áo thun, áo sơ mi, váy, quần jeans, áo khoác, đầm, v.v.
+2. MÀU SẮC CHÍNH (bắt buộc): đỏ, xanh, trắng, đen, hồng, tím, v.v.
+3. CHẤT LIỆU (nếu thấy): cotton, linen, jean, lụa, v.v.
+4. HỌA TIẾT: trơn, sọc, caro, hoa, hình in, logo, v.v.
+5. KIỂU DÁNG: cổ tròn, cổ tim, tay dài, tay ngắn, ôm body, rộng, v.v.
+6. ĐẶC ĐIỂM NỔI BẬT: túi, nút, dây kéo, viền, đính đá, v.v.
+7. PHONG CÁCH: casual, công sở, dạo phố, dự tiệc, thể thao, v.v.
+
+MÔ TẢ PHẢI NGẮN GỌN nhưng ĐẦY ĐỦ từ khóa quan trọng. Ưu tiên từ khóa thông dụng trong thời trang."""},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": image_url,
+                                "detail": "auto"
+                            }
+                        }
+                    ]
+                }
+            ],
+            max_tokens=500,
+            temperature=0.1
+        )
+        
+        return response.choices[0].message.content
+    except Exception as e:
+        print(f"[VISION API URL ERROR] Lỗi khi dùng URL: {e}")
+        
+        # THỬ 2: Tải ảnh về và dùng base64
+        print(f"[VISION API] Đang tải ảnh về để chuyển base64...")
+        base64_image = download_image_to_base64(image_url)
+        
+        if base64_image:
+            try:
+                print(f"[VISION API] Thử dùng base64...")
+                response = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": """Mô tả chi tiết sản phẩm trong ảnh, tập trung vào loại sản phẩm, màu sắc, chất liệu, họa tiết và phong cách."""},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/jpeg;base64,{base64_image}"
+                                    }
+                                }
+                            ]
+                        }
+                    ],
+                    max_tokens=400,
+                    temperature=0.1
+                )
+                return response.choices[0].message.content
+            except Exception as e2:
+                print(f"[VISION API BASE64 ERROR] Lỗi khi dùng base64: {e2}")
+        
+        # THỬ 3: Dùng URL đơn giản hóa
+        try:
+            print(f"[VISION API] Thử dùng URL đơn giản hóa...")
+            # Lấy phần base URL không có tham số phức tạp
+            simple_url = image_url.split('?')[0]
+            if 'fbcdn.net' in simple_url:
+                simple_url = simple_url + '?dl=1'
+            
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Mô tả ngắn sản phẩm trong ảnh."},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": simple_url,
+                                    "detail": "low"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                max_tokens=300,
+                temperature=0.1
+            )
+            return response.choices[0].message.content
+        except Exception as e3:
+            print(f"[VISION API SIMPLE URL ERROR] Lỗi cuối cùng: {e3}")
+    
+    return ""
+
+# ============================================
+# HÀM TRÍCH XUẤT TỪ KHÓA TỪ MÔ TẢ
+# ============================================
+
+def extract_keywords_from_description(description: str) -> set:
+    """Trích xuất từ khóa quan trọng từ mô tả"""
+    stop_words = {'của', 'và', 'là', 'có', 'trong', 'với', 'cho', 'từ', 'này', 'ảnh', 
+                  'sản phẩm', 'phẩm', 'chụp', 'nhìn', 'thấy', 'rất', 'một', 'như', 
+                  'bởi', 'các', 'được', 'nên', 'khi', 'hoặc', 'nếu', 'thì', 'mà'}
+    
+    # Từ khóa quan trọng trong thời trang
+    fashion_keywords = {
+        'áo', 'quần', 'váy', 'đầm', 'áo thun', 'áo sơ mi', 'jeans', 'khoác', 
+        'hoodie', 'sweater', 'jacket', 'blazer', 'cardigan', 'polo', 'tank top',
+        'shorts', 'skirt', 'jumpsuit', 'romper', 'leggings', 'jogger'
+    }
+    
+    keywords = set()
+    words = description.split()
+    
+    for word in words:
+        word = word.strip('.,!?;:()[]{}"\'').lower()
+        if len(word) > 2 and word not in stop_words:
+            keywords.add(word)
+    
+    # Thêm các từ khóa ghép (2-3 từ)
+    for i in range(len(words) - 1):
+        bigram = f"{words[i]} {words[i+1]}"
+        if any(keyword in bigram for keyword in fashion_keywords):
+            keywords.add(bigram)
+    
+    return keywords
+
+# ============================================
+# HÀM TÍNH ĐIỂM TƯƠNG ĐỔNG SẢN PHẨM
+# ============================================
+
+def calculate_product_similarity_score(ms: str, product: dict, desc_lower: str, desc_keywords: set) -> float:
+    """Tính điểm tương đồng giữa sản phẩm và mô tả ảnh"""
+    score = 0
+    
+    # Lấy thông tin sản phẩm
+    ten = normalize_vietnamese(product.get("Ten", "").lower())
+    mo_ta = normalize_vietnamese(product.get("MoTa", "").lower())
+    mau_sac = normalize_vietnamese(product.get("màu (Thuộc tính)", "").lower())
+    thuoc_tinh = normalize_vietnamese(product.get("Thuộc tính", "").lower())
+    
+    # Tạo bộ từ khóa sản phẩm
+    product_keywords = set()
+    
+    # Thêm từ khóa từ tên sản phẩm
+    for word in ten.split():
+        if len(word) > 1:
+            product_keywords.add(word)
+    
+    # Thêm từ khóa từ mô tả
+    for word in mo_ta.split()[:50]:
+        word = word.strip('.,!?;:()[]{}"\'').lower()
+        if len(word) > 1:
+            product_keywords.add(word)
+    
+    # Thêm màu sắc
+    if mau_sac:
+        for color in mau_sac.split(','):
+            color_clean = color.strip().lower()
+            if color_clean:
+                product_keywords.add(color_clean)
+    
+    # Thêm thuộc tính
+    if thuoc_tinh:
+        for attr in thuoc_tinh.split(','):
+            attr_clean = attr.strip().lower()
+            if attr_clean:
+                product_keywords.add(attr_clean)
+    
+    # Tính điểm: từ khóa trùng nhau
+    common_keywords = desc_keywords.intersection(product_keywords)
+    score += len(common_keywords) * 3  # Trọng số cao cho từ khóa trùng
+    
+    # Ưu tiên các từ khóa quan trọng (loại sản phẩm)
+    fashion_keywords = {'áo', 'quần', 'váy', 'đầm', 'áo thun', 'áo sơ mi', 'jeans', 
+                       'khoác', 'hoodie', 'sweater', 'jacket', 'blazer'}
+    
+    for keyword in fashion_keywords:
+        if keyword in desc_lower and keyword in ten.lower():
+            score += 8  # Trọng số rất cao cho loại sản phẩm trùng
+    
+    # Ưu tiên màu sắc trùng khớp
+    if mau_sac:
+        for color in mau_sac.split(','):
+            color_clean = color.strip().lower()
+            if color_clean in desc_lower:
+                score += 5  # Trọng số cao cho màu sắc trùng
+    
+    # Kiểm tra xem tên sản phẩm có trong mô tả ảnh không
+    for word in ten.split():
+        if len(word) > 3 and word in desc_lower:
+            score += 4
+    
+    return score
+
+# ============================================
+# HÀM TÌM SẢN PHẨM BẰNG MÔ TẢ ẢNH (CẢI TIẾN NÂNG CAO)
+# ============================================
+
+def find_product_by_image_description_enhanced(description: str) -> Optional[str]:
+    """
+    Tìm sản phẩm phù hợp nhất dựa trên mô tả ảnh - CẢI TIẾN NÂNG CAO
+    """
+    load_products()
+    
+    if not description or not PRODUCTS:
+        return None
+    
+    # Chuẩn hóa mô tả ảnh
+    desc_lower = normalize_vietnamese(description.lower())
+    print(f"[IMAGE MATCH ENHANCED] Mô tả ảnh: {desc_lower[:200]}...")
+    
+    # Tạo danh sách từ khóa quan trọng từ mô tả ảnh
+    desc_keywords = extract_keywords_from_description(desc_lower)
+    
+    # Tìm kiếm sản phẩm với điểm số cải tiến
+    product_scores = {}
+    
+    for ms, product in PRODUCTS.items():
+        score = calculate_product_similarity_score(ms, product, desc_lower, desc_keywords)
+        
+        if score > 0:
+            product_scores[ms] = score
+    
+    if not product_scores:
+        print("[IMAGE MATCH] Không tìm thấy sản phẩm nào phù hợp")
+        return None
+    
+    # Sắp xếp theo điểm cao nhất
+    sorted_products = sorted(product_scores.items(), key=lambda x: x[1], reverse=True)
+    
+    # Lấy sản phẩm có điểm cao nhất
+    best_ms, best_score = sorted_products[0]
+    
+    print(f"[IMAGE MATCH SCORES] Điểm cao nhất: {best_ms} với {best_score} điểm")
+    
+    # Ngưỡng tối thiểu: cần ít nhất 5 điểm để coi là phù hợp
+    if best_score >= 5:
+        product_name = PRODUCTS[best_ms].get("Ten", "")
+        print(f"[IMAGE MATCH SUCCESS] Tìm thấy {best_ms} - {product_name}")
+        return best_ms
+    
+    print(f"[IMAGE MATCH FAIL] Điểm quá thấp: {best_score}")
+    return None
+
+# ============================================
+# HÀM GỬI CAROUSEL GỢI Ý SẢN PHẨM
+# ============================================
+
+def send_suggestion_carousel(uid: str, suggestion_count: int = 3):
+    """
+    Gửi carousel gợi ý các sản phẩm phổ biến
+    """
+    load_products()
+    
+    if not PRODUCTS:
+        send_message(uid, "Hiện tại chưa có sản phẩm nào trong hệ thống.")
+        return False
+    
+    # Lấy danh sách sản phẩm (ưu tiên sản phẩm có ảnh)
+    valid_products = []
+    for ms, product in PRODUCTS.items():
+        images_field = product.get("Images", "")
+        urls = parse_image_urls(images_field)
+        if urls:  # Chỉ lấy sản phẩm có ảnh
+            valid_products.append(ms)
+    
+    # Nếu không đủ sản phẩm có ảnh, lấy tất cả
+    if len(valid_products) < suggestion_count:
+        valid_products = list(PRODUCTS.keys())
+    
+    # Lấy ngẫu nhiên hoặc lấy sản phẩm đầu tiên
+    suggestion_products = valid_products[:suggestion_count]
+    
+    elements = []
+    for ms in suggestion_products:
+        product = PRODUCTS[ms]
+        images_field = product.get("Images", "")
+        urls = parse_image_urls(images_field)
+        image_url = urls[0] if urls else ""
+        
+        gia_int = extract_price_int(product.get("Gia", "")) or 0
+        
+        # LẤY TÊN SẢN PHẨM (KHÔNG BAO GỒM MÃ SẢN PHẨM)
+        product_name = product.get('Ten', '')
+        
+        # KIỂM TRA NẾU TÊN ĐÃ CHỨA MÃ SẢN PHẨM, CHỈ GIỮ TÊN
+        if f"[{ms}]" in product_name or ms in product_name:
+            # Xóa mã sản phẩm khỏi tên
+            product_name = product_name.replace(f"[{ms}]", "").replace(ms, "").strip()
+        
+        element = {
+            "title": product_name,  # CHỈ HIỂN THỊ TÊN SẢN PHẨM
+            "image_url": image_url,
+            "subtitle": f"💰 Giá: {gia_int:,.0f} đ",
+            "buttons": [
+                {
+                    "type": "postback",
+                    "title": "🌟 Ưu điểm SP",
+                    "payload": f"PRODUCT_HIGHLIGHTS_{ms}"
+                },
+                {
+                    "type": "postback", 
+                    "title": "🖼️ Xem ảnh",
+                    "payload": f"VIEW_IMAGES_{ms}"
+                },
+                {
+                    "type": "postback",
+                    "title": "🛒 Đặt ngay",
+                    "payload": f"ORDER_BUTTON_{ms}"
+                }
+            ]
+        }
+        elements.append(element)
+    
+    if elements:
+        send_carousel_template(uid, elements)
+        return True
+    return False
+
+# ============================================
+# HÀM TÌM SẢN PHẨM TỪ ẢNH (CẢI TIẾN MỚI)
+# ============================================
+
+def find_product_by_image(image_url: str) -> Optional[str]:
+    """
+    Tìm sản phẩm từ ảnh bằng cách sử dụng Vision API để lấy mô tả,
+    sau đó so khớp mô tả với tên và mô tả sản phẩm trong database.
+    Trả về mã sản phẩm (MS) nếu tìm thấy, ngược lại trả về None.
+    """
+    # Bước 1: Kiểm tra xem có phải emoji/sticker không
+    if is_emoji_or_sticker_image(image_url):
+        print(f"[IMAGE CHECK] Đây là emoji/sticker, bỏ qua")
+        return None
+    
+    # Bước 1.5: Kiểm tra ảnh có hợp lệ không
+    if not is_valid_product_image(image_url):
+        print(f"[INVALID IMAGE] Ảnh không hợp lệ: {image_url[:100]}")
+        return None
+    
+    # Bước 2: Phân tích ảnh để lấy mô tả
+    print(f"[IMAGE PROCESS] Đang phân tích ảnh bằng Vision API...")
+    image_description = analyze_image_with_vision_api(image_url)
+    
+    if not image_description:
+        print(f"[IMAGE PROCESS] Không thể phân tích ảnh")
+        return None
+    
+    print(f"[IMAGE DESCRIPTION] {image_description[:300]}...")
+    
+    # Bước 3: Tìm sản phẩm phù hợp với mô tả
+    found_ms = find_product_by_image_description_enhanced(image_description)
+    
+    if found_ms:
+        print(f"[IMAGE MATCH] Tìm thấy sản phẩm {found_ms} từ ảnh")
+        return found_ms
+    
+    print(f"[IMAGE MATCH] Không tìm thấy sản phẩm phù hợp")
+    return None
+
+# ============================================
+# HELPER: TRÍCH XUẤT MÃ SẢN PHẨM
+# ============================================
+
+def extract_ms_from_retailer_id(retailer_id: str) -> Optional[str]:
+    if not retailer_id:
+        return None
+    
+    parts = retailer_id.split('_')
+    if not parts:
+        return None
+    
+    base_id = parts[0].upper()
+    if re.match(r'MS\d{6}', base_id):
+        return base_id
+    
+    match = re.search(r'MS(\d+)', base_id)
+    if match:
+        num = match.group(1)
+        num_6 = num.zfill(6)
+        return "MS" + num_6
+    
+    return None
+
+def extract_ms_from_ad_title(ad_title: str) -> Optional[str]:
+    if not ad_title:
+        return None
+    
+    ad_title_lower = ad_title.lower()
+    
+    match = re.search(r'mã\s*(\d{1,6})', ad_title_lower)
+    if match:
+        num = match.group(1)
+        num_6 = num.zfill(6)
+        return "MS" + num_6
+    
+    match = re.search(r'ms\s*(\d{1,6})', ad_title_lower)
+    if match:
+        num = match.group(1)
+        num_6 = num.zfill(6)
+        return "MS" + num_6
+    
+    match = re.search(r'\b(\d{2,6})\b', ad_title)
+    if match:
+        num = match.group(1)
+        num_6 = num.zfill(6)
+        return "MS" + num_6
+    
+    return None
+
+# ============================================
+# HELPER: KIỂM TRA ECHO MESSAGE (ĐÃ CẢI THIỆN)
+# ============================================
+
+def is_bot_generated_echo(echo_text: str, app_id: str = "", attachments: list = None) -> bool:
+    # ƯU TIÊN: Nếu có #MS trong tin nhắn => KHÔNG PHẢI BOT (là comment từ Fchat)
+    if echo_text and "#MS" in echo_text.upper():
+        return False
+    
+    if app_id in BOT_APP_IDS:
+        return True
+    
+    if echo_text:
+        echo_text_lower = echo_text.lower()
+        
+        # Các dấu hiệu bot RÕ RÀNG (chỉ những mẫu rất đặc trưng)
+        clear_bot_phrases = [
+            "🌟 **5 ưu điểm nổi bật**",
+            "🛒 đơn hàng mới",
+            "🎉 shop đã nhận được đơn hàng",
+            "dạ, phần này trong hệ thống chưa có thông tin ạ",
+            "dạ em đang gặp chút trục trặc",
+            "💰 giá sản phẩm:",
+            "📝 mô tả:",
+            "📌 [ms",
+            "🛒 đơn hàng mới",
+            "🎉 shop đã nhận được đơn hàng",
+        ]
+        
+        for phrase in clear_bot_phrases:
+            if phrase in echo_text_lower:
+                print(f"[ECHO BOT PHRASE] Phát hiện cụm bot: {phrase}")
+                return True
+        
+        # Bot format rõ ràng
+        if re.search(r'^\*\*.*\*\*', echo_text) or re.search(r'^\[MS\d+\]', echo_text, re.IGNORECASE):
+            print(f"[ECHO BOT FORMAT] Phát hiện format bot")
+            return True
+        
+        # Tin nhắn quá dài (>300) và có cấu trúc bot
+        if len(echo_text) > 300 and ("dạ," in echo_text_lower or "ạ!" in echo_text_lower):
+            print(f"[ECHO LONG BOT] Tin nhắn dài có cấu trúc bot: {len(echo_text)} chars")
+            return True
+        
+        # Các pattern khác giảm độ nhạy (chỉ nhận diện khi rất rõ)
+        bot_patterns_regex = [
+            r"dạ,.*\d{1,3}[.,]?\d{0,3}\s*đ.*\d{1,3}[.,]?\d{0,3}\s*đ",  # Nhiều giá tiền (rất có thể là bot)
+            r"dạ,.*\d+\s*cm.*\d+\s*cm",  # Nhiều kích thước
+        ]
+        
+        for pattern in bot_patterns_regex:
+            if re.search(pattern, echo_text_lower):
+                print(f"[ECHO BOT PATTERN] Phát hiện pattern: {pattern}")
+                return True
+    
+    return False
+
+# ============================================
+# HÀM LẤY NỘI DUNG BÀI VIẾT TỪ POST_ID
+# ============================================
+
+def get_post_content_from_facebook(post_id: str) -> Optional[dict]:
+    """
+    Lấy nội dung bài viết từ Facebook Graph API
+    Trả về dict chứa message và các thông tin khác
+    """
+    if not PAGE_ACCESS_TOKEN or not post_id:
+        print(f"[GET POST CONTENT] Thiếu token hoặc post_id")
+        return None
+    
+    try:
+        # Graph API endpoint để lấy nội dung bài viết
+        url = f"https://graph.facebook.com/v12.0/{post_id}"
+        params = {
+            'fields': 'id,message,created_time,permalink_url',
+            'access_token': PAGE_ACCESS_TOKEN
+        }
+        
+        response = requests.get(url, params=params, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            print(f"[GET POST CONTENT] Đã lấy nội dung bài viết {post_id}")
+            return data
+        else:
+            print(f"[GET POST CONTENT] Lỗi API {response.status_code}: {response.text}")
+            return None
+            
+    except Exception as e:
+        print(f"[GET POST CONTENT] Exception: {e}")
+        return None
+
+# ============================================
+# HÀM TRÍCH XUẤT MS TỪ BÀI VIẾT (ĐÃ SỬA - CHỈ DÙNG REGEX)
+# ============================================
+
+def extract_ms_from_post_content(post_data: dict) -> Optional[str]:
+    """
+    Trích xuất mã sản phẩm từ nội dung bài viết - CHỈ DÙNG REGEX
+    Trả về mã sản phẩm (MSxxxxxx) nếu tìm thấy, ngược lại trả về None
+    """
+    if not post_data:
+        return None
+    
+    message = post_data.get('message', '')
+    post_id = post_data.get('id', '')
+    
+    print(f"[EXTRACT MS FROM POST] Đang phân tích bài viết {post_id}: {message[:100]}...")
+    
+    if not message:
+        return None
+    
+    # PHƯƠNG PHÁP 1: Tìm MS trong dấu ngoặc vuông [MSxxxxxx] - ƯU TIÊN CAO NHẤT
+    bracket_patterns = [
+        r"\[(MS\d{2,6})\]",  # [MS000034]
+        r"\[MS\s*(\d{2,6})\]",  # [MS 000034] với khoảng trắng
+    ]
+    
+    for pattern in bracket_patterns:
+        matches = re.findall(pattern, message, re.IGNORECASE)
+        for match in matches:
+            if isinstance(match, tuple):
+                match = match[0]
+            
+            # match có thể là "MS000038" hoặc "000038"
+            # Chuẩn hóa về MSxxxxxx
+            if match.upper().startswith('MS'):
+                # Đã có MS ở đầu, chỉ cần lấy số
+                num_part = match[2:].lstrip('0')
+            else:
+                # Chỉ có số
+                num_part = match.lstrip('0')
+            
+            if not num_part:
+                num_part = '0'
+            
+            full_ms = f"MS{num_part.zfill(6)}"
+            print(f"[EXTRACT MS FROM POST] Tìm thấy {full_ms} qua bracket pattern {pattern}")
+            return full_ms
+    
+    # PHƯƠNG PHÁP 2: Tìm MSxxxxxx trực tiếp
+    ms_patterns = [
+        (r"\[(MS\d{6})\]", True),  # [MS000046] -> đủ 6 số
+        (r"\b(MS\d{6})\b", True),  # MS000046
+        (r"#(MS\d{6})", True),     # #MS000046
+        (r"Mã\s*:\s*(MS\d{6})", True),  # Mã: MS000046
+        (r"SP\s*:\s*(MS\d{6})", True),  # SP: MS000046
+        (r"MS\s*(\d{6})", False),  # MS 000046 -> chỉ có số
+        (r"mã\s*(\d{6})", False),  # mã 000046 -> chỉ có số
+        (r"MS\s*(\d{2,5})\b", False),  # MS 34 -> 2-5 chữ số
+        (r"mã\s*(\d{2,5})\b", False),  # mã 34 -> 2-5 chữ số
+    ]
+    
+    for pattern, is_full_ms in ms_patterns:
+        matches = re.findall(pattern, message, re.IGNORECASE)
+        for match in matches:
+            if isinstance(match, tuple):
+                match = match[0]
+            
+            if is_full_ms:
+                # match là MSxxxxxx đầy đủ
+                # Trích xuất số từ MSxxxxxx
+                num_part = match[2:].lstrip('0')
+            else:
+                # match chỉ là số
+                num_part = match.lstrip('0')
+            
+            if not num_part:
+                num_part = '0'
+            
+            full_ms = f"MS{num_part.zfill(6)}"
+            print(f"[EXTRACT MS FROM POST] Tìm thấy {full_ms} qua pattern {pattern}")
+            return full_ms
+    
+    # PHƯƠNG PHÁP 3: Tìm số 6 chữ số
+    six_digit_numbers = re.findall(r'\b(\d{6})\b', message)
+    for num in six_digit_numbers:
+        num_part = num.lstrip('0')
+        if not num_part:
+            num_part = '0'
+        full_ms = f"MS{num_part.zfill(6)}"
+        print(f"[EXTRACT MS FROM POST] Tìm thấy số 6 chữ số {num} -> {full_ms}")
+        return full_ms
+    
+    # PHƯƠNG PHÁP 4: Tìm số 2-5 chữ số
+    short_numbers = re.findall(r'\b(\d{2,5})\b', message)
+    for num in short_numbers:
+        num_part = num.lstrip('0')
+        if not num_part:
+            num_part = '0'
+        full_ms = f"MS{num_part.zfill(6)}"
+        print(f"[EXTRACT MS FROM POST] Tìm thấy số ngắn {num} -> {full_ms}")
+        return full_ms
+    
+    # PHƯƠNG PHÁP 5: Fallback - tìm bất kỳ "MS" nào trong ngoặc vuông
+    fallback_pattern = r'\[.*?(MS\d+).*?\]'
+    fallback_matches = re.findall(fallback_pattern, message, re.IGNORECASE)
+    for match in fallback_matches:
+        # Tách số từ MS
+        num_match = re.search(r'(\d+)', match)
+        if num_match:
+            num = num_match.group(1)
+            num_part = num.lstrip('0')
+            if not num_part:
+                num_part = '0'
+            full_ms = f"MS{num_part.zfill(6)}"
+            print(f"[EXTRACT MS FROM POST] Tìm thấy {full_ms} qua fallback pattern")
+            return full_ms
+    
+    print(f"[EXTRACT MS FROM POST] Không tìm thấy MS trong bài viết")
+    return None
+
+# ============================================
+# HÀM XỬ LÝ COMMENT TỪ FEED (HOÀN CHỈNH - ĐÃ SỬA)
+# ============================================
+
+def handle_feed_comment(change_data: dict):
+    """
+    Xử lý comment từ feed với logic:
+    1. Lấy post_id từ comment
+    2. Lấy nội dung bài viết gốc
+    3. Trích xuất MS từ caption (CHỈ DÙNG REGEX)
+    4. Load products và kiểm tra tồn tại
+    5. Cập nhật context cho user và gửi tin nhắn tự động
+    """
+    try:
+        # 1. Lấy thông tin cơ bản
+        from_user = change_data.get("from", {})
+        user_id = from_user.get("id")
+        user_name = from_user.get("name", "")
+        message_text = change_data.get("message", "")
+        post_id = change_data.get("post_id", "")
+        
+        if not user_id or not post_id:
+            print(f"[FEED COMMENT] Thiếu user_id hoặc post_id")
+            return None
+        
+        print(f"[FEED COMMENT] User {user_id} ({user_name}) comment: '{message_text}' trên post {post_id}")
+        
+        # 2. Kiểm tra xem có phải comment từ page không (bỏ qua)
+        if PAGE_ID and user_id == PAGE_ID:
+            print(f"[FEED COMMENT] Bỏ qua comment từ chính page")
+            return None
+        
+        # 3. Lấy nội dung bài viết gốc
+        post_data = get_post_content_from_facebook(post_id)
+        
+        if not post_data:
+            print(f"[FEED COMMENT] Không lấy được nội dung bài viết {post_id}")
+            return None
+        
+        # LOG CHI TIẾT ĐỂ DEBUG
+        post_message = post_data.get('message', '')
+        print(f"[FEED COMMENT DEBUG] Nội dung bài viết ({len(post_message)} ký tự):")
+        print(f"[FEED COMMENT DEBUG] {post_message[:500]}")
+        
+        # 4. Trích xuất MS từ caption bài viết (CHỈ DÙNG REGEX - KHÔNG KIỂM TRA PRODUCTS)
+        detected_ms = extract_ms_from_post_content(post_data)
+        
+        if not detected_ms:
+            print(f"[FEED COMMENT] Không tìm thấy MS trong bài viết {post_id}")
+            return None
+        
+        # 5. Load products và kiểm tra MS có tồn tại trong database
+        load_products(force=True)  # Load với force=True để đảm bảo có dữ liệu mới nhất
+        
+        # Kiểm tra nếu MS trực tiếp tồn tại
+        if detected_ms not in PRODUCTS:
+            print(f"[FEED COMMENT] MS {detected_ms} không tồn tại trong database, tìm trong mapping...")
+            # Thử tìm trong mapping số ngắn
+            num_part = detected_ms[2:].lstrip('0')
+            if num_part and num_part in PRODUCTS_BY_NUMBER:
+                detected_ms = PRODUCTS_BY_NUMBER[num_part]
+                print(f"[FEED COMMENT] Đã map sang {detected_ms}")
+            else:
+                print(f"[FEED COMMENT] MS {detected_ms} không tồn tại trong database")
+                return None
+        
+        # 6. Cập nhật context cho user (RESET COUNTER để áp dụng first message rule)
+        print(f"[FEED COMMENT MS] Phát hiện MS {detected_ms} từ post {post_id} cho user {user_id}")
+        
+        # Gọi hàm cập nhật context mới (reset counter)
+        update_context_with_new_ms(user_id, detected_ms, "feed_comment")
+        
+        # Lưu thêm thông tin về bài viết vào context
+        ctx = USER_CONTEXT[user_id]
+        ctx["source_post_id"] = post_id
+        ctx["source_post_content"] = post_data.get('message', '')[:300]
+        ctx["source_post_url"] = post_data.get('permalink_url', '')
+        
+        # 7. GỬI TIN NHẮN TỰ ĐỘNG TIẾP THỊ SẢN PHẨM BẰNG GPT
+        # Chỉ gửi nếu user chưa nhắn tin trước đó hoặc real_message_count = 0
+        if ctx.get("real_message_count", 0) == 0:
+            try:
+                # Sử dụng GPT để tạo tin nhắn tiếp thị dựa trên ưu điểm sản phẩm
+                marketing_message = generate_marketing_message(detected_ms, user_name)
+                if marketing_message:
+                    send_message(user_id, marketing_message)
+                    print(f"[FEED COMMENT AUTO REPLY] Đã gửi tin nhắn tiếp thị bằng GPT cho user {user_id}")
+                else:
+                    # Fallback nếu không tạo được tin nhắn
+                    # Lấy tên sản phẩm (loại bỏ mã nếu có trong tên)
+                    product = PRODUCTS[detected_ms]
+                    product_name = product.get('Ten', '')
+                    if f"[{detected_ms}]" in product_name or detected_ms in product_name:
+                        product_name = product_name.replace(f"[{detected_ms}]", "").replace(detected_ms, "").strip()
+                    
+                    send_message(user_id, f"Chào {user_name}! 👋\n\nCảm ơn ac đã bình luận. Sản phẩm ac quan tâm là {product_name}. ac có thể hỏi em bất kỳ thông tin gì về sản phẩm này ạ!")
+                
+                # Tăng counter để không gửi lại lần nữa
+                ctx["real_message_count"] = 1
+                
+            except Exception as e:
+                print(f"[FEED COMMENT AUTO REPLY ERROR] Lỗi gửi tin nhắn: {e}")
+        else:
+            print(f"[FEED COMMENT SKIP AUTO REPLY] User {user_id} đã có real_message_count = {ctx.get('real_message_count')}, bỏ qua auto reply")
+        
+        return detected_ms
+        
+    except Exception as e:
+        print(f"[FEED COMMENT ERROR] Lỗi xử lý comment: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+# ============================================
+# HELPER: SEND MESSAGE
+# ============================================
+
+def call_facebook_send_api(payload: dict, retry_count=2):
+    if not PAGE_ACCESS_TOKEN:
+        print("[WARN] PAGE_ACCESS_TOKEN chưa được cấu hình")
+        return {}
+    
+    url = f"https://graph.facebook.com/v12.0/me/messages?access_token={PAGE_ACCESS_TOKEN}"
+    
+    for attempt in range(retry_count):
+        try:
+            resp = requests.post(url, json=payload, timeout=10)
+            if resp.status_code == 200:
+                return resp.json()
+            else:
+                if attempt < retry_count - 1:
+                    time.sleep(0.5)
+        except Exception as e:
+            if attempt < retry_count - 1:
+                time.sleep(0.5)
+    
+    return {}
+
+def send_message(recipient_id: str, text: str):
+    if not text:
+        return
+    if len(text) > 2000:
+        text = text[:1997] + "..."
+    
+    payload = {
+        "recipient": {"id": recipient_id},
+        "message": {"text": text},
+    }
+    return call_facebook_send_api(payload)
+
+def send_image(recipient_id: str, image_url: str):
+    if not image_url:
+        return ""
+    payload = {
+        "recipient": {"id": recipient_id},
+        "message": {
+            "attachment": {
+                "type": "image",
+                "payload": {"url": image_url, "is_reusable": True},
+            }
+        },
+    }
+    return call_facebook_send_api(payload)
+
+def send_image_safe(recipient_id: str, image_url: str, timeout: int = 3):
+    if not image_url:
+        return ""
+    
+    payload = {
+        "recipient": {"id": recipient_id},
+        "message": {
+            "attachment": {
+                "type": "image",
+                "payload": {"url": image_url, "is_reusable": True},
+            }
+        },
+    }
+    
+    try:
+        resp = requests.post(
+            f"https://graph.facebook.com/v12.0/me/messages?access_token={PAGE_ACCESS_TOKEN}",
+            json=payload,
+            timeout=timeout
+        )
+        if resp.status_code == 200:
+            return resp.json()
+        else:
+            return {}
+    except requests.exceptions.Timeout:
+        print(f"⏰ Timeout khi gửi ảnh: {image_url[:50]}...")
+        return {}
+    except Exception as e:
+        print(f"Lỗi khi gửi ảnh: {str(e)}")
+        return {}
+
+def send_carousel_template(recipient_id: str, elements: list):
+    if not elements:
+        return ""
+    payload = {
+        "recipient": {"id": recipient_id},
+        "message": {
+            "attachment": {
+                "type": "template",
+                "payload": {
+                    "template_type": "generic",
+                    "elements": elements[:10],
+                },
+            }
+        },
+    }
+    return call_facebook_send_api(payload)
+
+def send_quick_replies(recipient_id: str, text: str, quick_replies: list):
+    payload = {
+        "recipient": {"id": recipient_id},
+        "message": {
+            "text": text,
+            "quick_replies": quick_replies,
+        },
+    }
+    return call_facebook_send_api(payload)
+
+# ============================================
+# HELPER: PRODUCTS
+# ============================================
+
+def parse_image_urls(raw: str):
+    if not raw:
+        return []
+    
+    parts = re.split(r'[,\n;|]+', raw)
+    urls = []
+    
+    for p in parts:
+        p = p.strip()
+        if not p:
+            continue
+        p = re.sub(r'^[\'"\s]+|[\'"\s]+$', '', p)
+        
+        if re.match(r'^https?://', p) or any(domain in p.lower() for domain in [
+            'alicdn.com', 'taobao', '1688.com', '.jpg', '.jpeg', 
+            '.png', '.webp', '.gif', 'image', 'img', 'photo'
+        ]):
+            urls.append(p)
+    
+    seen = set()
+    result = []
+    for u in urls:
+        if u not in seen:
+            seen.add(u)
+            result.append(u)
+    
+    return result
+
+def extract_price_int(price_str: str):
+    if not price_str:
+        return None
+    
+    # Loại bỏ ký tự không phải số, dấu chấm, dấu phẩy
+    cleaned = re.sub(r'[^\d.,]', '', str(price_str))
+    
+    if not cleaned:
+        return None
+    
+    # Xử lý các định dạng giá phổ biến
+    # 1. Định dạng Việt Nam: 1.000.000
+    if cleaned.count('.') > 1 and cleaned.count(',') <= 1:
+        # Giả sử dấu chấm là phân cách nghìn, dấu phẩy là thập phân
+        cleaned = cleaned.replace('.', '')
+        if ',' in cleaned:
+            cleaned = cleaned.replace(',', '.')
+    
+    # 2. Định dạng quốc tế: 1,000,000.00
+    elif cleaned.count(',') > 1 and cleaned.count('.') <= 1:
+        # Giả sử dấu phẩy là phân cách nghìn, dấu chấm là thập phân
+        cleaned = cleaned.replace(',', '')
+    
+    # 3. Định dạng hỗn hợp
+    else:
+        # Giữ lại số cuối cùng trước dấu phẩy hoặc chấm
+        cleaned = cleaned.replace(',', '').replace('.', '')
+    
+    try:
+        # Lấy phần nguyên nếu có dấu thập phân
+        if '.' in cleaned:
+            cleaned = cleaned.split('.')[0]
+        
+        return int(float(cleaned)) if cleaned else None
+    except Exception:
+        return None
+
+def load_products(force=False):
+    global PRODUCTS, LAST_LOAD, PRODUCTS_BY_NUMBER
+    now = time.time()
+    if not force and PRODUCTS and (now - LAST_LOAD) < LOAD_TTL:
+        return
+
+    if not GOOGLE_SHEET_CSV_URL:
+        print("❌ GOOGLE_SHEET_CSV_URL chưa được cấu hình!")
+        return
+
+    try:
+        print(f"🟦 Loading sheet: {GOOGLE_SHEET_CSV_URL}")
+        r = requests.get(GOOGLE_SHEET_CSV_URL, timeout=20)
+        r.raise_for_status()
+        r.encoding = "utf-8"
+        content = r.text
+
+        reader = csv.DictReader(content.splitlines())
+        products = {}
+        products_by_number = {}
+
+        for raw_row in reader:
+            row = dict(raw_row)
+
+            ms = (row.get("Mã sản phẩm") or "").strip()
+            if not ms:
+                continue
+
+            ten = (row.get("Tên sản phẩm") or "").strip()
+            if not ten:
+                continue
+
+            gia_raw = (row.get("Giá bán") or "").strip()
+            images = (row.get("Images") or "").strip()
+            videos = (row.get("Videos") or "").strip()
+            tonkho_raw = (row.get("Tồn kho") or row.get("Có thể bán") or "").strip()
+            mota = (row.get("Mô tả") or "").strip()
+            mau = (row.get("màu (Thuộc tính)") or "").strip()
+            size = (row.get("size (Thuộc tính)") or "").strip()
+            thuoc_tinh = (row.get("Thuộc tính") or "").strip()
+
+            gia_int = extract_price_int(gia_raw)
+            try:
+                tonkho_int = int(str(tonkho_raw)) if str(tonkho_raw).strip() else None
+            except Exception:
+                tonkho_int = None
+
+            variant_images = parse_image_urls(images)
+            variant_image = variant_images[0] if variant_images else ""
+
+            if ms not in products:
+                base = {
+                    "MS": ms,
+                    "Ten": ten,
+                    "Gia": gia_raw,
+                    "MoTa": mota,
+                    "Images": images,
+                    "Videos": videos,
+                    "Tồn kho": tonkho_raw,
+                    "màu (Thuộc tính)": mau,
+                    "size (Thuộc tính)": size,
+                    "Thuộc tính": thuoc_tinh,
+                    "FullRow": row,
+                }
+                base["variants"] = []
+                base["all_colors"] = set()
+                base["all_sizes"] = set()
+                products[ms] = base
+
+            p = products[ms]
+
+            variant = {
+                "mau": mau,
+                "size": size,
+                "gia": gia_int,
+                "gia_raw": gia_raw,
+                "tonkho": tonkho_int if tonkho_int is not None else tonkho_raw,
+                "images": images,
+                "variant_image": variant_image,
+            }
+            p["variants"].append(variant)
+
+            if mau:
+                p["all_colors"].add(mau)
+            if size:
+                p["all_sizes"].add(size)
+
+        for ms, p in products.items():
+            colors = sorted(list(p.get("all_colors") or []))
+            sizes = sorted(list(p.get("all_sizes") or []))
+            p["màu (Thuộc tính)"] = ", ".join(colors) if colors else p.get("màu (Thuộc tính)", "")
+            p["size (Thuộc tính)"] = ", ".join(sizes) if sizes else p.get("size (Thuộc tính)", "")
+            
+            if ms.startswith("MS"):
+                num_part = ms[2:]
+                num_without_leading_zeros = num_part.lstrip('0')
+                if num_without_leading_zeros:
+                    products_by_number[num_without_leading_zeros] = ms
+
+        PRODUCTS = products
+        PRODUCTS_BY_NUMBER = products_by_number
+        LAST_LOAD = now
+        
+        total_variants = sum(len(p['variants']) for p in products.values())
+        
+        print(f"📦 Loaded {len(PRODUCTS)} products với {total_variants} variants.")
+        print(f"🔢 Created mapping for {len(PRODUCTS_BY_NUMBER)} product numbers")
+                
+    except Exception as e:
+        print("❌ load_products ERROR:", e)
+
+def get_variant_image(ms: str, color: str, size: str) -> str:
+    if ms not in PRODUCTS:
+        return ""
+    
+    product = PRODUCTS[ms]
+    variants = product.get("variants", [])
+    
+    for variant in variants:
+        variant_color = variant.get("mau", "").strip().lower()
+        variant_size = variant.get("size", "").strip().lower()
+        
+        input_color = color.strip().lower()
+        input_size = size.strip().lower()
+        
+        color_match = (not input_color) or (variant_color == input_color) or (input_color == "mặc định" and not variant_color)
+        size_match = (not input_size) or (variant_size == input_size) or (input_size == "mặc định" and not variant_size)
+        
+        if color_match and size_match:
+            variant_image = variant.get("variant_image", "")
+            if variant_image:
+                return variant_image
+    
+    images_field = product.get("Images", "")
+    urls = parse_image_urls(images_field)
+    return urls[0] if urls else ""
+
+# ============================================
+# HÀM PHÂN TÍCH GIÁ THÔNG MINH
+# ============================================
+
+def analyze_product_price_patterns(ms: str) -> dict:
+    """
+    Phân tích mẫu giá của sản phẩm và trả về cấu trúc dữ liệu rõ ràng
+    """
+    if ms not in PRODUCTS:
+        return {"error": "Product not found"}
+    
+    product = PRODUCTS[ms]
+    variants = product.get("variants", [])
+    
+    price_by_color = {}
+    price_by_size = {}
+    price_groups = {}
+    
+    # 1. Phân tích theo màu
+    for variant in variants:
+        color = variant.get("mau", "Mặc định").strip()
+        size = variant.get("size", "Mặc định").strip()
+        price = variant.get("gia", 0)
+        
+        if price:
+            # Nhóm theo màu
+            if color not in price_by_color:
+                price_by_color[color] = {"price": price, "sizes": set()}
+            price_by_color[color]["sizes"].add(size)
+            
+            # Nhóm theo size
+            if size not in price_by_size:
+                price_by_size[size] = {"price": price, "colors": set()}
+            price_by_size[size]["colors"].add(color)
+            
+            # Nhóm theo mức giá
+            if price not in price_groups:
+                price_groups[price] = []
+            price_groups[price].append({"color": color, "size": size})
+    
+    # 2. Kiểm tra xem giá có thay đổi theo màu không
+    color_based = True
+    for color, data in price_by_color.items():
+        if len(data["sizes"]) > 1 and any(v.get("mau", "").strip() == color and v.get("gia", 0) != data["price"] for v in variants):
+            color_based = False
+            break
+    
+    # 3. Kiểm tra xem giá có thay đổi theo size không
+    size_based = True
+    for size, data in price_by_size.items():
+        if len(data["colors"]) > 1 and any(v.get("size", "").strip() == size and v.get("gia", 0) != data["price"] for v in variants):
+            size_based = False
+            break
+    
+    # 4. Phân tích mẫu giá phức tạp
+    complex_pattern = not (color_based or size_based)
+    
+    # Tạo cấu trúc trả về
+    result = {
+        "ms": ms,
+        "product_name": product.get("Ten", ""),
+        "total_variants": len(variants),
+        "price_pattern": "unknown",
+        "base_price": extract_price_int(product.get("Gia", "")) or 0,
+        "detailed_analysis": {}
+    }
+    
+    if color_based and price_by_color:
+        result["price_pattern"] = "color_based"
+        result["detailed_analysis"] = {
+            "type": "color_based",
+            "prices": []
+        }
+        for color, data in sorted(price_by_color.items()):
+            result["detailed_analysis"]["prices"].append({
+                "color": color,
+                "price": data["price"],
+                "applicable_sizes": f"Tất cả size ({', '.join(sorted(data['sizes']))})" if data["sizes"] else "Tất cả size"
+            })
+    
+    elif size_based and price_by_size:
+        result["price_pattern"] = "size_based"
+        result["detailed_analysis"] = {
+            "type": "size_based",
+            "prices": []
+        }
+        for size, data in sorted(price_by_size.items()):
+            result["detailed_analysis"]["prices"].append({
+                "size": size,
+                "price": data["price"],
+                "applicable_colors": f"Tất cả màu ({', '.join(sorted(data['colors']))})" if data["colors"] else "Tất cả màu"
+            })
+    
+    elif complex_pattern and price_groups:
+        result["price_pattern"] = "complex_based"
+        result["detailed_analysis"] = {
+            "type": "complex_based",
+            "price_groups": []
+        }
+        for price, items in sorted(price_groups.items()):
+            if len(items) <= 5:
+                variants_list = [f"{item['color']}/{item['size']}" for item in items]
+                display_text = ", ".join(variants_list)
+            else:
+                variants_list = [f"{item['color']}/{item['size']}" for item in items[:3]]
+                display_text = f"{', '.join(variants_list)} và {len(items) - 3} phân loại khác"
+            
+            result["detailed_analysis"]["price_groups"].append({
+                "price": price,
+                "count": len(items),
+                "variants": display_text,
+                "all_variants": items[:10]
+            })
+    else:
+        result["price_pattern"] = "single_price"
+        result["detailed_analysis"] = {
+            "type": "single_price",
+            "price": result["base_price"]
+        }
+    
+    return result
+
+def get_product_data_for_gpt(ms: str) -> dict:
+    """Lấy dữ liệu sản phẩm dưới dạng dictionary đơn giản cho GPT"""
+    if ms not in PRODUCTS:
+        return None
+    
+    product = PRODUCTS[ms]
+    
+    images_field = product.get("Images", "")
+    image_urls = parse_image_urls(images_field)
+    unique_images = list(dict.fromkeys(image_urls))[:10]
+    
+    videos_field = product.get("Videos", "")
+    video_urls = parse_image_urls(videos_field)
+    
+    return {
+        "ms": ms,
+        "ten": product.get("Ten", ""),
+        "mo_ta": product.get("MoTa", ""),
+        "gia": product.get("Gia", ""),
+        "gia_int": extract_price_int(product.get("Gia", "")),
+        "mau_sac": product.get("màu (Thuộc tính)", ""),
+        "size": product.get("size (Thuộc tính)", ""),
+        "thuoc_tinh": product.get("Thuộc tính", ""),
+        "ton_kho": product.get("Tồn kho", ""),
+        "images": unique_images,
+        "videos": video_urls,
+        "variants": product.get("variants", [])[:5],
+        "all_colors": list(product.get("all_colors", set())),
+        "all_sizes": list(product.get("all_sizes", set()))
+    }
+
+# ============================================
+# GPT FUNCTION CALLING TOOLS
+# ============================================
+
+def get_tools_definition():
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_product_price_details",
+                "description": "Lấy thông tin giá chi tiết của sản phẩm, bao gồm các biến thể giá theo màu, size hoặc kết hợp",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"ms": {"type": "string", "description": "Mã sản phẩm MSxxxxxx"}},
+                    "required": ["ms"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_product_basic_info",
+                "description": "Lấy thông tin cơ bản của sản phẩm (tên, mô tả, màu sắc, size, thuộc tính, tồn kho)",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"ms": {"type": "string", "description": "Mã sản phẩm MSxxxxxx"}},
+                    "required": ["ms"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "send_product_images",
+                "description": "Gửi ảnh sản phẩm cho khách xem (tối đa 3 ảnh)",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"ms": {"type": "string", "description": "Mã sản phẩm"}},
+                    "required": ["ms"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "send_product_videos",
+                "description": "Gửi link video sản phẩm",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"ms": {"type": "string", "description": "Mã sản phẩm"}},
+                    "required": ["ms"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "provide_order_link",
+                "description": "Cung cấp link đặt hàng khi khách muốn mua",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"ms": {"type": "string", "description": "Mã sản phẩm"}},
+                    "required": ["ms"]
+                }
+            }
+        }
+    ]
+
+def execute_tool(uid, name, args):
+    ctx = USER_CONTEXT[uid]
+    ms = args.get("ms", "").upper() or ctx.get("last_ms")
+    domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
+    
+    if name == "get_product_price_details":
+        price_analysis = analyze_product_price_patterns(ms)
+        
+        return json.dumps({
+            "status": "success",
+            "analysis": price_analysis,
+            "formatted_instructions": """GPT HÃY DÙNG DỮ LIỆU NÀY ĐỂ TRẢ LỜI VỀ GIÁ:
+            
+            1. Nếu price_pattern là 'color_based':
+               - Liệt kê từng màu và giá
+               - Ví dụ: "Dạ, giá bán là:\nĐỏ: 250.000đ\nXanh: 290.000đ\nTrắng: 315.000đ\nÁp dụng cho tất cả các size ạ!"
+               
+            2. Nếu price_pattern là 'size_based':
+               - Liệt kê từng size và giá
+               - Ví dụ: "Dạ, giá bán là:\nM: 250.000đ\nL: 290.000đ\nXL: 315.000đ\nÁp dụng cho tất cả các màu ạ!"
+               
+            3. Nếu price_pattern là 'complex_based':
+               - Nhóm theo từng mức giá
+               - Ví dụ: "Em gửi anh chị bảng giá ạ:\n250.000đ (đỏ/M, xanh/L, trắng/L)\n290.000đ (đen/M, tím/2XL, đỏ/XL)\n315.000đ (trắng/2XL, xanh/XL, nâu/S)"
+               
+            4. Nếu price_pattern là 'single_price':
+               - Chỉ cần trả lời một giá duy nhất
+               - Ví dụ: "Dạ, giá sản phẩm là 250.000đ ạ!"
+               
+            LUÔN KẾT THÚC BẰNG: 'Anh/chị cần em tư vấn thêm gì không ạ?'"""
+        }, ensure_ascii=False)
+    
+    elif name == "get_product_basic_info":
+        product_data = get_product_data_for_gpt(ms)
+        
+        return json.dumps({
+            "status": "success",
+            "data": product_data,
+            "instructions": "GPT HÃY DÙNG DỮ LIỆU NÀY ĐỂ TRẢ LỜI VỀ: tên, mô tả, chất liệu, màu sắc, size, thuộc tính, tồn kho (trừ giá). Nếu không có thông tin, nói: 'Dạ, phần này trong hệ thống chưa có thông tin ạ'"
+        }, ensure_ascii=False)
+    
+    elif name == "send_product_images":
+        if ms not in PRODUCTS:
+            return "Sản phẩm không có ảnh."
+        
+        product = PRODUCTS[ms]
+        images_field = product.get("Images", "")
+        urls = parse_image_urls(images_field)
+        
+        if not urls:
+            return "Sản phẩm không có ảnh."
+        
+        seen = set()
+        sent_count = 0
+        for url in urls:
+            if url not in seen and sent_count < 3:
+                send_image_safe(uid, url, timeout=3)
+                seen.add(url)
+                sent_count += 1
+                time.sleep(0.5)
+        
+        return f"Đã gửi {sent_count} ảnh sản phẩm."
+    
+    elif name == "send_product_videos":
+        if ms not in PRODUCTS:
+            return "Sản phẩm không có video."
+        
+        product = PRODUCTS[ms]
+        videos_field = product.get("Videos", "")
+        urls = parse_image_urls(videos_field)
+        
+        if not urls:
+            return "Sản phẩm không có video."
+        
+        for url in urls[:2]:
+            send_message(uid, f"📹 Video sản phẩm: {url}")
+            time.sleep(0.5)
+        
+        return "Đã gửi link video."
+    
+    elif name == "provide_order_link":
+        if ms in PRODUCTS:
+            link = f"{domain}/order-form?ms={ms}&uid={uid}"
+            return json.dumps({
+                "order_link": link,
+                "ms": ms,
+                "product_name": PRODUCTS[ms].get('Ten', '')
+            }, ensure_ascii=False)
+        return "Không tìm thấy sản phẩm."
+    
+    return "Tool không xác định."
+
+# ============================================
+# CẢI THIỆN NGỮ CẢNH
+# ============================================
+
+def update_product_context(uid: str, ms: str):
+    ctx = USER_CONTEXT[uid]
+    ctx["last_ms"] = ms
+    
+    if "product_history" not in ctx:
+        ctx["product_history"] = []
+    
+    if not ctx["product_history"] or ctx["product_history"][0] != ms:
+        if ms in ctx["product_history"]:
+            ctx["product_history"].remove(ms)
+        ctx["product_history"].insert(0, ms)
+    
+    if len(ctx["product_history"]) > 5:
+        ctx["product_history"] = ctx["product_history"][:5]
+    
+    print(f"[CONTEXT UPDATE] User {uid}: last_ms={ms}, history={ctx['product_history']}")
+
+def detect_ms_from_text(text: str) -> Optional[str]:
+    """Phát hiện mã sản phẩm từ nhiều dạng text khác nhau - CHỈ khi có tiền tố"""
+    if not text: 
+        return None
+    
+    print(f"[DETECT MS DEBUG] Input text: {text}")
+    
+    # Chuẩn hóa text: lowercase, xóa dấu, xóa khoảng trắng thừa
+    text_norm = normalize_vietnamese(text.lower().strip())
+    
+    # Danh sách các tiền tố cần tìm - CHỈ lấy khi có các tiền tố này
+    prefixes = [
+        # Dạng chuẩn & đầy đủ
+        r'ms', r'mã', r'mã số', r'mã sản phẩm', r'sản phẩm', r'sản phẩm số',
+        r'sp',  # Dạng viết tắt
+        # Dạng không dấu
+        r'ma', r'ma so', r'ma san pham', r'san pham', r'san pham so',
+        # Dạng sai chính tả
+        r'mã sp', r'ma sp', r'mã s\.phẩm', r'ma san pham so', 
+        r'mã sp số', r'ma so sp',
+        # Dạng tự nhiên khi khách hỏi (cần có từ khóa)
+        r'xem mã', r'xem sp', r'xem sản phẩm', r'cho xem mã', 
+        r'tư vấn mã', r'tư vấn sp', r'giới thiệu mã', r'giới thiệu sp'
+    ]
+    
+    # Tạo pattern regex tổng hợp
+    # Format: (tiền tố) + (tùy chọn khoảng trắng) + (số 1-6 chữ số, có thể có số 0 ở đầu)
+    pattern_str = r'(?:' + '|'.join(prefixes) + r')\s*(\d{1,6})'
+    
+    # Tìm kiếm với regex
+    match = re.search(pattern_str, text_norm)
+    
+    if match:
+        num = match.group(1)
+        clean_n = num.lstrip("0")
+        
+        if clean_n and clean_n in PRODUCTS_BY_NUMBER:
+            found_ms = PRODUCTS_BY_NUMBER[clean_n]
+            print(f"[DETECT MS DEBUG] Tìm thấy qua tiền tố + số {num}: {found_ms}")
+            return found_ms
+    
+    # THÊM: Tìm MS dạng viết liền hoàn toàn (MSxxxxxx, msxxxxxx, spxxxxxx)
+    # Pattern: (MS|ms|sp) + (1-6 chữ số)
+    direct_pattern = r'\b(ms|sp|ms|sp)(\d{1,6})\b'
+    direct_match = re.search(direct_pattern, text_norm, re.IGNORECASE)
+    
+    if direct_match:
+        num = direct_match.group(2)
+        clean_n = num.lstrip("0")
+        
+        if clean_n and clean_n in PRODUCTS_BY_NUMBER:
+            found_ms = PRODUCTS_BY_NUMBER[clean_n]
+            print(f"[DETECT MS DEBUG] Tìm thấy dạng viết liền: {found_ms}")
+            return found_ms
+    
+    print(f"[DETECT MS DEBUG] Không tìm thấy MS trong text (chỉ tìm với tiền tố): {text}")
+    return None
+
+# ============================================
+# GPT FUNCTION CALLING HANDLER
+# ============================================
+
+def handle_text_with_function_calling(uid: str, text: str):
+    """GPT function calling LUÔN dựa vào last_ms từ context"""
+    load_products()
+    ctx = USER_CONTEXT[uid]
+    
+    # THÊM: Khôi phục context nếu cần
+    if not ctx.get("last_ms") or ctx.get("last_ms") not in PRODUCTS:
+        restored = restore_user_context_on_wakeup(uid)
+        if restored:
+            print(f"[GPT FUNCTION] Đã khôi phục context cho user {uid}")
+    
+    # ƯU TIÊN 1: Nếu phát hiện MS từ text (có tiền tố) thì cập nhật NGAY
+    detected_ms = detect_ms_from_text(text)
+    if detected_ms and detected_ms in PRODUCTS:
+        # Cập nhật MS mới NGAY LẬP TỨC
+        update_context_with_new_ms(uid, detected_ms, "text_detection")
+        print(f"[MS DETECTED IN GPT] Phát hiện và cập nhật MS mới: {detected_ms}")
+    
+    # ƯU TIÊN 2: Lấy MS từ context (sau khi đã cập nhật từ text nếu có)
+    current_ms = ctx.get("last_ms")
+    
+    # ƯU TIÊN 3: Nếu vẫn không có, kiểm tra xem tin nhắn có chứa số không
+    if not current_ms or current_ms not in PRODUCTS:
+        # Tìm bất kỳ số nào trong tin nhắn (1-6 chữ số) với TIỀN TỐ
+        text_norm = normalize_vietnamese(text.lower())
+        numbers = re.findall(r'\b(?:ms|mã|sp|ma|san pham)\s*(\d{1,6})\b', text_norm, re.IGNORECASE)
+        for num in numbers:
+            clean_num = num.lstrip('0')
+            if clean_num and clean_num in PRODUCTS_BY_NUMBER:
+                current_ms = PRODUCTS_BY_NUMBER[clean_num]
+                # Cập nhật context với MS mới
+                update_context_with_new_ms(uid, current_ms, "text_detection")
+                print(f"[MS FALLBACK IN GPT] Tìm thấy MS từ tiền tố + số: {current_ms}")
+                break
+    
+    # ƯU TIÊN 4: Nếu vẫn không có, hỏi lại khách
+    if not current_ms or current_ms not in PRODUCTS:
+        send_message(uid, "Dạ em chưa biết anh/chị đang hỏi về sản phẩm nào. Vui lòng cho em biết mã sản phẩm (ví dụ: MS000012) ạ!")
+        return
+    
+    fanpage_name = get_fanpage_name_from_api()
+    
+    system_prompt = f"""Bạn là nhân viên bán hàng của {fanpage_name}.
+
+**SẢN PHẨM ĐANG ĐƯỢC HỎI: {current_ms}**
+
+**QUY TẮC QUAN TRỌNG VỀ MÃ SẢN PHẨM:**
+1. CHỈ TRẢ LỜI VỀ SẢN PHẨM HIỆN TẠI: {current_ms}
+2. KHÔNG BAO GIỜ được nhắc đến mã sản phẩm khác trong câu trả lời
+3. Nếu cần thông tin, chỉ dùng tool với ms={current_ms}
+4. Nếu user hỏi về sản phẩm khác, yêu cầu họ cung cấp mã sản phẩm
+
+**QUY TẮC TRẢ LỜI VỀ CHÍNH SÁCH (KHÔNG DÙNG TOOL RIÊNG):**
+1. Khi khách hỏi về: vận chuyển, bảo quản, hướng dẫn sử dụng, đổi trả, khuyến mãi, bảo hành, chất liệu, thời gian giao hàng, chính sách đổi trả
+   - LUÔN dùng tool 'get_product_basic_info' để lấy MÔ TẢ SẢN PHẨM
+   - TỰ ĐỌC và PHÂN TÍCH mô tả để tìm thông tin liên quan
+   - Trả lời như một nhân viên thật: tự nhiên, thân thiện, dựa trên thông tin có sẵn
+
+2. Nếu trong mô tả CÓ thông tin liên quan:
+   - Trích xuất thông tin chính xác từ mô tả
+   - Diễn đạt lại theo cách tự nhiên, dễ hiểu
+   - Giữ nguyên ý nghĩa nhưng làm cho câu trả lời thân thiện
+   - Ví dụ: "Dạ, theo thông tin sản phẩm thì [trích dẫn thông tin từ mô tả] ạ!"
+
+3. Nếu trong mô tả KHÔNG có thông tin:
+   - Trả lời: "Dạ, phần này trong hệ thống chưa có thông tin ạ. Anh/chị vui lòng liên hệ shop để được hỗ trợ chi tiết ạ!"
+   - KHÔNG bịa thông tin, KHÔNG đoán mò
+
+**QUY TẮC TRẢ LỜI VỀ GIÁ:**
+1. Khi khách hỏi về giá - LUÔN dùng tool 'get_product_price_details'
+2. Phân tích kết quả từ tool và trả lời theo định dạng:
+   - Giá theo màu: Liệt kê từng màu và giá
+   - Giá theo size: Liệt kê từng size và giá
+   - Giá phức tạp: Nhóm theo từng mức giá, liệt kê các màu/size trong mỗi nhóm
+   - Giá duy nhất: Trả lời một giá duy nhất
+3. LUÔN hỏi khách cần tư vấn thêm gì không sau khi trả lời về giá.
+
+**QUY TẮC CHUNG:**
+- Xưng "em", gọi "anh/chị"
+- Ngắn gọn, thân thiện (1-3 dòng)
+- Nếu không có thông tin: "Dạ, phần này trong hệ thống chưa có thông tin ạ"
+- Về tồn kho: LUÔN báo "CÒN HÀNG ạ!" nếu khách hỏi
+
+**TOOLS SẴN CÓ:**
+1. get_product_price_details - Cho câu hỏi về giá
+2. get_product_basic_info - Cho CẢ: thông tin sản phẩm VÀ các câu hỏi về chính sách (đọc mô tả)
+3. send_product_images - Cho câu hỏi "xem ảnh"
+4. provide_order_link - Cho câu hỏi "đặt hàng", "mua hàng"
+5. send_product_videos - Cho câu hỏi "xem video"
+
+**KHI KHÁCH HỎI:**
+- "giá bao nhiêu", "bao nhiêu tiền" - get_product_price_details
+- "chất liệu gì", "làm bằng gì" - get_product_basic_info (đọc mô tả để tìm thông tin)
+- "có những màu nào" - get_product_basic_info (sau đó liệt kê màu từ data)
+- "size nào có" - get_product_basic_info (liệt kê size từ data)
+- "xem ảnh", "gửi ảnh" - send_product_images
+- "có video không" - send_product_videos
+- "đặt hàng", "mua hàng" - provide_order_link
+- "miễn ship chứ?", "ship bao nhiêu?", "thời gian giao hàng", "có free ship không" - get_product_basic_info (đọc mô tả tìm thông tin ship)
+- "bảo quản thế nào?", "giặt như thế nào?", "cách bảo quản" - get_product_basic_info (đọc mô tả tìm hướng dẫn bảo quản)
+- "hướng dẫn sử dụng", "cách dùng", "sử dụng thế nào" - get_product_basic_info (đọc mô tả tìm hướng dẫn sử dụng)
+- "có giảm giá không?", "chính sách đổi trả", "bảo hành thế nào" - get_product_basic_info (đọc mô tả tìm thông tin chính sách)
+
+**VÍ DỤ XỬ LÝ CHÍNH SÁCH:**
+- Khách hỏi: "Có miễn ship không?"
+  - Gọi get_product_basic_info
+  - Đọc mô tả, tìm thông tin về "ship", "vận chuyển", "miễn phí"
+  - Nếu có: "Dạ, theo thông tin sản phẩm thì [trích dẫn thông tin] ạ!"
+  - Nếu không: "Dạ, phần này trong hệ thống chưa có thông tin ạ..."
+
+- Khách hỏi: "Bảo quản thế nào?"
+  - Gọi get_product_basic_info
+  - Tìm hướng dẫn bảo quản trong mô tả
+  - Trả lời tự nhiên: "Dạ, sản phẩm này nên [thông tin từ mô tả] ạ!"
+"""
+    
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": text}
+            ],
+            tools=get_tools_definition(),
+            tool_choice="auto",
+            temperature=0.1
+        )
+        
+        msg = response.choices[0].message
+        
+        if msg.tool_calls:
+            for tool in msg.tool_calls:
+                tool_name = tool.function.name
+                tool_args = json.loads(tool.function.arguments)
+                
+                if "ms" not in tool_args:
+                    tool_args["ms"] = current_ms
+                
+                tool_result = execute_tool(uid, tool_name, tool_args)
+                
+                follow_up_response = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": text},
+                        msg,
+                        {"role": "tool", "tool_call_id": tool.id, "name": tool_name, "content": tool_result}
+                    ],
+                    temperature=0.1
+                )
+                
+                final_reply = follow_up_response.choices[0].message.content
+                send_message(uid, final_reply)
+                
+                # Lưu lịch sử hội thoại
+                ctx["conversation_history"].append({"role": "user", "content": text})
+                ctx["conversation_history"].append({"role": "assistant", "content": final_reply})
+                ctx["conversation_history"] = ctx["conversation_history"][-10:]
+        else:
+            send_message(uid, msg.content)
+            ctx["conversation_history"].append({"role": "user", "content": text})
+            ctx["conversation_history"].append({"role": "assistant", "content": msg.content})
+            ctx["conversation_history"] = ctx["conversation_history"][-10:]
+            
+    except Exception as e:
+        print(f"GPT Error: {e}")
+        send_message(uid, "Dạ em đang gặp chút trục trặc, anh/chị vui lòng thử lại sau ạ.")
+
+# ============================================
+# FACEBOOK CONVERSION API FUNCTIONS - ASYNC
+# ============================================
+
+def queue_facebook_event(event_type: str, event_data: dict):
+    """
+    Thêm sự kiện vào queue để xử lý bất đồng bộ
+    KHÔNG chờ kết quả, KHÔNG block bot
+    """
+    if not FACEBOOK_PIXEL_ID or not FACEBOOK_ACCESS_TOKEN:
+        return False
+    
+    # Thêm vào queue
+    queue_item = {
+        'event_type': event_type,
+        'data': event_data,
+        'timestamp': time.time()
+    }
+    
+    # Giới hạn queue size để tránh memory leak
+    if FACEBOOK_EVENT_QUEUE.qsize() < 1000:  # Max 1000 sự kiện trong queue
+        FACEBOOK_EVENT_QUEUE.put(queue_item)
+        return True
+    else:
+        print(f"[FACEBOOK QUEUE] Queue đầy, bỏ qua sự kiện {event_type}")
+        return False
+
+def _send_view_content_async(event_data: dict):
+    """Gửi sự kiện ViewContent bất đồng bộ"""
+    try:
+        data = event_data['data']
+        
+        payload = {
+            "data": [{
+                "event_name": "ViewContent",
+                "event_time": int(data.get('event_time', time.time())),
+                "action_source": "website",
+                "user_data": data['user_data'],
+                "custom_data": {
+                    "currency": "VND",
+                    "value": data.get('price', 0),
+                    "content_ids": [data.get('ms', '')],
+                    "content_name": data.get('product_name', '')[:100],
+                    "content_type": "product",
+                    "content_category": "fashion",
+                }
+            }]
+        }
+        
+        # Thêm event_source_url nếu có
+        if data.get('event_source_url'):
+            payload["data"][0]["event_source_url"] = data['event_source_url']
+        
+        url = f"https://graph.facebook.com/{FACEBOOK_API_VERSION}/{FACEBOOK_PIXEL_ID}/events"
+        
+        response = requests.post(
+            url,
+            params={"access_token": FACEBOOK_ACCESS_TOKEN},
+            json=payload,
+            timeout=3  # Timeout ngắn, không chờ đợi lâu
+        )
+        
+        if response.status_code == 200:
+            print(f"[FACEBOOK CAPI ASYNC] Đã gửi ViewContent cho {data.get('ms')}")
+        else:
+            print(f"[FACEBOOK CAPI ASYNC ERROR] {response.status_code}: {response.text[:100]}")
+            
+    except requests.exceptions.Timeout:
+        print(f"[FACEBOOK CAPI TIMEOUT] Timeout khi gửi ViewContent")
+    except Exception as e:
+        print(f"[FACEBOOK CAPI EXCEPTION] {e}")
+
+def _send_add_to_cart_async(event_data: dict):
+    """Gửi sự kiện AddToCart bất đồng bộ"""
+    try:
+        data = event_data['data']
+        
+        payload = {
+            "data": [{
+                "event_name": "AddToCart",
+                "event_time": int(data.get('event_time', time.time())),
+                "action_source": "website",
+                "user_data": data['user_data'],
+                "custom_data": {
+                    "currency": "VND",
+                    "value": data.get('price', 0) * data.get('quantity', 1),
+                    "content_ids": [data.get('ms', '')],
+                    "content_name": data.get('product_name', '')[:100],
+                    "content_type": "product",
+                    "num_items": data.get('quantity', 1)
+                }
+            }]
+        }
+        
+        url = f"https://graph.facebook.com/{FACEBOOK_API_VERSION}/{FACEBOOK_PIXEL_ID}/events"
+        
+        response = requests.post(
+            url,
+            params={"access_token": FACEBOOK_ACCESS_TOKEN},
+            json=payload,
+            timeout=3
+        )
+        
+        if response.status_code == 200:
+            print(f"[FACEBOOK CAPI ASYNC] Đã gửi AddToCart cho {data.get('ms')}")
+        else:
+            print(f"[FACEBOOK CAPI ASYNC ERROR] {response.status_code}: {response.text[:100]}")
+            
+    except requests.exceptions.Timeout:
+        print(f"[FACEBOOK CAPI TIMEOUT] Timeout khi gửi AddToCart")
+    except Exception as e:
+        print(f"[FACEBOOK CAPI EXCEPTION] {e}")
+
+def _send_purchase_async(event_data: dict):
+    """Gửi sự kiện Purchase bất đồng bộ"""
+    try:
+        data = event_data['data']
+        
+        payload = {
+            "data": [{
+                "event_name": "Purchase",
+                "event_time": int(data.get('event_time', time.time())),
+                "action_source": "website",
+                "user_data": data['user_data'],
+                "custom_data": {
+                    "currency": "VND",
+                    "value": data.get('total_price', 0),
+                    "content_ids": [data.get('ms', '')],
+                    "content_name": data.get('product_name', '')[:100],
+                    "content_type": "product",
+                    "num_items": data.get('quantity', 1),
+                    "order_id": data.get('order_id', f"ORD{int(time.time())}")
+                }
+            }]
+        }
+        
+        # Thêm event_source_url nếu có
+        if data.get('event_source_url'):
+            payload["data"][0]["event_source_url"] = data['event_source_url']
+        
+        url = f"https://graph.facebook.com/{FACEBOOK_API_VERSION}/{FACEBOOK_PIXEL_ID}/events"
+        
+        response = requests.post(
+            url,
+            params={"access_token": FACEBOOK_ACCESS_TOKEN},
+            json=payload,
+            timeout=3
+        )
+        
+        if response.status_code == 200:
+            print(f"[FACEBOOK CAPI ASYNC] Đã gửi Purchase cho đơn hàng {data.get('order_id')}")
+        else:
+            print(f"[FACEBOOK CAPI ASYNC ERROR] {response.status_code}: {response.text[:100]}")
+            
+    except requests.exceptions.Timeout:
+        print(f"[FACEBOOK CAPI TIMEOUT] Timeout khi gửi Purchase")
+    except Exception as e:
+        print(f"[FACEBOOK CAPI EXCEPTION] {e}")
+
+def _send_initiate_checkout_async(event_data: dict):
+    """Gửi sự kiện InitiateCheckout bất đồng bộ"""
+    try:
+        data = event_data['data']
+        
+        payload = {
+            "data": [{
+                "event_name": "InitiateCheckout",
+                "event_time": int(data.get('event_time', time.time())),
+                "action_source": "website",
+                "user_data": data['user_data'],
+                "custom_data": {
+                    "currency": "VND",
+                    "value": data.get('price', 0) * data.get('quantity', 1),
+                    "content_ids": [data.get('ms', '')],
+                    "content_name": data.get('product_name', '')[:100],
+                    "content_type": "product",
+                    "num_items": data.get('quantity', 1)
+                }
+            }]
+        }
+        
+        # Thêm event_source_url nếu có
+        if data.get('event_source_url'):
+            payload["data"][0]["event_source_url"] = data['event_source_url']
+        
+        url = f"https://graph.facebook.com/{FACEBOOK_API_VERSION}/{FACEBOOK_PIXEL_ID}/events"
+        
+        response = requests.post(
+            url,
+            params={"access_token": FACEBOOK_ACCESS_TOKEN},
+            json=payload,
+            timeout=3
+        )
+        
+        if response.status_code == 200:
+            print(f"[FACEBOOK CAPI ASYNC] Đã gửi InitiateCheckout cho {data.get('ms')}")
+        else:
+            print(f"[FACEBOOK CAPI ASYNC ERROR] {response.status_code}: {response.text[:100]}")
+            
+    except requests.exceptions.Timeout:
+        print(f"[FACEBOOK CAPI TIMEOUT] Timeout khi gửi InitiateCheckout")
+    except Exception as e:
+        print(f"[FACEBOOK CAPI EXCEPTION] {e}")
+
+def get_fbclid_from_context(uid: str) -> Optional[str]:
+    """
+    Lấy fbclid từ context của user (nếu có từ referral)
+    """
+    ctx = USER_CONTEXT.get(uid, {})
+    referral_payload = ctx.get("referral_payload", "")
+    
+    if referral_payload and "fbclid=" in referral_payload:
+        match = re.search(r'fbclid=([^&]+)', referral_payload)
+        if match:
+            return match.group(1)
+    
+    return None
+
+def prepare_user_data_for_capi(uid: str, phone: str = None, client_ip: str = None, user_agent: str = None):
+    """
+    Chuẩn bị user_data cho Conversion API
+    """
+    user_data = {
+        "client_user_agent": user_agent or "",
+        "client_ip_address": client_ip or "",
+    }
+    
+    # Thêm fbclid nếu có
+    fbclid = get_fbclid_from_context(uid)
+    if fbclid:
+        user_data["fbc"] = f"fb.1.{int(time.time())}.{fbclid}"
+    
+    # Thêm FBP cookie mô phỏng
+    user_data["fbp"] = f"fb.1.{int(time.time())}.{uid[:10] if uid else str(int(time.time()))}"
+    
+    # Hash phone nếu có
+    if phone:
+        # Chuẩn hóa số điện thoại
+        phone_clean = re.sub(r'[^\d]', '', phone)
+        if phone_clean.startswith('0'):
+            phone_clean = '84' + phone_clean[1:]
+        elif phone_clean.startswith('+84'):
+            phone_clean = phone_clean[1:]
+        
+        # Hash SHA256
+        phone_hash = hashlib.sha256(phone_clean.encode()).hexdigest()
+        user_data["ph"] = phone_hash
+    
+    return user_data
+
+def send_view_content_smart(uid: str, ms: str, product_name: str, price: float, referral_source: str = "direct"):
+    """
+    Gửi ViewContent THÔNG MINH - chỉ gửi 1 lần mỗi 30 phút cho cùng user + product
+    """
+    if not FACEBOOK_PIXEL_ID:
+        return
+    
+    # Key cache: user + product
+    cache_key = f"{uid}_{ms}"
+    
+    # Kiểm tra cache trong memory
+    if hasattr(send_view_content_smart, 'cache'):
+        last_sent = send_view_content_smart.cache.get(cache_key, 0)
+        now = time.time()
+        
+        # Nếu đã gửi trong 30 phút gần đây, bỏ qua
+        if now - last_sent < 1800:  # 30 phút = 1800 giây
+            print(f"[FACEBOOK CAPI SMART] Đã gửi ViewContent cho {ms} trong 30 phút gần đây, bỏ qua")
+            return
+    
+    # Lấy context để có user_data
+    ctx = USER_CONTEXT.get(uid, {})
+    phone = ctx.get("order_data", {}).get("phone", "")
+    
+    # Chuẩn bị user_data đơn giản (không cần IP, user_agent cho ViewContent từ bot)
+    user_data = {
+        "fbp": f"fb.1.{int(time.time())}.{uid[:10] if uid else str(int(time.time()))}",
+    }
+    
+    # Hash phone nếu có
+    if phone:
+        phone_clean = re.sub(r'[^\d]', '', phone)
+        if phone_clean.startswith('0'):
+            phone_clean = '84' + phone_clean[1:]
+        phone_hash = hashlib.sha256(phone_clean.encode()).hexdigest()
+        user_data["ph"] = phone_hash
+    
+    # Thêm fbclid nếu có
+    fbclid = get_fbclid_from_context(uid)
+    if fbclid:
+        user_data["fbc"] = f"fb.1.{int(time.time())}.{fbclid}"
+    
+    # Chuẩn bị event data
+    event_data = {
+        'uid': uid,
+        'ms': ms,
+        'product_name': product_name,
+        'price': price,
+        'user_data': user_data,
+        'event_time': int(time.time()),
+        'event_source_url': f"https://www.facebook.com/{PAGE_ID}" if PAGE_ID else f"https://{DOMAIN}",
+        'referral_source': referral_source
+    }
+    
+    # Thêm vào queue để xử lý bất đồng bộ
+    queued = queue_facebook_event('ViewContent', event_data)
+    
+    if queued:
+        # Cập nhật cache
+        if not hasattr(send_view_content_smart, 'cache'):
+            send_view_content_smart.cache = {}
+        send_view_content_smart.cache[cache_key] = time.time()
+        
+        # Dọn dẹp cache cũ (giữ tối đa 1000 entries)
+        if len(send_view_content_smart.cache) > 1000:
+            # Giữ 500 entries mới nhất
+            items = sorted(send_view_content_smart.cache.items(), key=lambda x: x[1], reverse=True)[:500]
+            send_view_content_smart.cache = dict(items)
+        
+        print(f"[FACEBOOK CAPI SMART] Đã queue ViewContent cho {ms}")
+    else:
+        print(f"[FACEBOOK CAPI SMART] Không thể queue ViewContent, queue đầy")
+
+def send_add_to_cart_smart(uid: str, ms: str, product_name: str, price: float, quantity: int = 1):
+    """
+    Gửi AddToCart sự kiện thông minh
+    """
+    if not FACEBOOK_PIXEL_ID:
+        return
+    
+    ctx = USER_CONTEXT.get(uid, {})
+    phone = ctx.get("order_data", {}).get("phone", "")
+    
+    user_data = prepare_user_data_for_capi(uid, phone)
+    
+    event_data = {
+        'uid': uid,
+        'ms': ms,
+        'product_name': product_name,
+        'price': price,
+        'quantity': quantity,
+        'user_data': user_data,
+        'event_time': int(time.time())
+    }
+    
+    # Thêm vào queue để xử lý bất đồng bộ
+    queued = queue_facebook_event('AddToCart', event_data)
+    
+    if queued:
+        print(f"[FACEBOOK CAPI SMART] Đã queue AddToCart cho {ms}")
+    else:
+        print(f"[FACEBOOK CAPI SMART] Không thể queue AddToCart, queue đầy")
+
+def send_purchase_smart(uid: str, ms: str, product_name: str, order_data: dict):
+    """
+    Gửi Purchase sự kiện thông minh
+    """
+    if not FACEBOOK_PIXEL_ID:
+        return
+    
+    phone = order_data.get("phone", "")
+    total_price = order_data.get("total_price", 0)
+    quantity = order_data.get("quantity", 1)
+    
+    # Lấy client IP và user agent từ request (nếu có)
+    user_data = prepare_user_data_for_capi(uid, phone)
+    
+    event_data = {
+        'uid': uid,
+        'ms': ms,
+        'product_name': product_name,
+        'total_price': total_price,
+        'quantity': quantity,
+        'user_data': user_data,
+        'event_time': int(time.time()),
+        'order_id': order_data.get("order_id", f"ORD{int(time.time())}_{uid[-4:] if uid else '0000'}"),
+        'event_source_url': f"https://{DOMAIN}/order-form?ms={ms}&uid={uid}"
+    }
+    
+    # Thêm vào queue để xử lý bất đồng bộ
+    queued = queue_facebook_event('Purchase', event_data)
+    
+    if queued:
+        print(f"[FACEBOOK CAPI SMART] Đã queue Purchase cho {ms}")
+    else:
+        print(f"[FACEBOOK CAPI SMART] Không thể queue Purchase, queue đầy")
+
+def send_initiate_checkout_smart(uid: str, ms: str, product_name: str, price: float, quantity: int = 1):
+    """
+    Gửi InitiateCheckout sự kiện thông minh
+    """
+    if not FACEBOOK_PIXEL_ID:
+        return
+    
+    ctx = USER_CONTEXT.get(uid, {})
+    phone = ctx.get("order_data", {}).get("phone", "")
+    
+    user_data = prepare_user_data_for_capi(uid, phone)
+    
+    event_data = {
+        'uid': uid,
+        'ms': ms,
+        'product_name': product_name,
+        'price': price,
+        'quantity': quantity,
+        'user_data': user_data,
+        'event_time': int(time.time()),
+        'event_source_url': f"https://{DOMAIN}/order-form?ms={ms}&uid={uid}"
+    }
+    
+    # Thêm vào queue để xử lý bất đồng bộ
+    queued = queue_facebook_event('InitiateCheckout', event_data)
+    
+    if queued:
+        print(f"[FACEBOOK CAPI SMART] Đã queue InitiateCheckout cho {ms}")
+    else:
+        print(f"[FACEBOOK CAPI SMART] Không thể queue InitiateCheckout, queue đầy")
+
+# ============================================
+# GỬI CAROUSEL 1 SẢN PHẨM
+# ============================================
+
+def send_single_product_carousel(uid: str, ms: str):
+    """
+    Gửi carousel chỉ với 1 sản phẩm duy nhất
+    Sử dụng khi bot đã nhận diện được MS từ ad_title, catalog, Fchat
+    """
+    if ms not in PRODUCTS:
+        print(f"[SINGLE CAROUSEL ERROR] Sản phẩm {ms} không tồn tại")
+        return
+    
+    load_products()
+    product = PRODUCTS[ms]
+    
+    images_field = product.get("Images", "")
+    urls = parse_image_urls(images_field)
+    image_url = urls[0] if urls else ""
+    
+    gia_raw = product.get("Gia", "")
+    gia_int = extract_price_int(gia_raw) or 0
+    
+    # LẤY TÊN SẢN PHẨM (KHÔNG BAO GỒM MÃ SẢN PHẨM)
+    product_name = product.get('Ten', '')
+    
+    # KIỂM TRA NẾU TÊN ĐÃ CHỨA MÃ SẢN PHẨM, CHỈ GIỮ TÊN
+    if f"[{ms}]" in product_name or ms in product_name:
+        # Xóa mã sản phẩm khỏi tên
+        product_name = product_name.replace(f"[{ms}]", "").replace(ms, "").strip()
+    
+    element = {
+        "title": product_name,  # CHỈ HIỂN THỊ TÊN SẢN PHẨM
+        "image_url": image_url,
+        "subtitle": f"💰 Giá: {gia_int:,.0f} đ",
+        "buttons": [
+            {
+                "type": "postback",
+                "title": "🌟 Ưu điểm SP",
+                "payload": f"PRODUCT_HIGHLIGHTS_{ms}"
+            },
+            {
+                "type": "postback", 
+                "title": "🖼️ Xem ảnh",
+                "payload": f"VIEW_IMAGES_{ms}"
+            },
+            {
+                "type": "postback",
+                "title": "🛒 Đặt ngay",
+                "payload": f"ORDER_BUTTON_{ms}"
             }
         ]
     }
     
-    logger.info("=== SIMULATED WEBHOOK SENT ===")
-    logger.info(f"Sample data: {json.dumps(sample_data, indent=2)}")
+    send_carousel_template(uid, [element])
+    
+    ctx = USER_CONTEXT[uid]
+    ctx["last_ms"] = ms
+    
+    # Gọi hàm update_product_context cũ để duy trì tính năng cũ
+    if "product_history" not in ctx:
+        ctx["product_history"] = []
+    
+    if not ctx["product_history"] or ctx["product_history"][0] != ms:
+        if ms in ctx["product_history"]:
+            ctx["product_history"].remove(ms)
+        ctx["product_history"].insert(0, ms)
+    
+    if len(ctx["product_history"]) > 5:
+        ctx["product_history"] = ctx["product_history"][:5]
+    
+    ctx["has_sent_first_carousel"] = True
+    
+    # GỬI SỰ KIỆN VIEWCONTENT THÔNG MINH (BẤT ĐỒNG BỘ)
+    try:
+        # Lấy referral source từ context
+        referral_source = ctx.get("referral_source", "direct")
+        
+        # Gửi sự kiện ViewContent SMART (bất đồng bộ)
+        send_view_content_smart(
+            uid=uid,
+            ms=ms,
+            product_name=product_name,
+            price=gia_int,
+            referral_source=referral_source
+        )
+        
+        print(f"[FACEBOOK CAPI] Đã queue ViewContent cho {ms}")
+    except Exception as e:
+        print(f"[FACEBOOK CAPI ERROR] Lỗi queue ViewContent: {e}")
+        # KHÔNG ảnh hưởng đến việc gửi carousel
+    
+    print(f"✅ [SINGLE CAROUSEL] Đã gửi carousel 1 sản phẩm {ms} cho user {uid}")
+
+# ============================================
+# HANDLE ORDER FORM STATE
+# ============================================
+
+def reset_order_state(uid: str):
+    ctx = USER_CONTEXT[uid]
+    ctx["order_state"] = None
+    ctx["order_data"] = {}
+
+def handle_order_form_step(uid: str, text: str) -> bool:
+    ctx = USER_CONTEXT[uid]
+    state = ctx.get("order_state")
+    if not state:
+        return False
+
+    data = ctx.get("order_data", {})
+
+    if state == "ask_name":
+        data["customerName"] = text.strip()
+        ctx["order_state"] = "ask_phone"
+        send_message(uid, "Dạ em cảm ơn anh/chị. Anh/chị cho em xin số điện thoại ạ?")
+        return True
+
+    if state == "ask_phone":
+        phone = re.sub(r"[^\d+]", "", text)
+        if len(phone) < 9:
+            send_message(uid, "Số điện thoại chưa đúng lắm, anh/chị nhập lại giúp em (tối thiểu 9 số) ạ?")
+            return True
+        data["phone"] = phone
+        ctx["order_state"] = "ask_address"
+        send_message(uid, "Dạ vâng. Anh/chị cho em xin địa chỉ nhận hàng ạ?")
+        return True
+
+    if state == "ask_address":
+        data["address"] = text.strip()
+        ctx["order_state"] = None
+        ctx["order_data"] = data
+
+        summary = (
+            "Dạ em tóm tắt lại đơn hàng của anh/chị:\n"
+            f"- Sản phẩm: {data.get('productName', '')}\n"
+            f"- Mã: {data.get('ms', '')}\n"
+            f"- Phân loại: {data.get('color', '')} / {data.get('size', '')}\n"
+            f"- Số lượng: {data.get('quantity', '1')}\n"
+            f"- Thành tiền dự kiến: {data.get('total', '')}\n"
+            f"- Người nhận: {data.get('customerName', '')}\n"
+            f"- SĐT: {data.get('phone', '')}\n"
+            f"- Địa chỉ: {data.get('address', '')}\n\n"
+            "Anh/chị kiểm tra giúp em xem đã đúng chưa ạ?"
+        )
+        send_message(uid, summary)
+        return True
+
+    return False
+
+# ============================================
+# HANDLE POSTBACK THÔNG MINH
+# ============================================
+
+def handle_postback_with_recovery(uid: str, payload: str, postback_id: str = None):
+    """
+    Xử lý postback - FIX LỖI GỬI LẶP VÔ HẠN
+    CHỈ XỬ LÝ 1 LẦN DUY NHẤT CHO MỖI POSTBACK_ID
+    """
+    now = time.time()
+    
+    if postback_id:
+        idempotency_key = f"{uid}_{postback_id}"
+    else:
+        idempotency_key = f"{uid}_{payload}_{int(now)}"
+    
+    ctx = USER_CONTEXT[uid]
+    
+    if "idempotent_postbacks" not in ctx:
+        ctx["idempotent_postbacks"] = {}
+    
+    if idempotency_key in ctx["idempotent_postbacks"]:
+        processed_time = ctx["idempotent_postbacks"][idempotency_key]
+        if now - processed_time < 300:
+            print(f"[IDEMPOTENCY BLOCK] Bỏ qua postback đã xử lý: {idempotency_key}")
+            return True
+    
+    ctx["idempotent_postbacks"][idempotency_key] = now
+    
+    if len(ctx["idempotent_postbacks"]) > 50:
+        sorted_items = sorted(ctx["idempotent_postbacks"].items(), 
+                            key=lambda x: x[1], reverse=True)[:30]
+        ctx["idempotent_postbacks"] = dict(sorted_items)
+    
+    load_products()
+    
+    # Xử lý các loại postback
+    if payload.startswith("PRODUCT_HIGHLIGHTS_"):
+        ms = payload.replace("PRODUCT_HIGHLIGHTS_", "")
+        if ms in PRODUCTS:
+            ctx["last_ms"] = ms
+            # Gọi hàm update_product_context cũ
+            if "product_history" not in ctx:
+                ctx["product_history"] = []
+            
+            if not ctx["product_history"] or ctx["product_history"][0] != ms:
+                if ms in ctx["product_history"]:
+                    ctx["product_history"].remove(ms)
+                ctx["product_history"].insert(0, ms)
+            
+            if len(ctx["product_history"]) > 5:
+                ctx["product_history"] = ctx["product_history"][:5]
+            
+            # Lấy thông tin sản phẩm
+            product = PRODUCTS[ms]
+            mo_ta = product.get("MoTa", "")
+            ten_sp = product.get("Ten", "")
+            
+            if not mo_ta:
+                send_message(uid, f"Dạ sản phẩm [{ms}] {ten_sp} chưa có mô tả chi tiết ạ. Anh/chị có thể hỏi về giá, màu sắc, size hoặc đặt hàng ạ!")
+                return True
+            
+            if not client:
+                send_message(uid, "Dạ chức năng này tạm thời chưa khả dụng ạ. Anh/chị vui lòng thử lại sau!")
+                return True
+            
+            # Gọi GPT để tóm tắt 5 ưu điểm
+            try:
+                system_prompt = """Bạn là một trợ lý bán hàng chuyên nghiệp. 
+Hãy đọc kỹ mô tả sản phẩm và liệt kê 5 ưu điểm nổi bật nhất của sản phẩm đó. 
+Mỗi ưu điểm phải:
+1. Ngắn gọn, rõ ràng (1-2 dòng)
+2. Bắt đầu bằng dấu gạch đầu dòng (-)
+3. Tập trung vào lợi ích cho khách hàng
+4. Chỉ trả lời bằng tiếng Việt
+5. Không thêm bất kỳ lời giải thích nào khác
+
+Định dạng đầu ra:
+- [Ưu điểm 1]
+- [Ưu điểm 2]
+- [Ưu điểm 3]
+- [Ưu điểm 4]
+- [Ưu điểm 5]"""
+                
+                # Giới hạn độ dài của mô tả
+                max_length = 3000
+                if len(mo_ta) > max_length:
+                    mo_ta = mo_ta[:max_length] + "..."
+                
+                user_prompt = f"""Sản phẩm: {ten_sp}
+Mã sản phẩm: {ms}
+
+Mô tả sản phẩm:
+{mo_ta}
+
+Hãy liệt kê 5 ưu điểm nổi bật nhất của sản phẩm này theo định dạng yêu cầu."""
+
+                response = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    temperature=0.3,
+                    max_tokens=500
+                )
+                
+                highlights = response.choices[0].message.content
+                
+                # Đảm bảo định dạng đúng
+                if not highlights.startswith("-"):
+                    # Thêm dấu gạch đầu dòng nếu GPT quên
+                    lines = highlights.strip().split('\n')
+                    formatted_lines = []
+                    for line in lines:
+                        line = line.strip()
+                        if line and not line.startswith('-'):
+                            formatted_lines.append(f"- {line}")
+                        else:
+                            formatted_lines.append(line)
+                    highlights = '\n'.join(formatted_lines)
+                
+                # Gửi cho khách hàng với tiêu đề
+                message = f"🌟 **5 ƯU ĐIỂM NỔI BẬT CỦA SẢN PHẨM [{ms}]** 🌟\n\n{highlights}\n\n---\nAnh/chị cần em tư vấn thêm gì không ạ?"
+                send_message(uid, message)
+                
+            except Exception as e:
+                print(f"Lỗi khi gọi GPT cho ưu điểm sản phẩm: {e}")
+                send_message(uid, "Dạ em chưa thể tóm tắt ưu điểm sản phẩm ngay lúc này. Anh/chị có thể xem mô tả chi tiết hoặc hỏi về thông tin khác ạ!")
+            
+            return True
+            
+    elif payload.startswith("VIEW_IMAGES_"):
+        ms = payload.replace("VIEW_IMAGES_", "")
+        if ms in PRODUCTS:
+            ctx["last_ms"] = ms
+            # Gọi hàm update_product_context cũ
+            if "product_history" not in ctx:
+                ctx["product_history"] = []
+            
+            if not ctx["product_history"] or ctx["product_history"][0] != ms:
+                if ms in ctx["product_history"]:
+                    ctx["product_history"].remove(ms)
+                ctx["product_history"].insert(0, ms)
+            
+            if len(ctx["product_history"]) > 5:
+                ctx["product_history"] = ctx["product_history"][:5]
+            
+            # Gọi GPT để xử lý việc gửi ảnh
+            handle_text_with_function_calling(uid, "gửi ảnh sản phẩm cho tôi xem")
+            return True
+    
+    elif payload.startswith("ORDER_BUTTON_"):
+        ms = payload.replace("ORDER_BUTTON_", "")
+        if ms in PRODUCTS:
+            # Gửi sự kiện AddToCart khi click nút đặt hàng
+            try:
+                product = PRODUCTS[ms]
+                product_name = product.get('Ten', '')
+                
+                if f"[{ms}]" in product_name or ms in product_name:
+                    product_name = product_name.replace(f"[{ms}]", "").replace(ms, "").strip()
+                
+                gia_int = extract_price_int(product.get("Gia", "")) or 0
+                
+                send_add_to_cart_smart(
+                    uid=uid,
+                    ms=ms,
+                    product_name=product_name,
+                    price=gia_int
+                )
+                
+                print(f"[FACEBOOK CAPI] Đã queue AddToCart từ nút đặt hàng: {ms}")
+            except Exception as e:
+                print(f"[FACEBOOK CAPI ERROR] Lỗi queue AddToCart: {e}")
+            
+            # Chuyển hướng đến form đặt hàng
+            domain = DOMAIN if DOMAIN.startswith("http") else f"https://{DOMAIN}"
+            order_link = f"{domain}/order-form?ms={ms}&uid={uid}"
+            
+            send_message(uid, f"Để đặt hàng sản phẩm này, anh/chị vui lòng truy cập: {order_link}")
+            return True
+    
+    elif payload in ["PRICE_QUERY", "COLOR_QUERY", "SIZE_QUERY", "MATERIAL_QUERY", "STOCK_QUERY"]:
+        ms = ctx.get("last_ms")
+        
+        if ms and ms in PRODUCTS:
+            question_map = {
+                "PRICE_QUERY": "giá bao nhiêu",
+                "COLOR_QUERY": "có những màu gì",
+                "SIZE_QUERY": "có size nào",
+                "MATERIAL_QUERY": "chất liệu gì",
+                "STOCK_QUERY": "còn hàng không"
+            }
+            
+            question = question_map.get(payload, "thông tin sản phẩm")
+            handle_text_with_function_calling(uid, question)
+            return True
+    
+    elif payload == "GET_STARTED":
+        welcome_msg = f"""Chào anh/chị! 👋 
+Em là trợ lý AI của {get_fanpage_name_from_api()}.
+
+Vui lòng gửi mã sản phẩm (ví dụ: MS123456) hoặc mô tả sản phẩm."""
+        send_message(uid, welcome_msg)
+        return True
+    
+    return False
+
+# ============================================
+# HANDLE TEXT MESSAGES - ĐÃ SỬA ĐỔI LOGIC
+# ============================================
+
+def handle_text(uid: str, text: str):
+    """Xử lý tin nhắn văn bản với logic mới: 
+       LUÔN ưu tiên MS mới nhất từ mọi nguồn trước khi trả lời"""
+    if not text or len(text.strip()) == 0:
+        return
+    
+    ctx = USER_CONTEXT[uid]
+
+    if ctx.get("processing_lock"):
+        print(f"[TEXT SKIP] User {uid} đang được xử lý")
+        return
+
+    ctx["processing_lock"] = True
+
+    try:
+        now = time.time()
+        last_msg_time = ctx.get("last_msg_time", 0)
+        
+        # Debounce: kiểm tra tin nhắn trùng lặp
+        if now - last_msg_time < 2:
+            last_text = ctx.get("last_processed_text", "")
+            if text.strip().lower() == last_text.lower():
+                print(f"[TEXT DEBOUNCE] Bỏ qua tin nhắn trùng lặp: {text[:50]}...")
+                ctx["processing_lock"] = False
+                return
+        
+        ctx["last_msg_time"] = now
+        ctx["last_processed_text"] = text.strip().lower()
+        
+        load_products()
+        
+        # THÊM: Khôi phục context nếu cần (khi Koyeb wake up)
+        if not ctx.get("last_ms") or ctx.get("last_ms") not in PRODUCTS:
+            restored = restore_user_context_on_wakeup(uid)
+            if restored:
+                print(f"[TEXT HANDLER] Đã khôi phục context cho user {uid}")
+        
+        # Tăng counter cho tin nhắn
+        if "real_message_count" not in ctx:
+            ctx["real_message_count"] = 0
+        ctx["real_message_count"] += 1
+        message_count = ctx["real_message_count"]
+        
+        print(f"[MESSAGE COUNT] User {uid}: tin nhắn thứ {message_count}")
+        print(f"[DEBUG] Current last_ms in context: {ctx.get('last_ms')}")
+        
+        # Xử lý order state nếu có
+        if handle_order_form_step(uid, text):
+            ctx["processing_lock"] = False
+            return
+        
+        # ============================================
+        # QUAN TRỌNG: LUÔN ƯU TIÊN MS MỚI NHẤT TRƯỚC KHI TRẢ LỜI
+        # ============================================
+        
+        # BƯỚC 1: Tìm MS từ text (nếu có tiền tố) - ƯU TIÊN CAO NHẤT
+        detected_ms = detect_ms_from_text(text)
+        if detected_ms and detected_ms in PRODUCTS:
+            print(f"[MS DETECTED FROM TEXT] Phát hiện MS từ tin nhắn: {detected_ms}")
+            # Cập nhật context với MS mới NGAY LẬP TỨC
+            update_context_with_new_ms(uid, detected_ms, "text_detection")
+        
+        # BƯỚC 2: Tìm số trong tin nhắn với tiền tố
+        if not detected_ms:
+            text_norm = normalize_vietnamese(text.lower())
+            numbers = re.findall(r'\b(?:ms|mã|sp|ma|san pham)\s*(\d{1,6})\b', text_norm, re.IGNORECASE)
+            for num in numbers:
+                clean_num = num.lstrip('0')
+                if clean_num and clean_num in PRODUCTS_BY_NUMBER:
+                    detected_ms = PRODUCTS_BY_NUMBER[clean_num]
+                    print(f"[MS FALLBACK] Tìm thấy MS từ tiền tố + số: {detected_ms}")
+                    # Cập nhật context với MS mới NGAY LẬP TỨC
+                    update_context_with_new_ms(uid, detected_ms, "text_detection")
+                    break
+        
+        # Xác định MS hiện tại (sau khi đã cập nhật từ text)
+        current_ms = ctx.get("last_ms")
+        print(f"[DEBUG] After MS detection, current_ms: {current_ms}")
+        
+        # BƯỚC 3: Kiểm tra xem đã có MS từ trước chưa
+        if current_ms and current_ms in PRODUCTS:
+            print(f"[HAS MS FROM CONTEXT] User {uid} đã có MS từ context: {current_ms}")
+            
+            # Gửi carousel nếu chưa gửi (cho MS mới hoặc MS cũ nhưng chưa gửi carousel)
+            if not ctx.get("has_sent_first_carousel"):
+                print(f"🚨 [FIRST CAROUSEL FOR PRODUCT] Chưa gửi carousel cho sản phẩm {current_ms}")
+                send_single_product_carousel(uid, current_ms)
+                ctx["has_sent_first_carousel"] = True
+            
+            # Dùng GPT để trả lời theo MS HIỆN TẠI (đã được cập nhật nếu có từ text)
+            print(f"✅ [GPT REQUIRED] User {uid} đã có MS {current_ms}, dùng GPT trả lời")
+            handle_text_with_function_calling(uid, text)
+            ctx["processing_lock"] = False
+            return
+        
+        # Nếu không tìm thấy MS từ bất kỳ nguồn nào
+        print(f"[NO MS DETECTED] Không tìm thấy MS từ tin nhắn: {text}")
+        
+        # Kiểm tra nếu tin nhắn là câu hỏi chung (không có MS)
+        general_questions = ['giá', 'bao nhiêu', 'màu gì', 'size nào', 'còn hàng', 'đặt hàng', 'mua', 'tư vấn']
+        text_norm = normalize_vietnamese(text.lower())
+        if any(keyword in text_norm for keyword in general_questions):
+            # Yêu cầu khách gửi MS cụ thể
+            send_message(uid, "Dạ, để em tư vấn chính xác cho anh/chị, vui lòng cho em biết mã sản phẩm (ví dụ: MS000034) hoặc gửi ảnh sản phẩm ạ! 🤗")
+        else:
+            # Gợi ý khách gửi MS hoặc ảnh
+            send_message(uid, "Dạ em chưa biết anh/chị đang hỏi về sản phẩm nào. Vui lòng cho em biết mã sản phẩm (ví dụ: MS000034) hoặc gửi ảnh sản phẩm ạ! 🤗")
+
+    except Exception as e:
+        print(f"Error in handle_text for {uid}: {e}")
+        try:
+            send_message(uid, "Dạ em đang gặp chút trục trặc, anh/chị vui lòng thử lại sau ạ.")
+        except:
+            pass
+    finally:
+        ctx["processing_lock"] = False
+
+# ============================================
+# HANDLE IMAGE - CẢI TIẾN VỚI CAROUSEL GỢI Ý
+# ============================================
+
+def handle_image(uid: str, image_url: str):
+    """Xử lý ảnh sản phẩm với công nghệ AI thông minh và carousel gợi ý"""
+    ctx = USER_CONTEXT[uid]
+    
+    now = time.time()
+    last_image_time = ctx.get("last_image_time", 0)
+    if now - last_image_time < 3:
+        print(f"[IMAGE DEBOUNCE] Bỏ qua ảnh mới, chưa đủ thời gian")
+        return
+    
+    ctx["last_image_time"] = now
+    
+    # BƯỚC 1: Kiểm tra xem có phải emoji/sticker không
+    if is_emoji_or_sticker_image(image_url):
+        print(f"[EMOJI DETECTED] Bỏ qua ảnh emoji/sticker: {image_url[:100]}")
+        send_message(uid, "😊 Em đã nhận được biểu tượng cảm xúc của anh/chị! Nếu anh/chị muốn xem sản phẩm, vui lòng gửi ảnh thật của sản phẩm hoặc mã sản phẩm ạ!")
+        return
+    
+    # BƯỚC 1.5: Kiểm tra ảnh có hợp lệ không
+    if not is_valid_product_image(image_url):
+        print(f"[INVALID IMAGE] Ảnh không hợp lệ: {image_url[:100]}")
+        send_message(uid, "❌ Ảnh này không rõ hoặc không phải ảnh sản phẩm. Vui lòng gửi ảnh rõ hơn hoặc mã sản phẩm ạ!")
+        return
+    
+    # BƯỚC 2: Thông báo đang xử lý ảnh
+    send_message(uid, "🔍 Em đang phân tích ảnh sản phẩm bằng AI, vui lòng đợi một chút ạ...")
+    
+    # BƯỚC 3: Tìm sản phẩm bằng OpenAI Vision API
+    found_ms = find_product_by_image(image_url)
+    
+    # BƯỚC 4: Xử lý kết quả
+    if found_ms:
+        print(f"[IMAGE PRODUCT FOUND] Tìm thấy sản phẩm {found_ms} từ ảnh")
+        
+        # Cập nhật context với MS mới
+        update_context_with_new_ms(uid, found_ms, "image_search")
+        
+        # Gửi carousel sản phẩm đã tìm thấy
+        send_single_product_carousel(uid, found_ms)
+        
+        # Dùng GPT để giới thiệu sản phẩm
+        print(f"✅ [GPT REQUIRED] Tìm thấy sản phẩm từ ảnh, dùng GPT giới thiệu")
+        handle_text_with_function_calling(uid, "Giới thiệu sản phẩm này cho tôi")
+        
+    else:
+        print(f"[IMAGE PRODUCT NOT FOUND] Không tìm thấy sản phẩm từ ảnh")
+        
+        # Gửi thông báo không tìm thấy
+        send_message(uid, "❌ Em chưa tìm thấy sản phẩm phù hợp với ảnh này. Có thể anh/chị chụp ảnh chưa rõ hoặc sản phẩm chưa có trong hệ thống.")
+        
+        # Gợi ý một số sản phẩm bằng CAROUSEL thay vì text
+        send_message(uid, "Dưới đây là một số sản phẩm gợi ý cho anh/chị ạ:")
+        
+        # Gửi carousel gợi ý 3 sản phẩm
+        carousel_sent = send_suggestion_carousel(uid, 3)
+        
+        # Nếu không gửi được carousel, gửi text backup
+        if not carousel_sent:
+            # Gợi ý một số sản phẩm phổ biến
+            popular_products = list(PRODUCTS.keys())[:3]
+            if popular_products:
+                for ms in popular_products:
+                    product = PRODUCTS[ms]
+                    # Lấy tên sản phẩm (không bao gồm mã sản phẩm)
+                    product_name = product.get('Ten', '')
+                    if f"[{ms}]" in product_name or ms in product_name:
+                        product_name = product_name.replace(f"[{ms}]", "").replace(ms, "").strip()
+                    send_message(uid, f"📦 {product_name}")
+        
+        send_message(uid, "Vui lòng gửi mã sản phẩm chính xác (ví dụ: MS000004) để em tư vấn chi tiết ạ!")
+
+# ============================================
+# GOOGLE SHEETS API FUNCTIONS
+# ============================================
+
+def get_google_sheets_service():
+    if not GOOGLE_SHEETS_CREDENTIALS_JSON or not GOOGLE_SHEET_ID:
+        return None
+
+    try:
+        import google.auth
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+        
+        creds_dict = json.loads(GOOGLE_SHEETS_CREDENTIALS_JSON)
+        credentials = service_account.Credentials.from_service_account_info(
+            creds_dict,
+            scopes=['https://www.googleapis.com/auth/spreadsheets']
+        )
+        service = build('sheets', 'v4', credentials=credentials)
+        print("✅ Đã khởi tạo Google Sheets service thành công.")
+        return service
+    except ImportError:
+        print("⚠️ Google API libraries chưa được cài đặt.")
+        return None
+    except Exception as e:
+        print(f"❌ Lỗi khi khởi tạo Google Sheets service: {e}")
+        return None
+
+def write_order_to_google_sheet_api(order_data: dict):
+    service = get_google_sheets_service()
+    if service is None:
+        return False
+    
+    sheet_name = "Orders"
+    
+    try:
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        order_id = f"ORD{int(time.time())}_{order_data.get('uid', '')[-4:]}"
+        
+        new_row = [
+            timestamp, order_id, "Mới",
+            order_data.get("ms", ""), order_data.get("product_name", ""),
+            order_data.get("color", ""), order_data.get("size", ""),
+            order_data.get("quantity", 1), order_data.get("unit_price", 0),
+            order_data.get("total_price", 0), order_data.get("customer_name", ""),
+            order_data.get("phone", ""), order_data.get("address", ""),
+            order_data.get("province", ""), order_data.get("district", ""),
+            order_data.get("ward", ""), order_data.get("address_detail", ""),
+            "COD", "ViettelPost",
+            f"Đơn từ Facebook Bot ({order_data.get('referral_source', 'direct')})",
+            order_data.get("uid", ""), order_data.get("referral_source", "direct")
+        ]
+        
+        request = service.spreadsheets().values().append(
+            spreadsheetId=GOOGLE_SHEET_ID,
+            range=f"{sheet_name}!A:V",
+            valueInputOption="USER_ENTERED",
+            insertDataOption="INSERT_ROWS",
+            body={"values": [new_row]}
+        )
+        
+        response = request.execute()
+        print(f"✅ ĐÃ GHI ĐƠN HÀNG VÀO GOOGLE SHEET THÀNH CÔNG!")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Lỗi Google Sheets API: {e}")
+        return False
+
+def save_order_to_local_csv(order_data: dict):
+    try:
+        file_path = "orders_backup.csv"
+        file_exists = os.path.exists(file_path)
+        
+        timestamp = datetime.now().strftime("%Y-%m-d %H:%M:%S")
+        order_id = f"ORD{int(time.time())}_{order_data.get('uid', '')[-4:]}"
+        
+        row_data = {
+            "timestamp": timestamp,
+            "order_id": order_id,
+            "status": "Mới",
+            "product_code": order_data.get("ms", ""),
+            "product_name": order_data.get("product_name", ""),
+            "color": order_data.get("color", ""),
+            "size": order_data.get("size", ""),
+            "quantity": order_data.get("quantity", 1),
+            "unit_price": order_data.get("unit_price", 0),
+            "total_price": order_data.get("total_price", 0),
+            "customer_name": order_data.get("customer_name", ""),
+            "phone": order_data.get("phone", ""),
+            "address": order_data.get("address", ""),
+            "province": order_data.get("province", ""),
+            "district": order_data.get("district", ""),
+            "ward": order_data.get("ward", ""),
+            "address_detail": order_data.get("address_detail", ""),
+            "payment_method": "COD",
+            "shipping_method": "ViettelPost",
+            "notes": f"Đơn từ Facebook Bot ({order_data.get('referral_source', 'direct')})",
+            "fb_user_id": order_data.get("uid", ""),
+            "referral_source": order_data.get("referral_source", "direct")
+        }
+        
+        with open(file_path, 'a', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=row_data.keys())
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow(row_data)
+        
+        print(f"📁 Đã lưu đơn hàng vào file local backup: {order_id}")
+    except Exception as e:
+        print(f"❌ Lỗi khi lưu file local backup: {str(e)}")
+
+# ============================================
+# POSCAKE WEBHOOK INTEGRATION (PHẦN MỚI)
+# ============================================
+
+def send_order_status_message(recipient_id: str, order_data: dict):
+    """
+    Gửi tin nhắn thông báo trạng thái đơn hàng từ Poscake
+    """
+    try:
+        order_id = order_data.get("order_id", "")
+        order_code = order_data.get("order_code", "")
+        status = order_data.get("status", "")
+        total_amount = order_data.get("total_amount", 0)
+        items = order_data.get("items", [])
+        
+        # Tạo nội dung tin nhắn dựa trên trạng thái
+        status_messages = {
+            "pending": "📦 ĐƠN HÀNG MỚI",
+            "processing": "⚡ ĐANG XỬ LÝ",
+            "shipped": "🚚 ĐÃ GIAO HÀNG",
+            "delivered": "✅ ĐÃ NHẬN HÀNG",
+            "cancelled": "❌ ĐÃ HỦY"
+        }
+        
+        status_text = status_messages.get(status, "📦 CẬP NHẬT ĐƠN HÀNG")
+        
+        # Xây dựng nội dung tin nhắn
+        message = f"""🎊 {status_text}
+────────────────
+📋 Mã đơn hàng: {order_code}
+💰 Tổng tiền: {total_amount:,.0f} đ
+📅 Thời gian: {order_data.get('created_at', '')}
+────────────────"""
+
+        if items:
+            message += "\n📦 Sản phẩm:\n"
+            for i, item in enumerate(items[:5], 1):  # Giới hạn 5 sản phẩm
+                product_name = item.get("product_name", "")
+                quantity = item.get("quantity", 1)
+                price = item.get("price", 0)
+                message += f"{i}. {product_name} x{quantity} - {price:,.0f} đ\n"
+        
+        # Thêm thông báo theo trạng thái
+        if status == "pending":
+            message += "\n⏰ Shop sẽ liên hệ xác nhận trong 5-10 phút."
+        elif status == "processing":
+            message += "\n🔧 Đơn hàng đang được chuẩn bị."
+        elif status == "shipped":
+            shipping_info = order_data.get("shipping_info", {})
+            tracking_code = shipping_info.get("tracking_code", "")
+            carrier = shipping_info.get("carrier", "")
+            if tracking_code:
+                message += f"\n📮 Mã vận đơn: {tracking_code}"
+            if carrier:
+                message += f"\n🚚 Đơn vị vận chuyển: {carrier}"
+        elif status == "delivered":
+            message += "\n✅ Cảm ơn bạn đã mua hàng!"
+        elif status == "cancelled":
+            message += "\n📞 Liên hệ shop để được hỗ trợ."
+
+        message += "\n────────────────\n💬 Cần hỗ trợ thêm? Gửi tin nhắn cho em ạ! ❤️"
+
+        send_message(recipient_id, message)
+        
+        # Nếu có tracking code, gửi thêm nút theo dõi đơn hàng
+        if status == "shipped":
+            tracking_code = order_data.get("shipping_info", {}).get("tracking_code")
+            if tracking_code:
+                quick_replies = [
+                    {
+                        "content_type": "text",
+                        "title": "📍 Theo dõi đơn hàng",
+                        "payload": f"TRACK_ORDER_{tracking_code}"
+                    },
+                    {
+                        "content_type": "text",
+                        "title": "📞 Hỗ trợ",
+                        "payload": "SUPPORT_ORDER"
+                    }
+                ]
+                send_quick_replies(recipient_id, "Bấm để theo dõi đơn hàng:", quick_replies)
+        
+        print(f"[POSCAKE NOTIFY] Đã gửi thông báo đơn hàng {order_code} cho user {recipient_id}")
+        return True
+        
+    except Exception as e:
+        print(f"[POSCAKE NOTIFY ERROR] Lỗi gửi tin nhắn đơn hàng: {e}")
+        return False
+
+def handle_poscake_order_event(event_type: str, data: dict):
+    """Xử lý sự kiện đơn hàng từ Poscake"""
+    order_data = data.get('data', data.get('order', {}))
+    
+    print(f"[POSCAKE ORDER] {event_type}: {order_data.get('code', 'No code')}")
+    
+    # Log chi tiết để debug
+    print(f"[POSCAKE ORDER DETAILS] {json.dumps(order_data, ensure_ascii=False)[:300]}")
+    
+    # Tìm recipient_id từ thông tin khách hàng
+    customer = order_data.get('customer', {})
+    phone = customer.get('phone', '')
+    email = customer.get('email', '')
+    
+    recipient_id = None
+    
+    # Tìm user_id từ số điện thoại trong context
+    for uid, ctx in USER_CONTEXT.items():
+        # Kiểm tra order_data hoặc số điện thoại trong context
+        user_phone = ctx.get("order_data", {}).get("phone", "")
+        if user_phone and user_phone == phone:
+            recipient_id = uid
+            break
+    
+    # Nếu không tìm thấy, thử tìm bằng email
+    if not recipient_id and email:
+        for uid, ctx in USER_CONTEXT.items():
+            user_email = ctx.get("order_data", {}).get("email", "")
+            if user_email and user_email == email:
+                recipient_id = uid
+                break
+    
+    if recipient_id:
+        # Chuẩn bị dữ liệu đơn hàng
+        order_info = {
+            "order_id": order_data.get('id', ''),
+            "order_code": order_data.get('code', ''),
+            "status": event_type.replace('order.', ''),
+            "total_amount": order_data.get('total', 0),
+            "items": order_data.get('items', []),
+            "customer": customer,
+            "created_at": order_data.get('created_at', ''),
+            "updated_at": order_data.get('updated_at', ''),
+            "shipping_info": order_data.get('shipping', {})
+        }
+        
+        # Gửi tin nhắn thông báo
+        send_order_status_message(recipient_id, order_info)
+        
+        # Lưu thông tin đơn hàng vào context
+        if recipient_id in USER_CONTEXT:
+            if "poscake_orders" not in USER_CONTEXT[recipient_id]:
+                USER_CONTEXT[recipient_id]["poscake_orders"] = []
+            
+            # Kiểm tra xem đơn hàng đã tồn tại chưa
+            existing_order = next(
+                (o for o in USER_CONTEXT[recipient_id]["poscake_orders"] 
+                 if o.get("order_id") == order_info["order_id"]), None
+            )
+            
+            if not existing_order:
+                USER_CONTEXT[recipient_id]["poscake_orders"].append(order_info)
+                # Giữ tối đa 10 đơn hàng gần nhất
+                if len(USER_CONTEXT[recipient_id]["poscake_orders"]) > 10:
+                    USER_CONTEXT[recipient_id]["poscake_orders"] = USER_CONTEXT[recipient_id]["poscake_orders"][-10:]
+            else:
+                # Cập nhật trạng thái đơn hàng hiện có
+                existing_order.update(order_info)
+        
+        return jsonify({
+            "status": "success",
+            "event": event_type,
+            "order_code": order_data.get('code'),
+            "message_sent": True,
+            "recipient_id": recipient_id
+        }), 200
+    else:
+        print(f"[POSCAKE ORDER] Không tìm thấy recipient_id cho đơn hàng {order_data.get('code')}")
+        return jsonify({
+            "status": "no_recipient",
+            "event": event_type,
+            "order_code": order_data.get('code'),
+            "message": "Không tìm thấy user tương ứng"
+        }), 200
+
+# ============================================
+# CACHE ADDRESS API (CẢI TIẾN MỚI)
+# ============================================
+
+ADDRESS_CACHE = {
+    'provinces': None,
+    'provinces_updated': 0,
+    'districts': {},
+    'wards': {}
+}
+
+@app.route("/api/cached-provinces", methods=["GET"])
+def cached_provinces():
+    """Cache API tỉnh/thành để tăng tốc độ load form"""
+    now = time.time()
+    cache_ttl = 3600  # 1 giờ
+    
+    if (ADDRESS_CACHE['provinces'] and 
+        (now - ADDRESS_CACHE['provinces_updated']) < cache_ttl):
+        return jsonify(ADDRESS_CACHE['provinces'])
+    
+    try:
+        response = requests.get('https://provinces.open-api.vn/api/p/', timeout=5)
+        if response.status_code == 200:
+            ADDRESS_CACHE['provinces'] = response.json()
+            ADDRESS_CACHE['provinces_updated'] = now
+            return jsonify(ADDRESS_CACHE['provinces'])
+    except Exception as e:
+        print(f"[ADDRESS API ERROR] Lỗi khi gọi API tỉnh/thành: {e}")
+    
+    return jsonify([])
+
+@app.route("/poscake-webhook", methods=["POST"])
+def poscake_webhook():
+    """
+    Webhook nhận thông báo từ Poscake
+    Poscake sẽ gửi các sự kiện: đơn hàng, sản phẩm, tồn kho
+    """
+    try:
+        # Log headers để debug
+        headers = {k.lower(): v for k, v in request.headers.items()}
+        print(f"[POSCAKE WEBHOOK] Headers nhận được: {headers}")
+        
+        # Lấy signature để xác thực
+        signature = headers.get('x-poscake-signature') or headers.get('x-signature')
+        
+        # Xác thực webhook nếu có secret
+        if POSCAKE_WEBHOOK_SECRET and signature:
+            # Tính toán và so sánh signature
+            payload = request.get_data(as_text=True)
+            expected_signature = hashlib.sha256(
+                f"{payload}{POSCAKE_WEBHOOK_SECRET}".encode()
+            ).hexdigest()
+            
+            if signature != expected_signature:
+                print(f"[POSCAKE WEBHOOK] Invalid signature")
+                return jsonify({"error": "Invalid signature"}), 401
+        
+        # Parse JSON data
+        data = request.get_json()
+        if not data:
+            print("[POSCAKE WEBHOOK] No JSON data received")
+            return jsonify({"error": "No data"}), 400
+        
+        print(f"[POSCAKE WEBHOOK] Data received: {json.dumps(data, ensure_ascii=False)[:500]}")
+        
+        # Xác định loại sự kiện
+        event_type = data.get('event')
+        
+        # Xử lý theo loại sự kiện
+        if event_type and 'order' in event_type:
+            return handle_poscake_order_event(event_type, data)
+        elif event_type and 'product' in event_type:
+            # Xử lý sản phẩm (có thể cập nhật PRODUCTS)
+            print(f"[POSCAKE PRODUCT] Event: {event_type}")
+            return jsonify({"status": "received", "event": event_type}), 200
+        elif event_type and 'inventory' in event_type:
+            # Xử lý tồn kho
+            print(f"[POSCAKE INVENTORY] Event: {event_type}")
+            return jsonify({"status": "received", "event": event_type}), 200
+        else:
+            print(f"[POSCAKE WEBHOOK] Unknown event type: {event_type}")
+            return jsonify({"status": "ignored", "event": event_type}), 200
+            
+    except Exception as e:
+        print(f"[POSCAKE WEBHOOK ERROR] {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": "Internal server error"}), 500
+
+# ============================================
+# TEST WEBHOOK ENDPOINT
+# ============================================
+
+@app.route("/test-poscake-webhook", methods=["GET", "POST"])
+def test_poscake_webhook():
+    """Endpoint để test webhook từ Poscake"""
+    if request.method == "GET":
+        return jsonify({
+            "status": "ready",
+            "message": "Poscake Webhook endpoint is ready",
+            "endpoint": "/poscake-webhook",
+            "instructions": "Configure webhook on Poscake to point to this URL"
+        })
+    
+    # Xử lý POST request (test data)
+    data = request.get_json() or {}
+    
+    print(f"[TEST WEBHOOK] Received data: {json.dumps(data, indent=2)}")
+    
+    # Log headers
+    headers = dict(request.headers)
+    print(f"[TEST WEBHOOK] Headers: {json.dumps(headers, indent=2)}")
     
     return jsonify({
-        "status": "simulated",
-        "data": sample_data
+        "status": "received",
+        "message": "Test webhook received successfully",
+        "data_received": data,
+        "headers_received": headers,
+        "timestamp": datetime.now().isoformat()
     }), 200
 
 # ============================================
-# CẤU HÌNH PORT CHO KOYEB
+# DEBUG FEED COMMENT ENDPOINT
+# ============================================
+
+@app.route("/debug-feed-comment", methods=["GET"])
+def debug_feed_comment():
+    """Debug endpoint cho feed comment processing"""
+    post_id = request.args.get("post_id", "516937221685203_1775036843322177")
+    
+    # Test trực tiếp với post_id từ log
+    test_data = {
+        "id": post_id,
+        "message": "[MS000033] 🔥 Tỏa Sáng Với Áo Dài Cách Tân Đính Ren Lấp Lánh\n💸 Giá chỉ: **575K ** cho tất cả các màu\n✨ Đừng bỏ lỡ cơ hội nổi bật tại mọi sự kiện với thiết kế áo dài cách tân đính ren và sequin lấp lánh."
+    }
+    
+    # Test hàm extract_ms_from_post_content
+    ms = extract_ms_from_post_content(test_data)
+    
+    return jsonify({
+        "post_id": post_id,
+        "extracted_ms": ms,
+        "message_preview": test_data["message"][:200],
+        "patterns_tested": [
+            r"\[(MS\d{2,6})\]",
+            r"\[MS\s*(\d{2,6})\]",
+            r"\b(MS\d{6})\b",
+            r"MS\s*(\d{6})"
+        ]
+    })
+
+# ============================================
+# TEST FEED COMMENT ENDPOINT
+# ============================================
+
+@app.route("/test-feed-comment", methods=["GET"])
+def test_feed_comment():
+    """Test endpoint cho feed comment processing"""
+    post_id = request.args.get("post_id", "516937221685203_1775049683320893")
+    
+    # Test hàm get_post_content_from_facebook
+    post_data = get_post_content_from_facebook(post_id)
+    
+    if not post_data:
+        return jsonify({
+            "status": "error",
+            "message": "Không lấy được nội dung bài viết",
+            "post_id": post_id
+        }), 400
+    
+    # Test hàm extract_ms_from_post_content
+    detected_ms = extract_ms_from_post_content(post_data)
+    
+    # Load products để kiểm tra tồn tại
+    load_products(force=True)
+    
+    # Kiểm tra nếu MS tồn tại
+    ms_exists = False
+    final_ms = detected_ms
+    
+    if detected_ms:
+        if detected_ms in PRODUCTS:
+            ms_exists = True
+        else:
+            # Thử tìm trong mapping số ngắn
+            num_part = detected_ms[2:].lstrip('0')
+            if num_part and num_part in PRODUCTS_BY_NUMBER:
+                final_ms = PRODUCTS_BY_NUMBER[num_part]
+                ms_exists = True
+    
+    # Test context update
+    test_user_id = "test_user_123"
+    if detected_ms and ms_exists:
+        update_context_with_new_ms(test_user_id, final_ms, "test_feed_comment")
+    
+    return jsonify({
+        "status": "success",
+        "post_id": post_id,
+        "post_content_preview": post_data.get('message', '')[:200] + "..." if post_data.get('message') else "No message",
+        "detected_ms": detected_ms,
+        "final_ms": final_ms if detected_ms else None,
+        "ms_exists": ms_exists,
+        "context_updated": detected_ms is not None and ms_exists,
+        "test_user_context": USER_CONTEXT.get(test_user_id, {})
+    })
+
+# ============================================
+# API MỚI: Lấy thông tin biến thể (ảnh, giá)
+# ============================================
+
+@app.route("/api/get-variant-info")
+def api_get_variant_info():
+    ms = (request.args.get("ms") or "").upper()
+    color = request.args.get("color", "").strip()
+    size = request.args.get("size", "").strip()
+    
+    load_products()
+    if ms not in PRODUCTS:
+        return {"error": "not_found"}, 404
+    
+    product = PRODUCTS[ms]
+    
+    # Tìm biến thể phù hợp
+    target_variant = None
+    for variant in product.get("variants", []):
+        variant_color = variant.get("mau", "").strip().lower()
+        variant_size = variant.get("size", "").strip().lower()
+        
+        input_color = color.strip().lower()
+        input_size = size.strip().lower()
+        
+        color_match = (not input_color) or (variant_color == input_color) or (input_color == "mặc định" and not variant_color)
+        size_match = (not input_size) or (variant_size == input_size) or (input_size == "mặc định" and not variant_size)
+        
+        if color_match and size_match:
+            target_variant = variant
+            break
+    
+    # Nếu không tìm thấy biến thể phù hợp, dùng thông tin chung
+    if target_variant:
+        variant_image = target_variant.get("variant_image", "")
+        variant_price = target_variant.get("gia", 0)
+        variant_price_raw = target_variant.get("gia_raw", "")
+    else:
+        variant_image = ""
+        variant_price = extract_price_int(product.get("Gia", "")) or 0
+        variant_price_raw = product.get("Gia", "")
+    
+    # Nếu không có ảnh biến thể, lấy ảnh đầu tiên của sản phẩm
+    if not variant_image:
+        images_field = product.get("Images", "")
+        urls = parse_image_urls(images_field)
+        variant_image = urls[0] if urls else ""
+    
+    return {
+        "ms": ms,
+        "color": color,
+        "size": size,
+        "image": variant_image,
+        "price": variant_price,
+        "price_raw": variant_price_raw,
+        "found_variant": target_variant is not None
+    }
+
+# ============================================
+# WEBHOOK HANDLER (ĐÃ SỬA ĐỂ XÓA LOGIC FCHAT ECHO)
+# ============================================
+
+@app.route("/", methods=["GET"])
+def home():
+    return "OK", 200
+
+@app.route("/webhook", methods=["GET", "POST"])
+def webhook():
+    if request.method == "GET":
+        mode = request.args.get("hub.mode")
+        token = request.args.get("hub.verify_token")
+        challenge = request.args.get("hub.challenge")
+        
+        if mode == "subscribe" and token == VERIFY_TOKEN:
+            print("[WEBHOOK VERIFY] Success!")
+            return challenge, 200
+        else:
+            print("[WEBHOOK VERIFY] Failed!")
+            return "Verification token mismatch", 403
+
+    data = request.get_json() or {}
+    print("Webhook received:", json.dumps(data, ensure_ascii=False)[:500])
+
+    entry = data.get("entry", [])
+    for e in entry:
+        # Xử lý feed changes (comment trên bài viết)
+        if "changes" in e:
+            changes = e.get("changes", [])
+            for change in changes:
+                value = change.get("value", {})
+                field = change.get("field")
+                
+                if field == "feed":
+                    print(f"[FEED EVENT] Nhận sự kiện feed")
+                    
+                    # Kiểm tra xem có phải comment không (có message và post_id)
+                    if "message" in value and "post_id" in value:
+                        print(f"[FEED COMMENT] Đang xử lý comment từ feed...")
+                        
+                        # Gọi hàm xử lý comment (ĐÃ CẢI THIỆN)
+                        handle_feed_comment(value)
+                    
+                    continue
+        
+        messaging = e.get("messaging", [])
+        for m in messaging:
+            sender_id = m.get("sender", {}).get("id")
+            if not sender_id:
+                continue
+            
+            # THÊM: Khôi phục context nếu cần (khi Koyeb wake up)
+            if sender_id not in USER_CONTEXT or not USER_CONTEXT[sender_id].get("last_ms"):
+                restored = restore_user_context_on_wakeup(sender_id)
+                if restored:
+                    print(f"[WEBHOOK] Đã khôi phục context cho user {sender_id}")
+            
+            # Bỏ qua delivery/read events sớm
+            if m.get("delivery") or m.get("read"):
+                continue
+
+            # Xử lý attachment template từ catalog
+            if "message" in m and "attachments" in m["message"]:
+                attachments = m["message"]["attachments"]
+                for att in attachments:
+                    if att.get("type") == "template":
+                        payload = att.get("payload", {})
+                        if "product" in payload:
+                            product = payload["product"]
+                            elements = product.get("elements", [])
+                            if elements and len(elements) > 0:
+                                element = elements[0]
+                                retailer_id = element.get("retailer_id")
+                                
+                                if retailer_id:
+                                    ctx = USER_CONTEXT[sender_id]
+                                    ctx["last_retailer_id"] = retailer_id
+                                    ctx["catalog_view_time"] = time.time()
+                                    
+                                    ms_from_retailer = extract_ms_from_retailer_id(retailer_id)
+                                    if ms_from_retailer:
+                                        # SỬ DỤNG HÀM MỚI ĐỂ CẬP NHẬT MS VÀ RESET COUNTER
+                                        update_context_with_new_ms(sender_id, ms_from_retailer, "catalog")
+                                        print(f"[CATALOG] Đã cập nhật MS mới từ catalog: {ms_from_retailer}")
+
+            # XỬ LÝ ECHO MESSAGE - CHỈ BỎ QUA ECHO TỪ BOT, KHÔNG XỬ LÝ FCHAT
+            if m.get("message", {}).get("is_echo"):
+                recipient_id = m.get("recipient", {}).get("id")
+                if not recipient_id:
+                    continue
+                
+                msg = m["message"]
+                echo_text = msg.get("text", "")
+                app_id = msg.get("app_id", "")
+                
+                # CHỈ KIỂM TRA NẾU LÀ BOT GENERATED ECHO - KHÔNG XỬ LÝ FCHAT
+                if is_bot_generated_echo(echo_text, app_id):
+                    print(f"[ECHO BOT] Bỏ qua echo message từ bot: {echo_text[:50]}...")
+                else:
+                    # Echo từ người dùng (comment) - đã xử lý qua feed, bỏ qua
+                    print(f"[ECHO USER] Bỏ qua echo từ người dùng (đã xử lý qua feed): {echo_text[:50]}...")
+                continue
+            
+            # Xử lý sự kiện ORDER từ Facebook Shop - ĐÃ SỬA: KHÔNG GỬI TIN NHẮN
+            if "order" in m:
+                order_info = m.get("order", {})
+                products = order_info.get("products", [])
+                
+                print(f"[FACEBOOK SHOP ORDER] Đơn hàng mới từ user {sender_id}: {json.dumps(order_info, ensure_ascii=False)[:500]}")
+                
+                # Trích xuất thông tin đơn hàng
+                order_items = []
+                total_amount = 0
+                
+                for product in products:
+                    retailer_id = product.get("retailer_id", "")
+                    product_name = product.get("name", "")
+                    unit_price = product.get("unit_price", 0)
+                    quantity = product.get("quantity", 1)
+                    currency = product.get("currency", "VND")
+                    
+                    # Trích xuất mã sản phẩm từ retailer_id
+                    ms = extract_ms_from_retailer_id(retailer_id) or "UNKNOWN"
+                    
+                    item_total = unit_price * quantity
+                    total_amount += item_total
+                    
+                    order_items.append({
+                        "ms": ms,
+                        "name": product_name,
+                        "unit_price": unit_price,
+                        "quantity": quantity,
+                        "item_total": item_total,
+                        "retailer_id": retailer_id
+                    })
+                
+                # KHÔNG GỬI TIN NHẮN CHO ĐƠN HÀNG TỰ FACEBOOK SHOP
+                # Chỉ cập nhật context và ghi log
+                
+                # Cập nhật context với mã sản phẩm đầu tiên (nếu có) và RESET COUNTER
+                if order_items and order_items[0]["ms"] != "UNKNOWN":
+                    new_ms = order_items[0]["ms"]
+                    
+                    # SỬ DỤNG HÀM MỚI ĐỂ CẬP NHẬT MS VÀ RESET COUNTER
+                    update_context_with_new_ms(sender_id, new_ms, "facebook_shop_order")
+                    
+                    print(f"[FACEBOOK SHOP ORDER] Đã cập nhật MS mới {new_ms} từ đơn hàng Facebook Shop")
+                
+                # Ghi log đơn hàng vào hệ thống
+                try:
+                    order_log = {
+                        "user_id": sender_id,
+                        "timestamp": datetime.now().isoformat(),
+                        "order_data": order_info,
+                        "items": order_items,
+                        "total_amount": total_amount,
+                        "source": "facebook_shop"
+                    }
+                    
+                    # Lưu vào file log
+                    with open("facebook_shop_orders.log", "a", encoding="utf-8") as f:
+                        f.write(json.dumps(order_log, ensure_ascii=False) + "\n")
+                    
+                    print(f"[FACEBOOK SHOP ORDER LOG] Đã ghi log đơn hàng từ user {sender_id}")
+                except Exception as e:
+                    print(f"[FACEBOOK SHOP ORDER ERROR] Lỗi khi ghi log: {e}")
+                
+                continue  # Đã xử lý xong sự kiện order
+            
+            # Xử lý referral
+            if m.get("referral"):
+                ref = m["referral"]
+                ctx = USER_CONTEXT[sender_id]
+                ctx["referral_source"] = ref.get("source", "unknown")
+                referral_payload = ref.get("ref", "")
+                ctx["referral_payload"] = referral_payload
+                
+                # Logic reset counter thông minh: chỉ reset nếu user không hoạt động trong 5 phút
+                now = time.time()
+                last_msg_time = ctx.get("last_msg_time", 0)
+                
+                if now - last_msg_time > 300:  # 5 phút không có tin nhắn
+                    ctx["real_message_count"] = 0
+                    print(f"[REFERRAL RESET COUNTER] Reset real_message_count cho user {sender_id} (inactive > 5m)")
+                else:
+                    print(f"[REFERRAL NO RESET] Giữ nguyên counter cho user {sender_id}, last_msg cách đây {int(now - last_msg_time)}s")
+                
+                print(f"[REFERRAL] User {sender_id} từ {ctx['referral_source']} với payload: {referral_payload}")
+                
+                handled = False
+                
+                if ref.get("source") == "ADS" and ref.get("ads_context_data"):
+                    ads_data = ref.get("ads_context_data", {})
+                    ad_title = ads_data.get("ad_title", "")
+                    
+                    print(f"[ADS REFERRAL] Ad title: {ad_title}")
+                    
+                    ms_from_ad = extract_ms_from_ad_title(ad_title)
+                    if ms_from_ad and ms_from_ad in PRODUCTS:
+                        print(f"[ADS PRODUCT] Xác định sản phẩm từ ad_title: {ms_from_ad}")
+                        
+                        # SỬ DỤNG HÀM MỚI ĐỂ CẬP NHẬT MS VÀ RESET COUNTER
+                        update_context_with_new_ms(sender_id, ms_from_ad, "ADS")
+                        
+                        welcome_msg = f"""Chào anh/chị! 👋 
+Em là trợ lý AI của {get_fanpage_name_from_api()}.
+
+Em thấy anh/chị quan tâm đến sản phẩm **[{ms_from_ad}]** từ quảng cáo.
+Để xem thông tin chi tiết, anh/chị vui lòng gửi tin nhắn bất kỳ ạ!"""
+                        
+                        send_message(sender_id, welcome_msg)
+                        handled = True
+                    
+                    if not handled and referral_payload:
+                        detected_ms = detect_ms_from_text(referral_payload)
+                        if detected_ms and detected_ms in PRODUCTS:
+                            print(f"[ADS REFERRAL] Nhận diện mã từ payload: {detected_ms}")
+                            
+                            # SỬ DỤNG HÀM MỚI ĐỂ CẬP NHẬT MS VÀ RESET COUNTER
+                            update_context_with_new_ms(sender_id, detected_ms, "ADS")
+                            
+                            welcome_msg = f"""Chào anh/chị! 👋 
+Em là trợ lý AI của {get_fanpage_name_from_api()}.
+
+Em thấy anh/chị quan tâm đến sản phẩm **[{detected_ms}]**.
+Để xem thông tin chi tiết, anh/chị vui lòng gửi tin nhắn bất kỳ ạ!"""
+                            
+                            send_message(sender_id, welcome_msg)
+                            handled = True
+                
+                if handled:
+                    continue
+                
+                if ctx.get("referral_source") != "ADS" or not ctx.get("last_ms"):
+                    ctx["last_ms"] = None
+                    ctx["product_history"] = []
+                
+                if referral_payload:
+                    detected_ms = detect_ms_from_text(referral_payload)
+                    
+                    if detected_ms and detected_ms in PRODUCTS:
+                        print(f"[REFERRAL AUTO] Nhận diện mã sản phẩm từ referral: {detected_ms}")
+                        
+                        # SỬ DỤNG HÀM MỚI ĐỂ CẬP NHẬT MS VÀ RESET COUNTER
+                        update_context_with_new_ms(sender_id, detected_ms, "referral")
+                        
+                        welcome_msg = f"""Chào anh/chị! 👋 
+Em là trợ lý AI của {FANPAGE_NAME}.
+
+Em thấy anh/chị quan tâm đến sản phẩm mã [{detected_ms}].
+Để xem thông tin chi tiết, anh/chị vui lòng gửi tin nhắn bất kỳ ạ!"""
+                        send_message(sender_id, welcome_msg)
+                        continue
+                    else:
+                        ctx["has_sent_first_carousel"] = False
+                        welcome_msg = f"""Chào anh/chị! 👋 
+Em là trợ lý AI của {FANPAGE_NAME}.
+
+Để em tư vấn chính xác, anh/chị vui lòng:
+1. Gửi mã sản phẩm (ví dụ: [MS123456])
+2. Hoặc gõ "xem sản phẩm" để xem danh sách
+3. Hoặc mô tả sản phẩm bạn đang tìm
+
+Anh/chị quan tâm sản phẩm nào ạ?"""
+                        send_message(sender_id, welcome_msg)
+                        continue
+            
+            # Xử lý postback
+            if "postback" in m:
+                payload = m["postback"].get("payload")
+                if payload:
+                    postback_id = m["postback"].get("mid")
+                    
+                    ctx = USER_CONTEXT.get(sender_id, {})
+                    last_payload = ctx.get("last_postback_payload")
+                    last_payload_time = ctx.get("last_postback_time", 0)
+                    
+                    now = time.time()
+                    if payload == last_payload and (now - last_payload_time) < 1:
+                        continue
+                    
+                    handle_postback_with_recovery(sender_id, payload, postback_id)
+                    continue
+            
+            # Xử lý tin nhắn thường (text & ảnh)
+            if "message" in m:
+                msg = m["message"]
+                text = msg.get("text")
+                attachments = msg.get("attachments") or []
+                
+                msg_mid = msg.get("mid")
+                
+                if msg_mid:
+                    ctx = USER_CONTEXT[sender_id]
+                    if "processed_message_mids" not in ctx:
+                        ctx["processed_message_mids"] = {}
+                    
+                    if msg_mid in ctx["processed_message_mids"]:
+                        processed_time = ctx["processed_message_mids"][msg_mid]
+                        now = time.time()
+                        if now - processed_time < 30:
+                            print(f"[MSG DUPLICATE] Bỏ qua message đã xử lý: {msg_mid}")
+                            continue
+                    
+                    last_msg_time = ctx.get("last_msg_time", 0)
+                    now = time.time()
+                    
+                    if now - last_msg_time < 0.5:
+                        print(f"[MSG DEBOUNCE] Message đến quá nhanh, bỏ qua: {msg_mid}")
+                        continue
+                    
+                    ctx["last_msg_time"] = now
+                    ctx["processed_message_mids"][msg_mid] = now
+                    
+                    if len(ctx["processed_message_mids"]) > 50:
+                        sorted_items = sorted(ctx["processed_message_mids"].items(), key=lambda x: x[1], reverse=True)[:30]
+                        ctx["processed_message_mids"] = dict(sorted_items)
+                
+                if text:
+                    ctx = USER_CONTEXT[sender_id]
+                    if ctx.get("processing_lock"):
+                        print(f"[TEXT LOCKED] User {sender_id} đang được xử lý, bỏ qua text: {text[:50]}...")
+                        continue
+                    
+                    handle_text(sender_id, text)
+                elif attachments:
+                    for att in attachments:
+                        if att.get("type") == "image":
+                            image_url = att.get("payload", {}).get("url")
+                            if image_url:
+                                ctx = USER_CONTEXT[sender_id]
+                                if ctx.get("processing_lock"):
+                                    print(f"[IMAGE LOCKED] User {sender_id} đang được xử lý, bỏ qua image")
+                                    continue
+                                
+                                handle_image(sender_id, image_url)
+
+    return "OK", 200
+
+# ============================================
+# ORDER FORM PAGE - CẢI TIẾN MỚI VỚI TỐI ƯU TỐC ĐỘ NÂNG CAO
+# ============================================
+
+@app.route("/order-form", methods=["GET"])
+def order_form():
+    ms = (request.args.get("ms") or "").upper()
+    uid = request.args.get("uid") or ""
+    
+    # Preload products nhanh hơn
+    load_products(force=False)
+    
+    if not ms:
+        return """
+        <html>
+        <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>Không tìm thấy sản phẩm</title>
+            <style>
+                body {
+                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    height: 100vh;
+                    display: flex;
+                    justify-content: center;
+                    align-items: center;
+                    margin: 0;
+                    padding: 20px;
+                }
+                .container {
+                    background: white;
+                    border-radius: 15px;
+                    padding: 40px;
+                    text-align: center;
+                    box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+                    max-width: 400px;
+                }
+                .error-icon {
+                    font-size: 60px;
+                    margin-bottom: 20px;
+                }
+                h2 {
+                    color: #FF3B30;
+                    margin-bottom: 15px;
+                }
+                .btn {
+                    display: inline-block;
+                    margin-top: 20px;
+                    padding: 12px 30px;
+                    background: linear-gradient(135deg, #1DB954 0%, #17a74d 100%);
+                    color: white;
+                    text-decoration: none;
+                    border-radius: 25px;
+                    font-weight: 600;
+                    transition: transform 0.3s ease;
+                }
+                .btn:hover {
+                    transform: translateY(-2px);
+                }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="error-icon">⚠️</div>
+                <h2>Không tìm thấy sản phẩm</h2>
+                <p>Vui lòng quay lại Messenger và chọn sản phẩm để đặt hàng.</p>
+                <a href="/" class="btn">Quay về trang chủ</a>
+            </div>
+        </body>
+        </html>
+        """
+    
+    # Nếu không có sản phẩm, thử load lại
+    if not PRODUCTS:
+        load_products(force=True)
+        
+    if ms not in PRODUCTS:
+        return """
+        <html>
+        <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>Sản phẩm không tồn tại</title>
+            <style>
+                body {
+                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    height: 100vh;
+                    display: flex;
+                    justify-content: center;
+                    align-items: center;
+                    margin: 0;
+                    padding: 20px;
+                }
+                .container {
+                    background: white;
+                    border-radius: 15px;
+                    padding: 40px;
+                    text-align: center;
+                    box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+                    max-width: 400px;
+                }
+                .error-icon {
+                    font-size: 60px;
+                    margin-bottom: 20px;
+                }
+                h2 {
+                    color: #FF3B30;
+                    margin-bottom: 15px;
+                }
+                .btn {
+                    display: inline-block;
+                    margin-top: 20px;
+                    padding: 12px 30px;
+                    background: linear-gradient(135deg, #1DB954 0%, #17a74d 100%);
+                    color: white;
+                    text-decoration: none;
+                    border-radius: 25px;
+                    font-weight: 600;
+                    transition: transform 0.3s ease;
+                }
+                .btn:hover {
+                    transform: translateY(-2px);
+                }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="error-icon">❌</div>
+                <h2>Sản phẩm không tồn tại</h2>
+                <p>Vui lòng quay lại Messenger và chọn sản phẩm khác giúp shop ạ.</p>
+                <a href="/" class="btn">Quay về trang chủ</a>
+            </div>
+        </body>
+        </html>
+        """
+    
+    current_fanpage_name = get_fanpage_name_from_api()
+    row = PRODUCTS[ms]
+    
+    # Lấy thông tin sản phẩm với fallback nhanh
+    images_field = row.get("Images", "")
+    urls = parse_image_urls(images_field)
+    default_image = urls[0] if urls else ""
+    
+    # Sử dụng base64 placeholder để tăng tốc độ load ban đầu
+    placeholder_image = "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTIwIiBoZWlnaHQ9IjEyMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTIwIiBoZWlnaHQ9IjEyMCIgZmlsbD0iI2Y1ZjVmNSIvPjx0ZXh0IHg9IjYwIiB5PSI2MCIgZm9udC1mYW1pbHk9IkFyaWFsIiBmb250LXNpemU9IjEyIiBmaWxsPSIjY2NjY2NjIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBkeT0iLjNlbSI+TG9hZGluZy4uLjwvdGV4dD48L3N2Zz4="
+    
+    size_field = row.get("size (Thuộc tính)", "")
+    color_field = row.get("màu (Thuộc tính)", "")
+    
+    sizes = ["Mặc định"]
+    colors = ["Mặc định"]
+    
+    if size_field:
+        sizes = [s.strip() for s in size_field.split(",") if s.strip()]
+    
+    if color_field:
+        colors = [c.strip() for c in color_field.split(",") if c.strip()]
+    
+    price_str = row.get("Gia", "0")
+    price_int = extract_price_int(price_str) or 0
+    
+    # Tên sản phẩm (xóa mã nếu có)
+    product_name = row.get('Ten', '')
+    if f"[{ms}]" in product_name or ms in product_name:
+        product_name = product_name.replace(f"[{ms}]", "").replace(ms, "").strip()
+    
+    # GỬI SỰ KIỆN INITIATECHECKOUT THÔNG MINH (BẤT ĐỒNG BỘ)
+    try:
+        # Lấy client IP và user agent
+        client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+        user_agent = request.headers.get('User-Agent', '')
+        
+        # Gửi sự kiện InitiateCheckout SMART (bất đồng bộ)
+        send_initiate_checkout_smart(
+            uid=uid,
+            ms=ms,
+            product_name=product_name,
+            price=price_int
+        )
+        
+        print(f"[FACEBOOK CAPI] Đã queue InitiateCheckout cho {uid} - {ms}")
+    except Exception as e:
+        print(f"[FACEBOOK CAPI ERROR] Lỗi queue InitiateCheckout: {e}")
+        # KHÔNG ảnh hưởng đến việc hiển thị form
+    
+    # Tạo HTML với tối ưu hóa cực nhanh
+    html = f"""
+    <!DOCTYPE html>
+    <html lang="vi">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Đặt hàng - {product_name[:30]}...</title>
+        <link rel="preconnect" href="https://cdnjs.cloudflare.com" />
+        <link rel="preconnect" href="https://fonts.googleapis.com" />
+        <style>
+            /* Critical CSS - Load ngay */
+            * {{
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+            }}
+            
+            body {{
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+                background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+                min-height: 100vh;
+                padding: 20px;
+                color: #333;
+            }}
+            
+            .container {{
+                max-width: 480px;
+                margin: 0 auto;
+                background: white;
+                border-radius: 20px;
+                box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+                overflow: hidden;
+            }}
+            
+            .header {{
+                background: linear-gradient(135deg, #1DB954 0%, #17a74d 100%);
+                padding: 20px;
+                text-align: center;
+                color: white;
+            }}
+            
+            .header h2 {{
+                font-size: 18px;
+                font-weight: 600;
+                margin: 0;
+            }}
+            
+            .content {{
+                padding: 20px;
+            }}
+            
+            .product-section {{
+                display: flex;
+                gap: 15px;
+                margin-bottom: 25px;
+                padding-bottom: 20px;
+                border-bottom: 1px solid #eee;
+            }}
+            
+            .product-image-container {{
+                width: 120px;
+                height: 120px;
+                flex-shrink: 0;
+                border-radius: 12px;
+                overflow: hidden;
+                background: #f8f9fa;
+                position: relative;
+            }}
+            
+            .product-image {{
+                width: 100%;
+                height: 100%;
+                object-fit: cover;
+                transition: opacity 0.3s ease;
+            }}
+            
+            .product-image.loading {{
+                opacity: 0.3;
+            }}
+            
+            .product-info {{
+                flex: 1;
+                min-width: 0;
+            }}
+            
+            .product-code {{
+                font-size: 12px;
+                color: #666;
+                background: #f5f5f5;
+                padding: 6px 10px;
+                border-radius: 6px;
+                display: inline-block;
+                margin-bottom: 8px;
+                font-family: 'Courier New', monospace;
+                font-weight: 500;
+            }}
+            
+            .product-title {{
+                font-size: 16px;
+                font-weight: 600;
+                margin: 0 0 8px 0;
+                line-height: 1.4;
+                color: #222;
+                word-break: break-word;
+            }}
+            
+            .product-price {{
+                color: #FF3B30;
+                font-size: 18px;
+                font-weight: 700;
+                margin-top: 10px;
+            }}
+            
+            .form-group {{
+                margin-bottom: 18px;
+            }}
+            
+            .form-group label {{
+                display: block;
+                margin-bottom: 6px;
+                font-size: 14px;
+                font-weight: 500;
+                color: #444;
+            }}
+            
+            .form-control {{
+                width: 100%;
+                padding: 12px 15px;
+                border: 2px solid #e1e5e9;
+                border-radius: 10px;
+                font-size: 14px;
+                background: white;
+                font-family: inherit;
+            }}
+            
+            .select2-container {{
+                width: 100% !important;
+            }}
+            
+            .address-row {{
+                display: flex;
+                gap: 10px;
+                margin-bottom: 10px;
+            }}
+            
+            .total-section {{
+                background: #f8f9fa;
+                padding: 18px;
+                border-radius: 12px;
+                margin: 25px 0;
+                text-align: center;
+            }}
+            
+            .total-label {{
+                font-size: 14px;
+                color: #666;
+                margin-bottom: 5px;
+            }}
+            
+            .total-amount {{
+                font-size: 24px;
+                font-weight: 700;
+                color: #FF3B30;
+            }}
+            
+            .submit-btn {{
+                width: 100%;
+                padding: 16px;
+                border: none;
+                border-radius: 50px;
+                background: linear-gradient(135deg, #1DB954 0%, #17a74d 100%);
+                color: white;
+                font-size: 16px;
+                font-weight: 600;
+                cursor: pointer;
+                transition: all 0.3s ease;
+                margin-top: 10px;
+                font-family: inherit;
+            }}
+            
+            .submit-btn:disabled {{
+                opacity: 0.7;
+                cursor: not-allowed;
+            }}
+            
+            .loading-spinner {{
+                display: inline-block;
+                width: 18px;
+                height: 18px;
+                border: 2px solid rgba(255, 255, 255, 0.3);
+                border-top: 2px solid white;
+                border-radius: 50%;
+                animation: spin 1s linear infinite;
+            }}
+            
+            @keyframes spin {{
+                0% {{ transform: rotate(0deg); }}
+                100% {{ transform: rotate(360deg); }}
+            }}
+            
+            .note {{
+                margin-top: 15px;
+                font-size: 12px;
+                color: #888;
+                text-align: center;
+                line-height: 1.5;
+            }}
+            
+            @media (max-width: 480px) {{
+                .container {{
+                    border-radius: 15px;
+                }}
+                
+                .content {{
+                    padding: 15px;
+                }}
+                
+                .product-section {{
+                    flex-direction: column;
+                }}
+                
+                .product-image-container {{
+                    width: 100%;
+                    height: 200px;
+                }}
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h2>ĐẶT HÀNG - {current_fanpage_name}</h2>
+            </div>
+            
+            <div class="content">
+                <!-- Product Info Section -->
+                <div class="product-section">
+                    <div class="product-image-container">
+                        <img id="product-image" class="product-image" 
+                             src="{placeholder_image}" 
+                             data-src="{default_image}" 
+                             alt="{product_name}"
+                             onerror="this.src='data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTIwIiBoZWlnaHQ9IjEyMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTIwIiBoZWlnaHQ9IjEyMCIgZmlsbD0iI2UzZTNlMyIvPjx0ZXh0IHg9IjYwIiB5PSI2MCIgZm9udC1mYW1pbHk9IkFyaWFsIiBmb250LXNpemU9IjEyIiBmaWxsPSIjOTk5OTk5IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBkeT0iLjNlbSI+Tm8gSW1hZ2U8L3RleHQ+PC9zdmc+'"
+                             loading="lazy">
+                    </div>
+                    <div class="product-info">
+                        <div class="product-code">Mã: {ms}</div>
+                        <h3 class="product-title">{product_name}</h3>
+                        <div class="product-price">
+                            <span id="price-display">{price_int:,.0f} đ</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Order Form -->
+                <form id="orderForm">
+                    <!-- Color Selection -->
+                    <div class="form-group">
+                        <label for="color">Màu sắc:</label>
+                        <select id="color" class="form-control">
+                            {''.join(f"<option value='{c}'>{c}</option>" for c in colors)}
+                        </select>
+                    </div>
+
+                    <!-- Size Selection -->
+                    <div class="form-group">
+                        <label for="size">Size:</label>
+                        <select id="size" class="form-control">
+                            {''.join(f"<option value='{s}'>{s}</option>" for s in sizes)}
+                        </select>
+                    </div>
+
+                    <!-- Quantity -->
+                    <div class="form-group">
+                        <label for="quantity">Số lượng:</label>
+                        <input type="number" id="quantity" class="form-control" value="1" min="1">
+                    </div>
+
+                    <!-- Total Price -->
+                    <div class="total-section">
+                        <div class="total-label">Tạm tính:</div>
+                        <div class="total-amount" id="total-display">{price_int:,.0f} đ</div>
+                    </div>
+
+                    <!-- Customer Information -->
+                    <div class="form-group">
+                        <label for="customerName">Họ và tên:</label>
+                        <input type="text" id="customerName" class="form-control" required>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="phone">Số điện thoại:</label>
+                        <input type="tel" id="phone" class="form-control" required>
+                    </div>
+
+                    <!-- Address Section - Sử dụng static list cho nhanh -->
+                    <div class="form-group">
+                        <label for="province">Tỉnh/Thành phố:</label>
+                        <select id="province" class="form-control" required>
+                            <option value="">Chọn tỉnh/thành phố</option>
+                            <option value="Hà Nội">Hà Nội</option>
+                            <option value="TP Hồ Chí Minh">TP Hồ Chí Minh</option>
+                            <option value="Đà Nẵng">Đà Nẵng</option>
+                            <option value="Hải Phòng">Hải Phòng</option>
+                            <option value="Cần Thơ">Cần Thơ</option>
+                            <option value="An Giang">An Giang</option>
+                            <option value="Bà Rịa - Vũng Tàu">Bà Rịa - Vũng Tàu</option>
+                            <option value="Bắc Giang">Bắc Giang</option>
+                            <option value="Bắc Kạn">Bắc Kạn</option>
+                            <option value="Bạc Liêu">Bạc Liêu</option>
+                            <option value="Bắc Ninh">Bắc Ninh</option>
+                            <option value="Bến Tre">Bến Tre</option>
+                            <option value="Bình Định">Bình Định</option>
+                            <option value="Bình Dương">Bình Dương</option>
+                            <option value="Bình Phước">Bình Phước</option>
+                            <option value="Bình Thuận">Bình Thuận</option>
+                            <option value="Cà Mau">Cà Mau</option>
+                            <option value="Cao Bằng">Cao Bằng</option>
+                            <option value="Đắk Lắk">Đắk Lắk</option>
+                            <option value="Đắk Nông">Đắk Nông</option>
+                            <option value="Điện Biên">Điện Biên</option>
+                            <option value="Đồng Nai">Đồng Nai</option>
+                            <option value="Đồng Tháp">Đồng Tháp</option>
+                            <option value="Gia Lai">Gia Lai</option>
+                            <option value="Hà Giang">Hà Giang</option>
+                            <option value="Hà Nam">Hà Nam</option>
+                            <option value="Hà Tĩnh">Hà Tĩnh</option>
+                            <option value="Hải Dương">Hải Dương</option>
+                            <option value="Hậu Giang">Hậu Giang</option>
+                            <option value="Hòa Bình">Hòa Bình</option>
+                            <option value="Hưng Yên">Hưng Yên</option>
+                            <option value="Khánh Hòa">Khánh Hòa</option>
+                            <option value="Kiên Giang">Kiên Giang</option>
+                            <option value="Kon Tum">Kon Tum</option>
+                            <option value="Lai Châu">Lai Châu</option>
+                            <option value="Lâm Đồng">Lâm Đồng</option>
+                            <option value="Lạng Sơn">Lạng Sơn</option>
+                            <option value="Lào Cai">Lào Cai</option>
+                            <option value="Long An">Long An</option>
+                            <option value="Nam Định">Nam Định</option>
+                            <option value="Nghệ An">Nghệ An</option>
+                            <option value="Ninh Bình">Ninh Bình</option>
+                            <option value="Ninh Thuận">Ninh Thuận</option>
+                            <option value="Phú Thọ">Phú Thọ</option>
+                            <option value="Quảng Bình">Quảng Bình</option>
+                            <option value="Quảng Nam">Quảng Nam</option>
+                            <option value="Quảng Ngãi">Quảng Ngãi</option>
+                            <option value="Quảng Ninh">Quảng Ninh</option>
+                            <option value="Quảng Trị">Quảng Trị</option>
+                            <option value="Sóc Trăng">Sóc Trăng</option>
+                            <option value="Sơn La">Sơn La</option>
+                            <option value="Tây Ninh">Tây Ninh</option>
+                            <option value="Thái Bình">Thái Bình</option>
+                            <option value="Thái Nguyên">Thái Nguyên</option>
+                            <option value="Thanh Hóa">Thanh Hóa</option>
+                            <option value="Thừa Thiên Huế">Thừa Thiên Huế</option>
+                            <option value="Tiền Giang">Tiền Giang</option>
+                            <option value="Trà Vinh">Trà Vinh</option>
+                            <option value="Tuyên Quang">Tuyên Quang</option>
+                            <option value="Vĩnh Long">Vĩnh Long</option>
+                            <option value="Vĩnh Phúc">Vĩnh Phúc</option>
+                            <option value="Yên Bái">Yên Bái</option>
+                            <option value="Phú Yên">Phú Yên</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="district">Quận/Huyện:</label>
+                        <input type="text" id="district" class="form-control" placeholder="Nhập quận/huyện" required>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="ward">Phường/Xã:</label>
+                        <input type="text" id="ward" class="form-control" placeholder="Nhập phường/xã" required>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="addressDetail">Địa chỉ chi tiết:</label>
+                        <input type="text" id="addressDetail" class="form-control" placeholder="Số nhà, tên đường, thôn/xóm..." required>
+                    </div>
+
+                    <!-- Submit Button -->
+                    <button type="button" id="submitBtn" class="submit-btn">
+                        ĐẶT HÀNG NGAY
+                    </button>
+
+                    <p class="note">
+                        Shop sẽ gọi xác nhận trong 5-10 phút. Thanh toán khi nhận hàng (COD).
+                    </p>
+                </form>
+            </div>
+        </div>
+
+        <!-- Defer loading of non-critical JS -->
+        <script>
+            // Inline critical JS để form hoạt động ngay
+            document.addEventListener('DOMContentLoaded', function() {{
+                const DOMAIN = '{'https://' + DOMAIN if not DOMAIN.startswith('http') else DOMAIN}';
+                const API_BASE_URL = '/api';
+                let BASE_PRICE = {price_int};
+                
+                // Format price function
+                function formatPrice(n) {{
+                    return new Intl.NumberFormat('vi-VN').format(n) + ' đ';
+                }}
+                
+                // Update price display
+                function updatePriceDisplay() {{
+                    const quantity = parseInt(document.getElementById('quantity').value) || 1;
+                    const total = BASE_PRICE * quantity;
+                    document.getElementById('total-display').textContent = formatPrice(total);
+                }}
+                
+                // Load product image after page loads
+                function loadProductImage() {{
+                    const img = document.getElementById('product-image');
+                    if (img.dataset.src) {{
+                        // Create a new image to check if it loads
+                        const tempImg = new Image();
+                        tempImg.onload = function() {{
+                            img.src = this.src;
+                            img.classList.remove('loading');
+                        }};
+                        tempImg.onerror = function() {{
+                            // Use fallback image
+                            img.src = 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTIwIiBoZWlnaHQ9IjEyMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTIwIiBoZWlnaHQ9IjEyMCIgZmlsbD0iI2UzZTNlMyIvPjx0ZXh0IHg9IjYwIiB5PSI2MCIgZm9udC1mYW1pbHk9IkFyaWFsIiBmb250LXNpemU9IjEyIiBmaWxsPSIjOTk5OTk5IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBkeT0iLjNlbSI+Tm8gSW1hZ2U8L3RleHQ+PC9zdmc+';
+                        }};
+                        tempImg.src = img.dataset.src;
+                    }}
+                }}
+                
+                // Get variant info (ảnh và giá)
+                async function getVariantInfo(color, size) {{
+                    try {{
+                        const response = await fetch(`${{API_BASE_URL}}/get-variant-info?ms={ms}&color=${{encodeURIComponent(color)}}&size=${{encodeURIComponent(size)}}`);
+                        if (response.ok) {{
+                            return await response.json();
+                        }}
+                    }} catch (error) {{
+                        console.log('Không thể lấy thông tin biến thể, sử dụng giá mặc định');
+                    }}
+                    return null;
+                }}
+                
+                // Update variant info when color/size changes
+                async function updateVariantInfo() {{
+                    const color = document.getElementById('color').value;
+                    const size = document.getElementById('size').value;
+                    
+                    const variantInfo = await getVariantInfo(color, size);
+                    if (variantInfo) {{
+                        // Update image
+                        const img = document.getElementById('product-image');
+                        if (variantInfo.image) {{
+                            const tempImg = new Image();
+                            tempImg.onload = function() {{
+                                img.src = variantInfo.image;
+                            }};
+                            tempImg.src = variantInfo.image;
+                        }}
+                        
+                        // Update price
+                        if (variantInfo.price && variantInfo.price > 0) {{
+                            BASE_PRICE = variantInfo.price;
+                            document.getElementById('price-display').textContent = formatPrice(BASE_PRICE);
+                            updatePriceDisplay();
+                        }}
+                    }}
+                }}
+                
+                // Submit order
+                async function submitOrder() {{
+                    const formData = {{
+                        ms: '{ms}',
+                        uid: '{uid}',
+                        color: document.getElementById('color').value,
+                        size: document.getElementById('size').value,
+                        quantity: parseInt(document.getElementById('quantity').value) || 1,
+                        customerName: document.getElementById('customerName').value.trim(),
+                        phone: document.getElementById('phone').value.trim(),
+                        province: document.getElementById('province').value,
+                        district: document.getElementById('district').value.trim(),
+                        ward: document.getElementById('ward').value.trim(),
+                        addressDetail: document.getElementById('addressDetail').value.trim()
+                    }};
+                    
+                    // Validation
+                    if (!formData.customerName) {{
+                        alert('Vui lòng nhập họ và tên');
+                        return;
+                    }}
+                    
+                    if (!formData.phone) {{
+                        alert('Vui lòng nhập số điện thoại');
+                        return;
+                    }}
+                    
+                    // Phone validation
+                    const phoneRegex = /^(0[0-9]{{9}}|84[0-9]{{9}}|\+84[0-9]{{9}})$/;
+                    const normalizedPhone = formData.phone.replace(/\\s/g, '');
+                    
+                    if (!phoneRegex.test(normalizedPhone)) {{
+                        alert('Số điện thoại không hợp lệ. Vui lòng nhập số 10 chữ số (VD: 0982155980)');
+                        return;
+                    }}
+                    
+                    formData.phone = normalizedPhone.replace('+84', '0').replace(/^84/, '0');
+                    
+                    if (!formData.province) {{
+                        alert('Vui lòng chọn tỉnh/thành phố');
+                        return;
+                    }}
+                    
+                    if (!formData.district) {{
+                        alert('Vui lòng nhập quận/huyện');
+                        return;
+                    }}
+                    
+                    if (!formData.ward) {{
+                        alert('Vui lòng nhập phường/xã');
+                        return;
+                    }}
+                    
+                    if (!formData.addressDetail) {{
+                        alert('Vui lòng nhập địa chỉ chi tiết');
+                        return;
+                    }}
+                    
+                    formData.fullAddress = `${{formData.addressDetail}}, ${{formData.ward}}, ${{formData.district}}, ${{formData.province}}`;
+                    formData.unitPrice = BASE_PRICE;
+                    formData.totalPrice = BASE_PRICE * formData.quantity;
+                    
+                    const submitBtn = document.getElementById('submitBtn');
+                    const originalText = submitBtn.innerHTML;
+                    submitBtn.innerHTML = '<span class="loading-spinner"></span> ĐANG XỬ LÝ...';
+                    submitBtn.disabled = true;
+                    
+                    try {{
+                        const response = await fetch(`${{API_BASE_URL}}/submit-order`, {{
+                            method: 'POST',
+                            headers: {{ 'Content-Type': 'application/json' }},
+                            body: JSON.stringify(formData)
+                        }});
+                        
+                        const data = await response.json();
+                        
+                        if (response.ok) {{
+                            const successMessage = `🎉 ĐÃ ĐẶT HÀNG THÀNH CÔNG!
+                            
+📦 Mã sản phẩm: {ms}
+👤 Khách hàng: ${{formData.customerName}}
+📱 SĐT: ${{formData.phone}}
+📍 Địa chỉ: ${{formData.fullAddress}}
+💰 Đơn giá: ${{BASE_PRICE.toLocaleString('vi-VN')}} đ
+📦 Số lượng: ${{formData.quantity}}
+💰 Tổng tiền: ${{formData.totalPrice.toLocaleString('vi-VN')}} đ
+
+⏰ Shop sẽ liên hệ xác nhận trong 5-10 phút.
+🚚 Giao hàng bởi ViettelPost (COD)
+
+Cảm ơn quý khách đã đặt hàng! ❤️`;
+                            
+                            alert(successMessage);
+                            
+                            // Reset form after 1 second
+                            setTimeout(() => {{
+                                document.getElementById('orderForm').reset();
+                                updatePriceDisplay();
+                                submitBtn.innerHTML = originalText;
+                                submitBtn.disabled = false;
+                            }}, 1000);
+                            
+                        }} else {{
+                            alert('❌ ' + (data.message || 'Có lỗi xảy ra. Vui lòng thử lại sau'));
+                            submitBtn.innerHTML = originalText;
+                            submitBtn.disabled = false;
+                        }}
+                    }} catch (error) {{
+                        console.error('Lỗi khi đặt hàng:', error);
+                        alert('❌ Lỗi kết nối. Vui lòng kiểm tra mạng và thử lại!');
+                        submitBtn.innerHTML = originalText;
+                        submitBtn.disabled = false;
+                    }}
+                }}
+                
+                // Initialize event listeners
+                function initialize() {{
+                    // Load image
+                    loadProductImage();
+                    
+                    // Update price when quantity changes
+                    document.getElementById('quantity').addEventListener('input', updatePriceDisplay);
+                    
+                    // Update variant info when color/size changes
+                    document.getElementById('color').addEventListener('change', updateVariantInfo);
+                    document.getElementById('size').addEventListener('change', updateVariantInfo);
+                    
+                    // Submit button
+                    document.getElementById('submitBtn').addEventListener('click', submitOrder);
+                    
+                    // Auto-focus on name field
+                    setTimeout(() => {{
+                        document.getElementById('customerName').focus();
+                    }}, 500);
+                }}
+                
+                // Initialize when page loads
+                initialize();
+            }});
+        </script>
+    </body>
+    </html>
+    """
+    
+    response = make_response(html)
+    
+    # Set headers for better caching
+    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    response.headers['Content-Type'] = 'text/html; charset=utf-8'
+    
+    return response
+
+# ============================================
+# API ENDPOINTS
+# ============================================
+
+@app.route("/api/get-product")
+def api_get_product():
+    load_products()
+    ms = (request.args.get("ms") or "").upper()
+    if ms not in PRODUCTS:
+        return {"error": "not_found"}, 404
+
+    row = PRODUCTS[ms]
+    images_field = row.get("Images", "")
+    urls = parse_image_urls(images_field)
+    image = urls[0] if urls else ""
+
+    size_field = row.get("size (Thuộc tính)", "")
+    color_field = row.get("màu (Thuộc tính)", "")
+
+    sizes = []
+    if size_field:
+        sizes = [s.strip() for s in size_field.split(",") if s.strip()]
+
+    colors = []
+    if color_field:
+        colors = [c.strip() for c in color_field.split(",") if c.strip()]
+
+    if not sizes:
+        sizes = ["Mặc định"]
+    if not colors:
+        colors = ["Mặc định"]
+
+    price_str = row.get("Gia", "0")
+    price_int = extract_price_int(price_str) or 0
+
+    return {
+        "ms": ms,
+        "name": row.get("Ten", ""),
+        "image": image,
+        "sizes": sizes,
+        "colors": colors,
+        "price": price_int,
+        "price_display": f"{price_int:,.0f} đ",
+    }
+
+@app.route("/api/get-variant-image")
+def api_get_variant_image():
+    ms = (request.args.get("ms") or "").upper()
+    color = request.args.get("color", "").strip()
+    size = request.args.get("size", "").strip()
+    
+    load_products()
+    if ms not in PRODUCTS:
+        return {"error": "not_found"}, 404
+    
+    variant_image = get_variant_image(ms, color, size)
+    
+    return {
+        "ms": ms,
+        "color": color,
+        "size": size,
+        "image": variant_image
+    }
+
+@app.route("/api/submit-order", methods=["POST"])
+def api_submit_order():
+    data = request.get_json() or {}
+    ms = (data.get("ms") or "").upper()
+    uid = data.get("uid") or ""
+    color = data.get("color") or ""
+    size = data.get("size") or ""
+    quantity = int(data.get("quantity") or 1)
+    customer_name = data.get("customerName") or ""
+    phone = data.get("phone") or ""
+    
+    # Debug log
+    print(f"[ORDER DEBUG] MS: {ms}, Color: {color}, Size: {size}")
+    
+    # Địa chỉ mới
+    address_detail = data.get("addressDetail") or ""
+    province_name = data.get("provinceName") or ""
+    district_name = data.get("districtName") or ""
+    ward_name = data.get("wardName") or ""
+    full_address = data.get("fullAddress") or ""
+    
+    # Kiểm tra dữ liệu bắt buộc
+    if not all([ms, customer_name, phone, full_address]):
+        return {"error": "missing_data", "message": "Vui lòng điền đầy đủ thông tin bắt buộc"}, 400
+    
+    load_products()
+    row = PRODUCTS.get(ms)
+    if not row:
+        return {"error": "not_found", "message": "Sản phẩm không tồn tại"}, 404
+
+    # QUAN TRỌNG: Tìm giá đúng của biến thể (màu + size)
+    unit_price = 0
+    variant_found = False
+    
+    # Debug: Log các biến thể có sẵn
+    print(f"[ORDER DEBUG] Tìm biến thể với màu='{color}', size='{size}'")
+    
+    # Tìm biến thể phù hợp trong danh sách variants
+    for idx, variant in enumerate(row.get("variants", [])):
+        variant_color = variant.get("mau", "").strip().lower()
+        variant_size = variant.get("size", "").strip().lower()
+        
+        input_color = color.strip().lower()
+        input_size = size.strip().lower()
+        
+        # So khớp màu và size
+        color_match = (not input_color) or (variant_color == input_color) or (input_color == "mặc định" and not variant_color)
+        size_match = (not input_size) or (variant_size == input_size) or (input_size == "mặc định" and not variant_size)
+        
+        if color_match and size_match:
+            variant_found = True
+            # Ưu tiên lấy giá số (gia) trước, nếu không có thì lấy giá dạng chuỗi (gia_raw)
+            if variant.get("gia"):
+                unit_price = variant.get("gia", 0)
+            else:
+                # Nếu không có gia dạng số, thử chuyển đổi từ gia_raw
+                gia_raw = variant.get("gia_raw", "")
+                if gia_raw:
+                    unit_price = extract_price_int(gia_raw) or 0
+            print(f"[ORDER DEBUG] Biến thể {idx} phù hợp: màu='{variant_color}', size='{variant_size}', giá={unit_price}")
+            break
+    
+    # Nếu không tìm thấy biến thể phù hợp, lấy giá chung của sản phẩm
+    if not variant_found or unit_price == 0:
+        price_str = row.get("Gia", "0")
+        unit_price = extract_price_int(price_str) or 0
+        print(f"[ORDER DEBUG] Không tìm thấy biến thể phù hợp, sử dụng giá chung: {unit_price}")
+    
+    total = unit_price * quantity
+    
+    # LẤY TÊN SẢN PHẨM (KHÔNG BAO GỒM MÃ SẢN PHẨM)
+    product_name = row.get('Ten', '')
+    
+    # KIỂM TRA NẾU TÊN ĐÃ CHỨA MÃ SẢN PHẨM, CHỈ GIỮ TÊN
+    if f"[{ms}]" in product_name or ms in product_name:
+        # Xóa mã sản phẩm khỏi tên
+        product_name = product_name.replace(f"[{ms}]", "").replace(ms, "").strip()
+    
+    print(f"[ORDER DEBUG] Biến thể tìm thấy: {variant_found}, Đơn giá: {unit_price}, Tổng tiền: {total}")
+
+    # Gửi tin nhắn xác nhận cho khách hàng nếu có uid hợp lệ
+    if uid and len(uid) > 5:  # UID Facebook thường dài
+        try:
+            ctx = USER_CONTEXT.get(uid, {})
+            referral_source = ctx.get("referral_source", "direct")
+            
+            # Tin nhắn với giá đúng của biến thể (KHÔNG HIỂN THỊ MÃ SẢN PHẨM 2 LẦN)
+            msg = (
+                "🎉 Shop đã nhận được đơn hàng mới:\n"
+                f"🛍 Sản phẩm: {product_name}\n"  # CHỈ HIỂN THỊ TÊN SẢN PHẨM
+                f"🎨 Phân loại: {color} / {size}\n"
+                f"💰 Đơn giá: {unit_price:,.0f} đ\n"
+                f"📦 Số lượng: {quantity}\n"
+                f"💰 Thành tiền: {total:,.0f} đ\n"
+                f"👤 Người nhận: {customer_name}\n"
+                f"📱 SĐT: {phone}\n"
+                f"🏠 Địa chỉ: {full_address}\n"
+                "────────────────────\n"
+                "⏰ Shop sẽ gọi điện xác nhận trong 5-10 phút.\n"
+                "🚚 Đơn hàng sẽ được giao bởi ViettelPost\n"
+                "💳 Thanh toán khi nhận hàng (COD)\n"
+                "────────────────────\n"
+                "Cảm ơn anh/chị đã đặt hàng! ❤️"
+            )
+            send_message(uid, msg)
+            print(f"✅ Đã gửi tin nhắn xác nhận cho user {uid}")
+            
+        except Exception as e:
+            print(f"⚠️ Không thể gửi tin nhắn cho user {uid}: {str(e)}")
+            # Vẫn tiếp tục xử lý đơn hàng ngay cả khi không gửi được tin nhắn
+    
+    order_data = {
+        "ms": ms,
+        "uid": uid,
+        "color": color,
+        "size": size,
+        "quantity": quantity,
+        "customer_name": customer_name,
+        "phone": phone,
+        "address": full_address,
+        "address_detail": address_detail,
+        "province": province_name,
+        "district": district_name,
+        "ward": ward_name,
+        "product_name": product_name,
+        "unit_price": unit_price,  # Lưu giá của biến thể
+        "total_price": total,
+        "referral_source": ctx.get("referral_source", "direct") if uid else "direct",
+        "variant_found": variant_found  # Đánh dấu đã tìm thấy biến thể
+    }
+    
+    # GHI SỰ KIỆN PURCHASE VÀO FACEBOOK CONVERSION API (BẤT ĐỒNG BỘ)
+    try:
+        # Thêm order_id cho sự kiện Purchase
+        order_data["order_id"] = f"ORD{int(time.time())}_{uid[-4:] if uid else '0000'}"
+        
+        # Gửi sự kiện Purchase SMART (bất đồng bộ)
+        send_purchase_smart(
+            uid=uid,
+            ms=ms,
+            product_name=product_name,
+            order_data=order_data
+        )
+        
+        print(f"[FACEBOOK CAPI] Đã queue Purchase cho đơn hàng {order_data['order_id']}")
+    except Exception as e:
+        print(f"[FACEBOOK CAPI ERROR] Lỗi queue Purchase: {e}")
+        # KHÔNG ảnh hưởng đến việc lưu đơn hàng
+    
+    # Ghi vào Google Sheets
+    write_success = False
+    if GOOGLE_SHEET_ID and GOOGLE_SHEETS_CREDENTIALS_JSON:
+        write_success = write_order_to_google_sheet_api(order_data)
+        if write_success:
+            print(f"✅ Đã ghi đơn hàng vào Google Sheets: {ms} - {customer_name}")
+        else:
+            print(f"⚠️ Không thể ghi vào Google Sheets, sẽ lưu backup")
+    
+    # Luôn lưu backup local
+    save_order_to_local_csv(order_data)
+    print(f"📁 Đã lưu backup đơn hàng local: {ms} - {customer_name}")
+    
+    # Gửi thông báo đến Fchat nếu được cấu hình
+    if FCHAT_WEBHOOK_URL and FCHAT_TOKEN:
+        try:
+            fchat_payload = {
+                "token": FCHAT_TOKEN,
+                "message": f"🛒 ĐƠN HÀNG MỚI\nMã: {ms}\nKH: {customer_name}\nSĐT: {phone}\nĐơn giá: {unit_price:,.0f}đ\nSố lượng: {quantity}\nTổng: {total:,.0f}đ",
+                "metadata": {
+                    "order_data": order_data,
+                    "timestamp": datetime.now().isoformat()
+                }
+            }
+            requests.post(FCHAT_WEBHOOK_URL, json=fchat_payload, timeout=5)
+            print(f"📨 Đã gửi thông báo đến Fchat")
+        except Exception as e:
+            print(f"⚠️ Không thể gửi notification đến Fchat: {str(e)}")
+
+    return {
+        "status": "ok", 
+        "message": "Đơn hàng đã được tiếp nhận",
+        "order_written": write_success,
+        "order_details": {
+            "order_id": f"ORD{int(time.time())}_{uid[-4:] if uid else '0000'}",
+            "product_code": ms,
+            "product_name": product_name,
+            "variant": f"{color} / {size}",
+            "unit_price": unit_price,
+            "quantity": quantity,
+            "total": total,
+            "customer_name": customer_name,
+            "phone": phone,
+            "address": full_address,
+            "timestamp": datetime.now().isoformat()
+        }
+    }
+
+# ============================================
+# API ENDPOINT ĐỂ XEM VÀ QUẢN LÝ CONTEXT
+# ============================================
+
+@app.route("/api/user-context/<user_id>", methods=["GET"])
+def get_user_context(user_id):
+    """API để xem context của user"""
+    if user_id in USER_CONTEXT:
+        return jsonify({
+            "status": "success",
+            "user_id": user_id,
+            "context": USER_CONTEXT[user_id],
+            "last_ms": USER_CONTEXT[user_id].get("last_ms")
+        })
+    return jsonify({"status": "not_found"}), 404
+
+@app.route("/api/save-context", methods=["POST"])
+def api_save_context():
+    """API để trigger lưu context thủ công"""
+    save_user_context_to_sheets()
+    return jsonify({"status": "success", "message": "Đã lưu context vào Google Sheets"})
+
+# ============================================
+# THÊM CÁC ENDPOINT TEST
+# ============================================
+
+@app.route("/check-env", methods=["GET"])
+def check_env():
+    """Kiểm tra biến môi trường"""
+    return jsonify({
+        "GOOGLE_SHEET_ID": "CÓ" if GOOGLE_SHEET_ID else "KHÔNG",
+        "GOOGLE_SHEETS_CREDENTIALS_JSON": "CÓ" if GOOGLE_SHEETS_CREDENTIALS_JSON else "KHÔNG",
+        "SHEET_ID_LENGTH": len(GOOGLE_SHEET_ID) if GOOGLE_SHEET_ID else 0,
+        "CREDENTIALS_LENGTH": len(GOOGLE_SHEETS_CREDENTIALS_JSON) if GOOGLE_SHEETS_CREDENTIALS_JSON else 0
+    })
+
+@app.route("/test-context-save", methods=["GET"])
+def test_context_save():
+    """Test lưu context thủ công"""
+    print(f"[TEST] Đang test lưu context thủ công...")
+    print(f"[TEST] Số users trong memory: {len(USER_CONTEXT)}")
+    
+    # Test một user
+    test_user_id = "26225402767048945"
+    if test_user_id in USER_CONTEXT:
+        print(f"[TEST] User context: {USER_CONTEXT[test_user_id].get('last_ms')}")
+    
+    # Lưu thủ công
+    save_user_context_to_sheets()
+    
+    return jsonify({
+        "status": "success",
+        "users_in_memory": len(USER_CONTEXT),
+        "test_user_found": test_user_id in USER_CONTEXT,
+        "test_user_ms": USER_CONTEXT.get(test_user_id, {}).get("last_ms") if test_user_id in USER_CONTEXT else None
+    })
+
+# ============================================
+# FACEBOOK CAPI TEST ENDPOINTS
+# ============================================
+
+@app.route("/test-facebook-capi", methods=["GET"])
+def test_facebook_capi():
+    """Test endpoint cho Facebook Conversion API"""
+    uid = request.args.get("uid", "test_user_123")
+    ms = request.args.get("ms", "MS000001")
+    
+    # Test ViewContent
+    send_view_content_smart(
+        uid=uid,
+        ms=ms,
+        product_name="Sản phẩm test",
+        price=100000,
+        referral_source="test"
+    )
+    
+    # Test AddToCart
+    send_add_to_cart_smart(
+        uid=uid,
+        ms=ms,
+        product_name="Sản phẩm test",
+        price=100000
+    )
+    
+    # Test InitiateCheckout
+    send_initiate_checkout_smart(
+        uid=uid,
+        ms=ms,
+        product_name="Sản phẩm test",
+        price=100000
+    )
+    
+    return jsonify({
+        "status": "test_queued",
+        "facebook_pixel_id": FACEBOOK_PIXEL_ID,
+        "queue_size": FACEBOOK_EVENT_QUEUE.qsize(),
+        "worker_running": FACEBOOK_WORKER_RUNNING,
+        "test_user": uid,
+        "test_product": ms
+    })
+
+@app.route("/facebook-queue-status", methods=["GET"])
+def facebook_queue_status():
+    """Kiểm tra trạng thái Facebook Event Queue"""
+    cache_size = len(getattr(send_view_content_smart, 'cache', {})) if hasattr(send_view_content_smart, 'cache') else 0
+    
+    return jsonify({
+        "queue_size": FACEBOOK_EVENT_QUEUE.qsize(),
+        "worker_running": FACEBOOK_WORKER_RUNNING,
+        "cache_size": cache_size,
+        "facebook_pixel_id_configured": bool(FACEBOOK_PIXEL_ID),
+        "facebook_access_token_configured": bool(FACEBOOK_ACCESS_TOKEN)
+    })
+
+# ============================================
+# HEALTH CHECK
+# ============================================
+
+@app.route("/health", methods=["GET"])
+def health_check():
+    current_fanpage_name = get_fanpage_name_from_api()
+    
+    total_variants = sum(len(p['variants']) for p in PRODUCTS.values())
+    
+    # Kiểm tra feed comment capability
+    feed_comment_test = "Ready"
+    if PAGE_ACCESS_TOKEN and PAGE_ID:
+        feed_comment_test = "✅ Sẵn sàng"
+    else:
+        feed_comment_test = "⚠️ Cần cấu hình PAGE_ACCESS_TOKEN và PAGE_ID"
+    
+    # Kiểm tra persistent storage với Google Sheets
+    google_sheets_status = "✅ Đã cấu hình" if GOOGLE_SHEET_ID and GOOGLE_SHEETS_CREDENTIALS_JSON else "⚠️ Chưa cấu hình"
+    
+    # Kiểm tra Facebook Conversion API
+    facebook_capi_status = "✅ Đã cấu hình" if FACEBOOK_PIXEL_ID and FACEBOOK_ACCESS_TOKEN else "⚠️ Chưa cấu hình"
+    
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "products_loaded": len(PRODUCTS),
+        "variants_loaded": total_variants,
+        "openai_configured": bool(client),
+        "facebook_configured": bool(PAGE_ACCESS_TOKEN),
+        "fanpage_name": current_fanpage_name,
+        "page_id": PAGE_ID,
+        "feed_comment_processing": feed_comment_test,
+        "persistent_storage": {
+            "enabled": True,
+            "type": "Google Sheets",
+            "status": google_sheets_status,
+            "sheet_name": USER_CONTEXT_SHEET_NAME,
+            "users_in_memory": len(USER_CONTEXT),
+            "save_interval_seconds": 300
+        },
+        "google_sheets_integration": {
+            "sheet_id_configured": bool(GOOGLE_SHEET_ID),
+            "credentials_configured": bool(GOOGLE_SHEETS_CREDENTIALS_JSON),
+            "user_context_sheet": USER_CONTEXT_SHEET_NAME
+        },
+        "poscake_integration": {
+            "api_key_configured": bool(POSCAKE_API_KEY),
+            "webhook_secret_configured": bool(POSCAKE_WEBHOOK_SECRET),
+            "store_id_configured": bool(POSCAKE_STORE_ID),
+            "endpoints": {
+                "webhook": "/poscake-webhook",
+                "test": "/test-poscake-webhook"
+            }
+        },
+        "facebook_conversion_api": {
+            "pixel_id_configured": bool(FACEBOOK_PIXEL_ID),
+            "access_token_configured": bool(FACEBOOK_ACCESS_TOKEN),
+            "api_version": FACEBOOK_API_VERSION,
+            "events_tracked": ["ViewContent", "AddToCart", "InitiateCheckout", "Purchase"],
+            "async_processing": True,
+            "queue_size": FACEBOOK_EVENT_QUEUE.qsize(),
+            "worker_running": FACEBOOK_WORKER_RUNNING,
+            "cache_enabled": True,
+            "test_endpoint": "/test-facebook-capi",
+            "queue_status_endpoint": "/facebook-queue-status"
+        },
+        "gpt_function_calling": {
+            "enabled": True,
+            "tools": ["get_product_price_details", "get_product_basic_info", "send_product_images", "send_product_videos", "provide_order_link"],
+            "model": "gpt-4o-mini",
+            "first_message_logic": "Carousel 1 sản phẩm (chưa gửi carousel)",
+            "second_message_logic": "GPT Function Calling (đã gửi carousel)",
+            "price_analysis": "Thông minh (color_based, size_based, complex_based, single_price)",
+            "policy_handling": "GPT tự đọc mô tả sản phẩm (không dùng tool riêng, không dùng từ khóa)"
+        },
+        "image_processing": {
+            "enabled": True,
+            "technology": "OpenAI Vision API (3 phương pháp fallback: URL trực tiếp, base64, URL đơn giản)",
+            "emoji_detection": True,
+            "product_matching": "Text-based similarity matching nâng cao với trọng số",
+            "suggestion_carousel": "Carousel 3 sản phẩm gợi ý khi không tìm thấy từ ảnh"
+        },
+        "feed_comment_processing": {
+            "enabled": True,
+            "logic": "Lấy MS từ caption bài viết khi user comment",
+            "capabilities": [
+                "Detect MS từ bài viết gốc (chỉ dùng regex)",
+                "Auto reply với thông tin sản phẩm chi tiết",
+                "Cập nhật context cho user và reset counter",
+                "Chỉ gửi tin nhắn tự động khi real_message_count = 0"
+            ],
+            "required_permissions": "pages_read_engagement, pages_messaging"
+        },
+        "context_persistence": {
+            "enabled": True,
+            "type": "Google Sheets + In-memory cache",
+            "capabilities": [
+                "Tự động lưu context vào Google Sheets mỗi 5 phút",
+                "Tự động load context từ Google Sheets khi khởi động",
+                "Khôi phục context từ order history khi Koyeb wake up",
+                "Tra cứu đơn hàng cũ để nhận diện khách hàng"
+            ],
+            "koyeb_sleep_support": "✅ Có thể khôi phục context sau khi Koyeb wake up"
+        },
+        "features": {
+            "carousel_first_message": True,
+            "catalog_support": True,
+            "ads_referral_processing": True,
+            "fchat_echo_processing": False,
+            "image_processing": True,
+            "order_form": True,
+            "google_sheets_api": True,
+            "poscake_webhook": True,
+            "facebook_shop_order_processing": True,
+            "ms_context_update": True,
+            "no_duplicate_ms_display": True,
+            "optimized_form_loading": True,
+            "address_api_cache": True,
+            "lazy_image_loading": True,
+            "gzip_compression": True,
+            "feed_comment_processing": True,
+            "feed_comment_auto_reply": True,
+            "persistent_storage": True,
+            "form_static_address": True,
+            "context_restoration_after_sleep": True,
+            "facebook_conversion_api": True,
+            "async_event_processing": True,
+            "smart_event_cache": True
+        }
+    }, 200
+
+# ============================================
+# HEALTH CHECK NHANH (CHO LOAD BALANCER)
+# ============================================
+
+@app.route("/health-light", methods=["GET"])
+def health_light():
+    """Health check nhanh, không load products"""
+    return jsonify({
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "service": "order-form",
+        "uptime": time.time() - LAST_LOAD if LAST_LOAD > 0 else 0,
+        "users_in_memory": len(USER_CONTEXT),
+        "facebook_queue_size": FACEBOOK_EVENT_QUEUE.qsize(),
+        "facebook_worker_running": FACEBOOK_WORKER_RUNNING
+    }), 200
+
+# ============================================
+# PORT CONFIGURATION FOR KOYEB/RENDER
 # ============================================
 def get_port():
-    """Lấy port từ biến môi trường"""
+    """Get port from environment variable with fallback"""
     return int(os.environ.get("PORT", 5000))
 
 # ============================================
-# KHỞI ĐỘNG
+# MAIN
 # ============================================
+
 if __name__ == "__main__":
+    import os
+    
+    print("=" * 80)
+    print("🟢 KHỞI ĐỘNG FACEBOOK CHATBOT - GPT FUNCTION CALLING MODE")
+    print("=" * 80)
+    print(f"🟢 Process ID: {os.getpid()}")
+    print(f"🟢 Port: {get_port()}")
+    print("=" * 80)
+    
+    # KHỞI TẠO GOOGLE SHEETS USERCONTEXT SHEET
+    print("🟢 Đang khởi tạo Google Sheets UserContext sheet...")
+    init_user_context_sheet()
+    
+    # LOAD CONTEXT TỪ GOOGLE SHEETS
+    print("🟢 Đang load context từ Google Sheets...")
+    load_user_context_from_sheets()
+    print(f"🟢 Đã load {len(USER_CONTEXT)} users từ Google Sheets")
+    
+    # BẮT ĐẦU THREAD LƯU CONTEXT ĐỊNH KỲ
+    print("🟢 Đang khởi động thread lưu context định kỳ...")
+    saver_thread = threading.Thread(target=periodic_context_save, daemon=True)
+    saver_thread.start()
+    print(f"🟢 Thread lưu context đã khởi động, sẽ lưu mỗi 5 phút")
+    
+    # KHỞI ĐỘNG FACEBOOK EVENT WORKER
+    print("🟢 Đang khởi động Facebook Event Worker...")
+    facebook_worker = start_facebook_worker()
+    print("🟢 Facebook Event Worker đã sẵn sàng (async mode)")
+    
+    print(f"🟢 GPT-4o-mini: {'SẴN SÀNG' if client else 'CHƯA CẤU HÌNH'}")
+    print(f"🟢 Fanpage: {get_fanpage_name_from_api()}")
+    print(f"🟢 Page ID: {PAGE_ID}")
+    print(f"🟢 Domain: {DOMAIN}")
+    print(f"🟢 Google Sheets API: {'SẴN SÀNG' if GOOGLE_SHEET_ID and GOOGLE_SHEETS_CREDENTIALS_JSON else 'CHƯA CẤU HÌNH'}")
+    print(f"🟢 Poscake Webhook: {'SẴN SÀNG' if POSCAKE_API_KEY else 'CHƯA CẤU HÌNH'}")
+    print(f"🟢 Facebook Conversion API: {'SẴN SÀNG' if FACEBOOK_PIXEL_ID and FACEBOOK_ACCESS_TOKEN else 'CHƯA CẤU HÌNH'}")
+    print(f"🟢 OpenAI Function Calling: {'TÍCH HỢP THÀNH CÔNG' if client else 'CHƯA CẤU HÌNH'}")
+    print(f"🟢 Persistent Storage (Google Sheets): {'SẴN SÀNG' if GOOGLE_SHEET_ID and GOOGLE_SHEETS_CREDENTIALS_JSON else 'CHƯA CẤU HÌNH'}")
+    print("=" * 80)
+    
+    print("🔴 CẢI TIẾN QUAN TRỌNG: PERSISTENT STORAGE CHO USER_CONTEXT VỚI GOOGLE SHEETS")
+    print("=" * 80)
+    print(f"🔴 1. Database chính: Sử dụng Google Sheets làm database cho user context")
+    print(f"🔴 2. Sheet UserContext: {USER_CONTEXT_SHEET_NAME} (tự động tạo nếu chưa có)")
+    print(f"🔴 3. Tự động lưu: Lưu USER_CONTEXT vào Google Sheets mỗi 5 phút")
+    print(f"🔴 4. Khôi phục khi restart: Load lại context từ Google Sheets khi server khởi động")
+    print(f"🔴 5. Không mất dữ liệu: Giữ nguyên MS và context khi Koyeb sleep/restart")
+    print(f"🔴 6. Tra cứu đơn hàng cũ: Tự động tìm MS từ order history để khôi phục context")
+    print(f"🔴 7. Koyeb sleep support: Bot có thể khôi phục context sau khi Koyeb wake up")
+    print("=" * 80)
+    
+    print("🔴 CẢI TIẾN QUAN TRỌNG: FORM ĐẶT HÀNG TỐI ƯU TỐC ĐỘ")
+    print("=" * 80)
+    print(f"🔴 1. Static HTML: Form load ngay lập tức với CSS inline")
+    print(f"🔴 2. Placeholder image: Sử dụng base64 SVG để không chờ load ảnh")
+    print(f"🔴 3. Static address list: Sử dụng danh sách tỉnh/thành static thay vì gọi API")
+    print(f"🔴 4. Lazy loading: Ảnh sản phẩm load sau khi page hiển thị")
+    print("=" * 80)
+    
+    print("🔴 CẢI TIẾN QUAN TRỌNG: FEED COMMENT PROCESSING")
+    print("=" * 80)
+    print(f"🔴 1. Nhận comment từ feed: Lấy MS từ caption bài viết gốc")
+    print(f"🔴 2. Chỉ dùng regex: Không phụ thuộc vào việc load products")
+    print(f"🔴 3. Auto reply thông minh: GPT tạo tin nhắn tiếp thị dựa trên ưu điểm sản phẩm")
+    print(f"🔴 4. Chỉ reply 1 lần: Chỉ gửi tin nhắn đầu tiên, sau đó để khách chủ động nhắn tin")
+    print(f"🔴 5. Cập nhật context: Tự động cập nhật MS và reset counter khi có comment mới")
+    print("=" * 80)
+    
+    print("🔴 CẢI TIẾN QUAN TRỌNG: FACEBOOK CONVERSION API (ASYNC)")
+    print("=" * 80)
+    print(f"🔴 1. Async processing: Queue events để xử lý bất đồng bộ, không block bot")
+    print(f"🔴 2. Smart cache: ViewContent chỉ gửi 1 lần mỗi 30 phút cho cùng user + product")
+    print(f"🔴 3. All events tracked: ViewContent, AddToCart, InitiateCheckout, Purchase")
+    print(f"🔴 4. Thông minh: Tự động gửi từ carousel, order button, order form, order completion")
+    print("=" * 80)
+    
     port = get_port()
-    
-    print("=" * 60)
-    print("🔧 FACEBOOK WEBHOOK DEBUG SERVICE")
-    print("=" * 60)
-    print(f"📡 Port: {port}")
-    print(f"🔑 Verify Token: {'SET' if VERIFY_TOKEN else 'NOT SET'}")
-    print(f"📄 Page ID: {PAGE_ID}")
-    print(f"🔗 Webhook URL: https://[your-domain]/webhook")
-    print("=" * 60)
-    print("📝 Logs will be saved to: webhook_debug.log")
-    print("=" * 60)
-    
     app.run(host="0.0.0.0", port=port, debug=False)
