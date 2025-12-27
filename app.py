@@ -2667,7 +2667,7 @@ def _send_initiate_checkout_async(event_data: dict):
                     "currency": "VND",
                     "value": data.get('price', 0) * data.get('quantity', 1),
                     "content_ids": [data.get('ms', '')],
-                    "content_name": data.get('product_name", '')[:100],
+                    "content_name": data.get('product_name', '')[:100],
                     "content_type": "product",
                     "num_items": data.get('quantity', 1)
                 }
