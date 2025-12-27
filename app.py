@@ -51,6 +51,13 @@ FACEBOOK_ACCESS_TOKEN = os.getenv("FACEBOOK_ACCESS_TOKEN", "").strip()
 FACEBOOK_API_VERSION = os.getenv("FACEBOOK_API_VERSION", "v18.0").strip()
 
 # ============================================
+# Cấu hình Fchat API để thay thế Facebook Graph API
+# ============================================
+FCHAT_API_TOKEN = os.getenv("FCHAT_TOKEN", "").strip()
+FCHAT_SHOP_ID = os.getenv("FCHAT_SHOP_ID", "63a513b338ce6f65e845e5e1").strip()
+FCHAT_API_BASE_URL = os.getenv("FCHAT_API_BASE_URL", "https://fchat.vn/api").strip()
+
+# ============================================
 # GOOGLE SHEETS API CONFIGURATION
 # ============================================
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "").strip()
@@ -1332,34 +1339,45 @@ def is_bot_generated_echo(echo_text: str, app_id: str = "", attachments: list = 
     return False
 
 # ============================================
-# HÀM LẤY NỘI DUNG BÀI VIẾT TỪ POST_ID
+# HÀM LẤY NỘI DUNG BÀI VIẾT TỪ FCHAT API (THAY THẾ FACEBOOK GRAPH API) - CẢI THIỆN
 # ============================================
 
-def get_post_content_from_facebook(post_id: str) -> Optional[dict]:
+def get_post_content_from_fchat(post_id: str) -> Optional[dict]:
     """
-    Lấy nội dung bài viết từ Facebook Graph API
-    Trả về dict chứa message và các thông tin khác
+    Lấy nội dung bài viết từ Fchat API thay vì Facebook Graph API
     """
-    if not PAGE_ACCESS_TOKEN or not post_id:
-        print(f"[GET POST CONTENT] Thiếu token hoặc post_id")
+    if not FCHAT_API_TOKEN or not FCHAT_SHOP_ID:
+        print(f"[GET POST CONTENT] Thiếu FCHAT_API_TOKEN hoặc FCHAT_SHOP_ID")
         return None
     
     try:
-        # Graph API endpoint để lấy nội dung bài viết
-        url = f"https://graph.facebook.com/v12.0/{post_id}"
-        params = {
-            'fields': 'id,message,created_time,permalink_url',
-            'access_token': PAGE_ACCESS_TOKEN
+        # Fchat API endpoint để lấy nội dung bài viết
+        url = f"{FCHAT_API_BASE_URL}/shops/{FCHAT_SHOP_ID}/facebook/posts/{post_id}"
+        headers = {
+            'Authorization': f'Bearer {FCHAT_API_TOKEN}',
+            'Content-Type': 'application/json'
         }
         
-        response = requests.get(url, params=params, timeout=10)
+        print(f"[GET POST CONTENT] Gọi Fchat API: {url}")
+        response = requests.get(url, headers=headers, timeout=10)
+        
+        print(f"[GET POST CONTENT] Response status: {response.status_code}")
+        print(f"[GET POST CONTENT] Response text: {response.text[:200]}")
         
         if response.status_code == 200:
             data = response.json()
-            print(f"[GET POST CONTENT] Đã lấy nội dung bài viết {post_id}")
-            return data
+            print(f"[GET POST CONTENT] Đã lấy nội dung bài viết {post_id} từ Fchat")
+            
+            # Chuẩn hóa dữ liệu trả về để tương thích với code cũ
+            post_data = {
+                'id': post_id,
+                'message': data.get('message', data.get('content', '')),
+                'created_time': data.get('created_time', ''),
+                'permalink_url': data.get('permalink_url', data.get('url', ''))
+            }
+            return post_data
         else:
-            print(f"[GET POST CONTENT] Lỗi API {response.status_code}: {response.text}")
+            print(f"[GET POST CONTENT] Lỗi Fchat API {response.status_code}: {response.text[:200]}")
             return None
             
     except Exception as e:
@@ -1487,14 +1505,14 @@ def extract_ms_from_post_content(post_data: dict) -> Optional[str]:
     return None
 
 # ============================================
-# HÀM XỬ LÝ COMMENT TỪ FEED (HOÀN CHỈNH - ĐÃ SỬA)
+# HÀM XỬ LÝ COMMENT TỪ FEED (HOÀN CHỈNH - ĐÃ SỬA SỬ DỤNG FCHAT API)
 # ============================================
 
 def handle_feed_comment(change_data: dict):
     """
     Xử lý comment từ feed với logic:
     1. Lấy post_id từ comment
-    2. Lấy nội dung bài viết gốc
+    2. Lấy nội dung bài viết gốc từ Fchat API
     3. Trích xuất MS từ caption (CHỈ DÙNG REGEX)
     4. Load products và kiểm tra tồn tại
     5. Cập nhật context cho user và gửi tin nhắn tự động
@@ -1518,11 +1536,11 @@ def handle_feed_comment(change_data: dict):
             print(f"[FEED COMMENT] Bỏ qua comment từ chính page")
             return None
         
-        # 3. Lấy nội dung bài viết gốc
-        post_data = get_post_content_from_facebook(post_id)
+        # 3. Lấy nội dung bài viết gốc từ Fchat API (thay vì Facebook Graph API)
+        post_data = get_post_content_from_fchat(post_id)
         
         if not post_data:
-            print(f"[FEED COMMENT] Không lấy được nội dung bài viết {post_id}")
+            print(f"[FEED COMMENT] Không lấy được nội dung bài viết {post_id} từ Fchat")
             return None
         
         # LOG CHI TIẾT ĐỂ DEBUG
@@ -3859,27 +3877,68 @@ def test_poscake_webhook():
     }), 200
 
 # ============================================
-# DEBUG FEED COMMENT ENDPOINT
+# DEBUG ENDPOINTS (NEW)
+# ============================================
+
+@app.route("/debug-webhook", methods=["POST"])
+def debug_webhook():
+    """Endpoint để debug webhook từ Facebook"""
+    data = request.get_json() or {}
+    
+    print("=" * 80)
+    print("[DEBUG WEBHOOK] Headers:", dict(request.headers))
+    print("[DEBUG WEBHOOK] Data received:", json.dumps(data, indent=2, ensure_ascii=False))
+    print("=" * 80)
+    
+    # Xử lý như webhook thật để test
+    entry = data.get("entry", [])
+    for e in entry:
+        if "changes" in e:
+            changes = e.get("changes", [])
+            print(f"[DEBUG] Found {len(changes)} changes")
+            for i, change in enumerate(changes):
+                print(f"[DEBUG CHANGE {i}] Field: {change.get('field')}")
+                print(f"[DEBUG CHANGE {i}] Value: {json.dumps(change.get('value', {}), ensure_ascii=False)[:300]}")
+                
+                if change.get("field") == "feed":
+                    value = change.get("value", {})
+                    print(f"[DEBUG FEED] Item: {value.get('item')}, Verb: {value.get('verb')}")
+                    print(f"[DEBUG FEED] Has message: {'message' in value}, Has post_id: {'post_id' in value}")
+    
+    return jsonify({
+        "status": "debug_received",
+        "entries": len(entry),
+        "timestamp": datetime.now().isoformat()
+    })
+
+# ============================================
+# DEBUG FEED COMMENT ENDPOINT (SỬ DỤNG FCHAT API)
 # ============================================
 
 @app.route("/debug-feed-comment", methods=["GET"])
 def debug_feed_comment():
-    """Debug endpoint cho feed comment processing"""
+    """Debug endpoint cho feed comment processing với Fchat API"""
     post_id = request.args.get("post_id", "516937221685203_1775036843322177")
     
-    # Test trực tiếp với post_id từ log
-    test_data = {
-        "id": post_id,
-        "message": "[MS000033] 🔥 Tỏa Sáng Với Áo Dài Cách Tân Đính Ren Lấp Lánh\n💸 Giá chỉ: **575K ** cho tất cả các màu\n✨ Đừng bỏ lỡ cơ hội nổi bật tại mọi sự kiện với thiết kế áo dài cách tân đính ren và sequin lấp lánh."
-    }
+    # Test hàm get_post_content_from_fchat
+    post_data = get_post_content_from_fchat(post_id)
+    
+    if not post_data:
+        return jsonify({
+            "status": "error",
+            "message": "Không lấy được nội dung bài viết từ Fchat API",
+            "post_id": post_id,
+            "fchat_configured": bool(FCHAT_API_TOKEN and FCHAT_SHOP_ID)
+        }), 400
     
     # Test hàm extract_ms_from_post_content
-    ms = extract_ms_from_post_content(test_data)
+    ms = extract_ms_from_post_content(post_data)
     
     return jsonify({
         "post_id": post_id,
         "extracted_ms": ms,
-        "message_preview": test_data["message"][:200],
+        "fchat_api_used": True,
+        "message_preview": post_data["message"][:200] if post_data.get("message") else "No message",
         "patterns_tested": [
             r"\[(MS\d{2,6})\]",
             r"\[MS\s*(\d{2,6})\]",
@@ -3889,22 +3948,25 @@ def debug_feed_comment():
     })
 
 # ============================================
-# TEST FEED COMMENT ENDPOINT
+# TEST FEED COMMENT ENDPOINT (SỬ DỤNG FCHAT API)
 # ============================================
 
 @app.route("/test-feed-comment", methods=["GET"])
 def test_feed_comment():
-    """Test endpoint cho feed comment processing"""
+    """Test endpoint cho feed comment processing với Fchat API"""
     post_id = request.args.get("post_id", "516937221685203_1775049683320893")
     
-    # Test hàm get_post_content_from_facebook
-    post_data = get_post_content_from_facebook(post_id)
+    # Test hàm get_post_content_from_fchat
+    post_data = get_post_content_from_fchat(post_id)
     
     if not post_data:
         return jsonify({
             "status": "error",
-            "message": "Không lấy được nội dung bài viết",
-            "post_id": post_id
+            "message": "Không lấy được nội dung bài viết từ Fchat API",
+            "post_id": post_id,
+            "fchat_api_configured": bool(FCHAT_API_TOKEN and FCHAT_SHOP_ID),
+            "fchat_api_token_length": len(FCHAT_API_TOKEN) if FCHAT_API_TOKEN else 0,
+            "fchat_shop_id": FCHAT_SHOP_ID
         }), 400
     
     # Test hàm extract_ms_from_post_content
@@ -3935,6 +3997,7 @@ def test_feed_comment():
     return jsonify({
         "status": "success",
         "post_id": post_id,
+        "fchat_api_used": True,
         "post_content_preview": post_data.get('message', '')[:200] + "..." if post_data.get('message') else "No message",
         "detected_ms": detected_ms,
         "final_ms": final_ms if detected_ms else None,
@@ -4028,22 +4091,47 @@ def webhook():
 
     entry = data.get("entry", [])
     for e in entry:
-        # Xử lý feed changes (comment trên bài viết)
+        # Xử lý feed changes (comment trên bài viết) - FIXED VERSION
         if "changes" in e:
             changes = e.get("changes", [])
+            print(f"[FEED CHANGES] Found {len(changes)} changes")
+            
             for change in changes:
                 value = change.get("value", {})
                 field = change.get("field")
                 
+                print(f"[FEED DEBUG] Field: {field}, Value keys: {value.keys() if isinstance(value, dict) else 'not dict'}")
+                
                 if field == "feed":
-                    print(f"[FEED EVENT] Nhận sự kiện feed")
+                    print(f"[FEED EVENT] Nhận sự kiện feed: {json.dumps(value, ensure_ascii=False)[:200]}")
                     
-                    # Kiểm tra xem có phải comment không (có message và post_id)
-                    if "message" in value and "post_id" in value:
+                    # Xác định loại sự kiện feed
+                    item = value.get("item")
+                    verb = value.get("verb")
+                    
+                    # Chỉ xử lý comment mới
+                    if item == "comment" and verb == "add":
                         print(f"[FEED COMMENT] Đang xử lý comment từ feed...")
                         
-                        # Gọi hàm xử lý comment (ĐÃ CẢI THIỆN)
-                        handle_feed_comment(value)
+                        # Lấy thông tin cơ bản
+                        from_user = {
+                            "id": value.get("sender_id"),
+                            "name": value.get("sender_name", "")
+                        }
+                        message = value.get("message", "")
+                        post_id = value.get("post_id", "")
+                        
+                        # Tạo dict tương thích với hàm handle_feed_comment
+                        comment_data = {
+                            "from": from_user,
+                            "message": message,
+                            "post_id": post_id
+                        }
+                        
+                        # Gọi hàm xử lý comment
+                        handle_feed_comment(comment_data)
+                    else:
+                        print(f"[FEED EVENT] Không phải comment add, bỏ qua (item={item}, verb={verb})")
                     
                     continue
         
@@ -5448,7 +5536,9 @@ def check_env():
         "GOOGLE_SHEET_ID": "CÓ" if GOOGLE_SHEET_ID else "KHÔNG",
         "GOOGLE_SHEETS_CREDENTIALS_JSON": "CÓ" if GOOGLE_SHEETS_CREDENTIALS_JSON else "KHÔNG",
         "SHEET_ID_LENGTH": len(GOOGLE_SHEET_ID) if GOOGLE_SHEET_ID else 0,
-        "CREDENTIALS_LENGTH": len(GOOGLE_SHEETS_CREDENTIALS_JSON) if GOOGLE_SHEETS_CREDENTIALS_JSON else 0
+        "CREDENTIALS_LENGTH": len(GOOGLE_SHEETS_CREDENTIALS_JSON) if GOOGLE_SHEETS_CREDENTIALS_JSON else 0,
+        "FCHAT_API_TOKEN": "CÓ" if FCHAT_API_TOKEN else "KHÔNG",
+        "FCHAT_SHOP_ID": FCHAT_SHOP_ID if FCHAT_SHOP_ID else "KHÔNG"
     })
 
 @app.route("/test-context-save", methods=["GET"])
@@ -5539,12 +5629,12 @@ def health_check():
     
     total_variants = sum(len(p['variants']) for p in PRODUCTS.values())
     
-    # Kiểm tra feed comment capability
+    # Kiểm tra feed comment capability với Fchat API
     feed_comment_test = "Ready"
-    if PAGE_ACCESS_TOKEN and PAGE_ID:
-        feed_comment_test = "✅ Sẵn sàng"
+    if FCHAT_API_TOKEN and FCHAT_SHOP_ID:
+        feed_comment_test = "✅ Sẵn sàng (Fchat API)"
     else:
-        feed_comment_test = "⚠️ Cần cấu hình PAGE_ACCESS_TOKEN và PAGE_ID"
+        feed_comment_test = "⚠️ Cần cấu hình FCHAT_API_TOKEN và FCHAT_SHOP_ID"
     
     # Kiểm tra persistent storage với Google Sheets
     google_sheets_status = "✅ Đã cấu hình" if GOOGLE_SHEET_ID and GOOGLE_SHEETS_CREDENTIALS_JSON else "⚠️ Chưa cấu hình"
@@ -5562,6 +5652,11 @@ def health_check():
         "fanpage_name": current_fanpage_name,
         "page_id": PAGE_ID,
         "feed_comment_processing": feed_comment_test,
+        "fchat_api": {
+            "token_configured": bool(FCHAT_API_TOKEN),
+            "shop_id": FCHAT_SHOP_ID,
+            "base_url": FCHAT_API_BASE_URL
+        },
         "persistent_storage": {
             "enabled": True,
             "type": "Google Sheets",
@@ -5615,13 +5710,14 @@ def health_check():
         "feed_comment_processing": {
             "enabled": True,
             "logic": "Lấy MS từ caption bài viết khi user comment",
+            "api_used": "Fchat API (thay thế Facebook Graph API)",
             "capabilities": [
                 "Detect MS từ bài viết gốc (chỉ dùng regex)",
                 "Auto reply với thông tin sản phẩm chi tiết",
                 "Cập nhật context cho user và reset counter",
                 "Chỉ gửi tin nhắn tự động khi real_message_count = 0"
             ],
-            "required_permissions": "pages_read_engagement, pages_messaging"
+            "required_config": "FCHAT_API_TOKEN và FCHAT_SHOP_ID"
         },
         "context_persistence": {
             "enabled": True,
@@ -5657,7 +5753,8 @@ def health_check():
             "context_restoration_after_sleep": True,
             "facebook_conversion_api": True,
             "async_event_processing": True,
-            "smart_event_cache": True
+            "smart_event_cache": True,
+            "fchat_api_integration": True
         }
     }, 200
 
@@ -5727,44 +5824,11 @@ if __name__ == "__main__":
     print(f"🟢 Poscake Webhook: {'SẴN SÀNG' if POSCAKE_API_KEY else 'CHƯA CẤU HÌNH'}")
     print(f"🟢 Facebook Conversion API: {'SẴN SÀNG' if FACEBOOK_PIXEL_ID and FACEBOOK_ACCESS_TOKEN else 'CHƯA CẤU HÌNH'}")
     print(f"🟢 OpenAI Function Calling: {'TÍCH HỢP THÀNH CÔNG' if client else 'CHƯA CẤU HÌNH'}")
-    print(f"🟢 Persistent Storage (Google Sheets): {'SẴN SÀNG' if GOOGLE_SHEET_ID and GOOGLE_SHEETS_CREDENTIALS_JSON else 'CHƯA CẤU HÌNH'}")
+    print(f"🟢 Fchat API Feed Comment: {'SẴN SÀNG' if FCHAT_API_TOKEN and FCHAT_SHOP_ID else 'CHƯA CẤU HÌNH'}")
+    print("=" * 80)
+    print("🚀 Server sẵn sàng hoạt động!")
     print("=" * 80)
     
-    print("🔴 CẢI TIẾN QUAN TRỌNG: PERSISTENT STORAGE CHO USER_CONTEXT VỚI GOOGLE SHEETS")
-    print("=" * 80)
-    print(f"🔴 1. Database chính: Sử dụng Google Sheets làm database cho user context")
-    print(f"🔴 2. Sheet UserContext: {USER_CONTEXT_SHEET_NAME} (tự động tạo nếu chưa có)")
-    print(f"🔴 3. Tự động lưu: Lưu USER_CONTEXT vào Google Sheets mỗi 5 phút")
-    print(f"🔴 4. Khôi phục khi restart: Load lại context từ Google Sheets khi server khởi động")
-    print(f"🔴 5. Không mất dữ liệu: Giữ nguyên MS và context khi Koyeb sleep/restart")
-    print(f"🔴 6. Tra cứu đơn hàng cũ: Tự động tìm MS từ order history để khôi phục context")
-    print(f"🔴 7. Koyeb sleep support: Bot có thể khôi phục context sau khi Koyeb wake up")
-    print("=" * 80)
-    
-    print("🔴 CẢI TIẾN QUAN TRỌNG: FORM ĐẶT HÀNG TỐI ƯU TỐC ĐỘ")
-    print("=" * 80)
-    print(f"🔴 1. Static HTML: Form load ngay lập tức với CSS inline")
-    print(f"🔴 2. Placeholder image: Sử dụng base64 SVG để không chờ load ảnh")
-    print(f"🔴 3. Static address list: Sử dụng danh sách tỉnh/thành static thay vì gọi API")
-    print(f"🔴 4. Lazy loading: Ảnh sản phẩm load sau khi page hiển thị")
-    print("=" * 80)
-    
-    print("🔴 CẢI TIẾN QUAN TRỌNG: FEED COMMENT PROCESSING")
-    print("=" * 80)
-    print(f"🔴 1. Nhận comment từ feed: Lấy MS từ caption bài viết gốc")
-    print(f"🔴 2. Chỉ dùng regex: Không phụ thuộc vào việc load products")
-    print(f"🔴 3. Auto reply thông minh: GPT tạo tin nhắn tiếp thị dựa trên ưu điểm sản phẩm")
-    print(f"🔴 4. Chỉ reply 1 lần: Chỉ gửi tin nhắn đầu tiên, sau đó để khách chủ động nhắn tin")
-    print(f"🔴 5. Cập nhật context: Tự động cập nhật MS và reset counter khi có comment mới")
-    print("=" * 80)
-    
-    print("🔴 CẢI TIẾN QUAN TRỌNG: FACEBOOK CONVERSION API (ASYNC)")
-    print("=" * 80)
-    print(f"🔴 1. Async processing: Queue events để xử lý bất đồng bộ, không block bot")
-    print(f"🔴 2. Smart cache: ViewContent chỉ gửi 1 lần mỗi 30 phút cho cùng user + product")
-    print(f"🔴 3. All events tracked: ViewContent, AddToCart, InitiateCheckout, Purchase")
-    print(f"🔴 4. Thông minh: Tự động gửi từ carousel, order button, order form, order completion")
-    print("=" * 80)
-    
+    # Start Flask app
     port = get_port()
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host="0.0.0.0", port=port, threaded=True)
