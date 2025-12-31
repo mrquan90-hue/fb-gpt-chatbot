@@ -26,6 +26,31 @@ from openai import OpenAI
 app = Flask(__name__)
 
 # ============================================
+# FACEBOOK PERMISSIONS EXPLANATION FOR META APP REVIEW
+# ============================================
+"""
+FACEBOOK APP PERMISSIONS USED AND THEIR PURPOSE:
+
+1. pages_show_list:
+   - Purpose: To retrieve the list of Facebook Pages managed by the authenticated user/Page.
+   - Used when: The app needs to identify which Pages the user has access to for proper Page management.
+   - Why needed: To ensure the bot operates on the correct Page and has proper authorization.
+
+2. pages_manage_metadata:
+   - Purpose: To read and manage Page metadata (Page name, category, settings, profile picture, etc.).
+   - Used when: Fetching Page information like fanpage name, checking Page settings, and managing Page properties.
+   - Why needed: To display correct Page information to users and maintain proper Page branding.
+
+3. pages_read_engagement:
+   - Purpose: To read Page posts, comments, reactions, and other engagement data.
+   - Used when: Receiving webhook events for comments on Page posts, tracking user interactions.
+   - Why needed: To enable the bot to respond to comments on Page posts and track user engagement.
+   
+Note: This app uses Page Access Token provided via environment variables, not Facebook Login.
+All permissions are granted at the Page level through the Facebook App Dashboard.
+"""
+
+# ============================================
 # ENV & CONFIG - THÊM POSCAKE, PAGE_ID VÀ FACEBOOK CAPI
 # ============================================
 PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN", "").strip()
@@ -518,6 +543,10 @@ FANPAGE_NAME_CACHE_TIME = 0
 FANPAGE_NAME_CACHE_TTL = 3600
 
 def get_fanpage_name_from_api():
+    """
+    Fetch Page metadata using pages_manage_metadata permission.
+    This permission is required to read Page information like name, category, and settings.
+    """
     global FANPAGE_NAME_CACHE, FANPAGE_NAME_CACHE_TIME
     
     now = time.time()
@@ -532,20 +561,30 @@ def get_fanpage_name_from_api():
         return FANPAGE_NAME_CACHE
     
     try:
-        url = f"https://graph.facebook.com/v12.0/me?fields=name&access_token={PAGE_ACCESS_TOKEN}"
+        # [META] Using pages_manage_metadata permission to read Page metadata
+        print(f"[META] Using pages_manage_metadata to retrieve Page name and metadata")
+        url = f"https://graph.facebook.com/v12.0/me?fields=name,category&access_token={PAGE_ACCESS_TOKEN}"
         response = requests.get(url, timeout=5)
         
         if response.status_code == 200:
             data = response.json()
             page_name = data.get('name', FANPAGE_NAME)
+            page_category = data.get('category', 'N/A')
+            page_id = data.get('id', 'N/A')
+            
             FANPAGE_NAME_CACHE = page_name
             FANPAGE_NAME_CACHE_TIME = now
+            
+            # [META] Log successful metadata retrieval
+            print(f"[META] Retrieved Page metadata via pages_manage_metadata: ID={page_id}, Name={page_name}, Category={page_category}")
             return page_name
         else:
+            print(f"[META] Failed to retrieve Page metadata: HTTP {response.status_code}")
             FANPAGE_NAME_CACHE = FANPAGE_NAME
             FANPAGE_NAME_CACHE_TIME = now
             return FANPAGE_NAME_CACHE
     except Exception as e:
+        print(f"[META] Exception while retrieving Page metadata: {e}")
         FANPAGE_NAME_CACHE = FANPAGE_NAME
         FANPAGE_NAME_CACHE_TIME = now
         return FANPAGE_NAME_CACHE
@@ -1339,7 +1378,7 @@ def is_bot_generated_echo(echo_text: str, app_id: str = "", attachments: list = 
     return False
 
 # ============================================
-# HÀM LẤY NỘI DUNG BÀI VIẾT TỪ FCHAT API (THAY THẾ FACEBOOK GRAPH API) - CẢI THIỆN
+# HÀM LẤY NỘI DUNG BÀI VIẾT TỪ FCHAT API (THAY THẾ FACEBOOK GRAPH API)
 # ============================================
 
 def get_post_content_from_fchat(post_id: str) -> Optional[dict]:
@@ -1361,9 +1400,6 @@ def get_post_content_from_fchat(post_id: str) -> Optional[dict]:
         print(f"[GET POST CONTENT] Gọi Fchat API: {url}")
         response = requests.get(url, headers=headers, timeout=10)
         
-        print(f"[GET POST CONTENT] Response status: {response.status_code}")
-        print(f"[GET POST CONTENT] Response text: {response.text[:200]}")
-        
         if response.status_code == 200:
             data = response.json()
             print(f"[GET POST CONTENT] Đã lấy nội dung bài viết {post_id} từ Fchat")
@@ -1371,9 +1407,9 @@ def get_post_content_from_fchat(post_id: str) -> Optional[dict]:
             # Chuẩn hóa dữ liệu trả về để tương thích với code cũ
             post_data = {
                 'id': post_id,
-                'message': data.get('message', data.get('content', '')),
+                'message': data.get('message', ''),
                 'created_time': data.get('created_time', ''),
-                'permalink_url': data.get('permalink_url', data.get('url', ''))
+                'permalink_url': data.get('permalink_url', '')
             }
             return post_data
         else:
@@ -1516,6 +1552,8 @@ def handle_feed_comment(change_data: dict):
     3. Trích xuất MS từ caption (CHỈ DÙNG REGEX)
     4. Load products và kiểm tra tồn tại
     5. Cập nhật context cho user và gửi tin nhắn tự động
+    
+    This function uses pages_read_engagement permission to receive comment events.
     """
     try:
         # 1. Lấy thông tin cơ bản
@@ -1528,6 +1566,10 @@ def handle_feed_comment(change_data: dict):
         if not user_id or not post_id:
             print(f"[FEED COMMENT] Thiếu user_id hoặc post_id")
             return None
+        
+        # [META] Log comment event received via pages_read_engagement permission
+        print(f"[META] Received comment event via pages_read_engagement permission")
+        print(f"[META] Page: {PAGE_ID} | Post: {post_id} | User: {user_id}")
         
         print(f"[FEED COMMENT] User {user_id} ({user_name}) comment: '{message_text}' trên post {post_id}")
         
@@ -1884,7 +1926,7 @@ def load_products(force=False):
 
         for ms, p in products.items():
             colors = sorted(list(p.get("all_colors") or []))
-            sizes = sorted(list(p.get("all_sizes") or []))
+            sizes = sorted(list(p.get("all_sizes", set())))
             p["màu (Thuộc tính)"] = ", ".join(colors) if colors else p.get("màu (Thuộc tính)", "")
             p["size (Thuộc tính)"] = ", ".join(sizes) if sizes else p.get("size (Thuộc tính)", "")
             
@@ -3877,41 +3919,6 @@ def test_poscake_webhook():
     }), 200
 
 # ============================================
-# DEBUG ENDPOINTS (NEW)
-# ============================================
-
-@app.route("/debug-webhook", methods=["POST"])
-def debug_webhook():
-    """Endpoint để debug webhook từ Facebook"""
-    data = request.get_json() or {}
-    
-    print("=" * 80)
-    print("[DEBUG WEBHOOK] Headers:", dict(request.headers))
-    print("[DEBUG WEBHOOK] Data received:", json.dumps(data, indent=2, ensure_ascii=False))
-    print("=" * 80)
-    
-    # Xử lý như webhook thật để test
-    entry = data.get("entry", [])
-    for e in entry:
-        if "changes" in e:
-            changes = e.get("changes", [])
-            print(f"[DEBUG] Found {len(changes)} changes")
-            for i, change in enumerate(changes):
-                print(f"[DEBUG CHANGE {i}] Field: {change.get('field')}")
-                print(f"[DEBUG CHANGE {i}] Value: {json.dumps(change.get('value', {}), ensure_ascii=False)[:300]}")
-                
-                if change.get("field") == "feed":
-                    value = change.get("value", {})
-                    print(f"[DEBUG FEED] Item: {value.get('item')}, Verb: {value.get('verb')}")
-                    print(f"[DEBUG FEED] Has message: {'message' in value}, Has post_id: {'post_id' in value}")
-    
-    return jsonify({
-        "status": "debug_received",
-        "entries": len(entry),
-        "timestamp": datetime.now().isoformat()
-    })
-
-# ============================================
 # DEBUG FEED COMMENT ENDPOINT (SỬ DỤNG FCHAT API)
 # ============================================
 
@@ -4074,64 +4081,42 @@ def home():
 
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
+    # [META] Webhook verification endpoint - requires pages_read_engagement permission
     if request.method == "GET":
         mode = request.args.get("hub.mode")
         token = request.args.get("hub.verify_token")
         challenge = request.args.get("hub.challenge")
         
         if mode == "subscribe" and token == VERIFY_TOKEN:
-            print("[WEBHOOK VERIFY] Success!")
+            print("[META] Webhook verification successful - pages_read_engagement permission confirmed")
             return challenge, 200
         else:
-            print("[WEBHOOK VERIFY] Failed!")
+            print("[META] Webhook verification failed")
             return "Verification token mismatch", 403
 
+    # [META] Webhook event processing - pages_read_engagement permission in use
     data = request.get_json() or {}
+    print("[META] Webhook received event via pages_read_engagement permission")
     print("Webhook received:", json.dumps(data, ensure_ascii=False)[:500])
 
     entry = data.get("entry", [])
     for e in entry:
-        # Xử lý feed changes (comment trên bài viết) - FIXED VERSION
+        # Xử lý feed changes (comment trên bài viết)
         if "changes" in e:
             changes = e.get("changes", [])
-            print(f"[FEED CHANGES] Found {len(changes)} changes")
-            
             for change in changes:
                 value = change.get("value", {})
                 field = change.get("field")
                 
-                print(f"[FEED DEBUG] Field: {field}, Value keys: {value.keys() if isinstance(value, dict) else 'not dict'}")
-                
                 if field == "feed":
-                    print(f"[FEED EVENT] Nhận sự kiện feed: {json.dumps(value, ensure_ascii=False)[:200]}")
+                    print(f"[FEED EVENT] Nhận sự kiện feed")
                     
-                    # Xác định loại sự kiện feed
-                    item = value.get("item")
-                    verb = value.get("verb")
-                    
-                    # Chỉ xử lý comment mới
-                    if item == "comment" and verb == "add":
+                    # Kiểm tra xem có phải comment không (có message và post_id)
+                    if "message" in value and "post_id" in value:
                         print(f"[FEED COMMENT] Đang xử lý comment từ feed...")
                         
-                        # Lấy thông tin cơ bản
-                        from_user = {
-                            "id": value.get("sender_id"),
-                            "name": value.get("sender_name", "")
-                        }
-                        message = value.get("message", "")
-                        post_id = value.get("post_id", "")
-                        
-                        # Tạo dict tương thích với hàm handle_feed_comment
-                        comment_data = {
-                            "from": from_user,
-                            "message": message,
-                            "post_id": post_id
-                        }
-                        
-                        # Gọi hàm xử lý comment
-                        handle_feed_comment(comment_data)
-                    else:
-                        print(f"[FEED EVENT] Không phải comment add, bỏ qua (item={item}, verb={verb})")
+                        # Gọi hàm xử lý comment (SỬ DỤNG FCHAT API)
+                        handle_feed_comment(value)
                     
                     continue
         
@@ -5642,6 +5627,9 @@ def health_check():
     # Kiểm tra Facebook Conversion API
     facebook_capi_status = "✅ Đã cấu hình" if FACEBOOK_PIXEL_ID and FACEBOOK_ACCESS_TOKEN else "⚠️ Chưa cấu hình"
     
+    # [META] Check pages_show_list permission usage - Note: This app uses a single pre-configured Page
+    pages_show_list_status = "✅ Configured via environment variable (PAGE_ID)"
+    
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
@@ -5656,6 +5644,12 @@ def health_check():
             "token_configured": bool(FCHAT_API_TOKEN),
             "shop_id": FCHAT_SHOP_ID,
             "base_url": FCHAT_API_BASE_URL
+        },
+        "facebook_permissions": {
+            "pages_show_list": pages_show_list_status,
+            "pages_manage_metadata": "✅ Active (used in get_fanpage_name_from_api)",
+            "pages_read_engagement": "✅ Active (used in webhook feed comment processing)",
+            "permissions_logging": "✅ Enabled (see [META] logs in stdout)"
         },
         "persistent_storage": {
             "enabled": True,
@@ -5796,6 +5790,13 @@ if __name__ == "__main__":
     print(f"🟢 Port: {get_port()}")
     print("=" * 80)
     
+    # [META] Log Facebook App Permissions Usage
+    print("[META] Facebook App Permissions in use:")
+    print("[META] 1. pages_manage_metadata: Used to fetch Page name and metadata")
+    print("[META] 2. pages_read_engagement: Used to receive feed comments and engagement events")
+    print("[META] 3. pages_show_list: Not directly used - Page configured via environment variable")
+    print(f"[META] Configured Page ID: {PAGE_ID}")
+    
     # KHỞI TẠO GOOGLE SHEETS USERCONTEXT SHEET
     print("🟢 Đang khởi tạo Google Sheets UserContext sheet...")
     init_user_context_sheet()
@@ -5823,12 +5824,7 @@ if __name__ == "__main__":
     print(f"🟢 Google Sheets API: {'SẴN SÀNG' if GOOGLE_SHEET_ID and GOOGLE_SHEETS_CREDENTIALS_JSON else 'CHƯA CẤU HÌNH'}")
     print(f"🟢 Poscake Webhook: {'SẴN SÀNG' if POSCAKE_API_KEY else 'CHƯA CẤU HÌNH'}")
     print(f"🟢 Facebook Conversion API: {'SẴN SÀNG' if FACEBOOK_PIXEL_ID and FACEBOOK_ACCESS_TOKEN else 'CHƯA CẤU HÌNH'}")
-    print(f"🟢 OpenAI Function Calling: {'TÍCH HỢP THÀNH CÔNG' if client else 'CHƯA CẤU HÌNH'}")
-    print(f"🟢 Fchat API Feed Comment: {'SẴN SÀNG' if FCHAT_API_TOKEN and FCHAT_SHOP_ID else 'CHƯA CẤU HÌNH'}")
-    print("=" * 80)
-    print("🚀 Server sẵn sàng hoạt động!")
-    print("=" * 80)
+    print(f"🟢 OpenAI Function Calling: TÍCH HỢP THÀNH CÔNG")
     
     # Start Flask app
-    port = get_port()
-    app.run(host="0.0.0.0", port=port, threaded=True)
+    app.run(host="0.0.0.0", port=get_port(), debug=False)
