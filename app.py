@@ -26,31 +26,6 @@ from openai import OpenAI
 app = Flask(__name__)
 
 # ============================================
-# FACEBOOK PERMISSIONS EXPLANATION FOR META APP REVIEW
-# ============================================
-"""
-FACEBOOK APP PERMISSIONS USED AND THEIR PURPOSE:
-
-1. pages_show_list:
-   - Purpose: To retrieve the list of Facebook Pages managed by the authenticated user/Page.
-   - Used when: The app needs to identify which Pages the user has access to for proper Page management.
-   - Why needed: To ensure the bot operates on the correct Page and has proper authorization.
-
-2. pages_manage_metadata:
-   - Purpose: To read and manage Page metadata (Page name, category, settings, profile picture, etc.).
-   - Used when: Fetching Page information like fanpage name, checking Page settings, and managing Page properties.
-   - Why needed: To display correct Page information to users and maintain proper Page branding.
-
-3. pages_read_engagement:
-   - Purpose: To read Page posts, comments, reactions, and other engagement data.
-   - Used when: Receiving webhook events for comments on Page posts, tracking user interactions.
-   - Why needed: To enable the bot to respond to comments on Page posts and track user engagement.
-   
-Note: This app uses Page Access Token provided via environment variables, not Facebook Login.
-All permissions are granted at the Page level through the Facebook App Dashboard.
-"""
-
-# ============================================
 # ENV & CONFIG - THÊM POSCAKE, PAGE_ID VÀ FACEBOOK CAPI
 # ============================================
 PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN", "").strip()
@@ -543,10 +518,6 @@ FANPAGE_NAME_CACHE_TIME = 0
 FANPAGE_NAME_CACHE_TTL = 3600
 
 def get_fanpage_name_from_api():
-    """
-    Fetch Page metadata using pages_manage_metadata permission.
-    This permission is required to read Page information like name, category, and settings.
-    """
     global FANPAGE_NAME_CACHE, FANPAGE_NAME_CACHE_TIME
     
     now = time.time()
@@ -561,30 +532,20 @@ def get_fanpage_name_from_api():
         return FANPAGE_NAME_CACHE
     
     try:
-        # [META] Using pages_manage_metadata permission to read Page metadata
-        print(f"[META] Using pages_manage_metadata to retrieve Page name and metadata")
-        url = f"https://graph.facebook.com/v12.0/me?fields=name,category&access_token={PAGE_ACCESS_TOKEN}"
+        url = f"https://graph.facebook.com/v12.0/me?fields=name&access_token={PAGE_ACCESS_TOKEN}"
         response = requests.get(url, timeout=5)
         
         if response.status_code == 200:
             data = response.json()
             page_name = data.get('name', FANPAGE_NAME)
-            page_category = data.get('category', 'N/A')
-            page_id = data.get('id', 'N/A')
-            
             FANPAGE_NAME_CACHE = page_name
             FANPAGE_NAME_CACHE_TIME = now
-            
-            # [META] Log successful metadata retrieval
-            print(f"[META] Retrieved Page metadata via pages_manage_metadata: ID={page_id}, Name={page_name}, Category={page_category}")
             return page_name
         else:
-            print(f"[META] Failed to retrieve Page metadata: HTTP {response.status_code}")
             FANPAGE_NAME_CACHE = FANPAGE_NAME
             FANPAGE_NAME_CACHE_TIME = now
             return FANPAGE_NAME_CACHE
     except Exception as e:
-        print(f"[META] Exception while retrieving Page metadata: {e}")
         FANPAGE_NAME_CACHE = FANPAGE_NAME
         FANPAGE_NAME_CACHE_TIME = now
         return FANPAGE_NAME_CACHE
@@ -1552,8 +1513,6 @@ def handle_feed_comment(change_data: dict):
     3. Trích xuất MS từ caption (CHỈ DÙNG REGEX)
     4. Load products và kiểm tra tồn tại
     5. Cập nhật context cho user và gửi tin nhắn tự động
-    
-    This function uses pages_read_engagement permission to receive comment events.
     """
     try:
         # 1. Lấy thông tin cơ bản
@@ -1566,10 +1525,6 @@ def handle_feed_comment(change_data: dict):
         if not user_id or not post_id:
             print(f"[FEED COMMENT] Thiếu user_id hoặc post_id")
             return None
-        
-        # [META] Log comment event received via pages_read_engagement permission
-        print(f"[META] Received comment event via pages_read_engagement permission")
-        print(f"[META] Page: {PAGE_ID} | Post: {post_id} | User: {user_id}")
         
         print(f"[FEED COMMENT] User {user_id} ({user_name}) comment: '{message_text}' trên post {post_id}")
         
@@ -1926,7 +1881,7 @@ def load_products(force=False):
 
         for ms, p in products.items():
             colors = sorted(list(p.get("all_colors") or []))
-            sizes = sorted(list(p.get("all_sizes", set())))
+            sizes = sorted(list(p.get("all_sizes") or []))
             p["màu (Thuộc tính)"] = ", ".join(colors) if colors else p.get("màu (Thuộc tính)", "")
             p["size (Thuộc tính)"] = ", ".join(sizes) if sizes else p.get("size (Thuộc tính)", "")
             
@@ -4081,22 +4036,19 @@ def home():
 
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
-    # [META] Webhook verification endpoint - requires pages_read_engagement permission
     if request.method == "GET":
         mode = request.args.get("hub.mode")
         token = request.args.get("hub.verify_token")
         challenge = request.args.get("hub.challenge")
         
         if mode == "subscribe" and token == VERIFY_TOKEN:
-            print("[META] Webhook verification successful - pages_read_engagement permission confirmed")
+            print("[WEBHOOK VERIFY] Success!")
             return challenge, 200
         else:
-            print("[META] Webhook verification failed")
+            print("[WEBHOOK VERIFY] Failed!")
             return "Verification token mismatch", 403
 
-    # [META] Webhook event processing - pages_read_engagement permission in use
     data = request.get_json() or {}
-    print("[META] Webhook received event via pages_read_engagement permission")
     print("Webhook received:", json.dumps(data, ensure_ascii=False)[:500])
 
     entry = data.get("entry", [])
@@ -5627,9 +5579,6 @@ def health_check():
     # Kiểm tra Facebook Conversion API
     facebook_capi_status = "✅ Đã cấu hình" if FACEBOOK_PIXEL_ID and FACEBOOK_ACCESS_TOKEN else "⚠️ Chưa cấu hình"
     
-    # [META] Check pages_show_list permission usage - Note: This app uses a single pre-configured Page
-    pages_show_list_status = "✅ Configured via environment variable (PAGE_ID)"
-    
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
@@ -5644,12 +5593,6 @@ def health_check():
             "token_configured": bool(FCHAT_API_TOKEN),
             "shop_id": FCHAT_SHOP_ID,
             "base_url": FCHAT_API_BASE_URL
-        },
-        "facebook_permissions": {
-            "pages_show_list": pages_show_list_status,
-            "pages_manage_metadata": "✅ Active (used in get_fanpage_name_from_api)",
-            "pages_read_engagement": "✅ Active (used in webhook feed comment processing)",
-            "permissions_logging": "✅ Enabled (see [META] logs in stdout)"
         },
         "persistent_storage": {
             "enabled": True,
@@ -5790,13 +5733,6 @@ if __name__ == "__main__":
     print(f"🟢 Port: {get_port()}")
     print("=" * 80)
     
-    # [META] Log Facebook App Permissions Usage
-    print("[META] Facebook App Permissions in use:")
-    print("[META] 1. pages_manage_metadata: Used to fetch Page name and metadata")
-    print("[META] 2. pages_read_engagement: Used to receive feed comments and engagement events")
-    print("[META] 3. pages_show_list: Not directly used - Page configured via environment variable")
-    print(f"[META] Configured Page ID: {PAGE_ID}")
-    
     # KHỞI TẠO GOOGLE SHEETS USERCONTEXT SHEET
     print("🟢 Đang khởi tạo Google Sheets UserContext sheet...")
     init_user_context_sheet()
@@ -5824,7 +5760,38 @@ if __name__ == "__main__":
     print(f"🟢 Google Sheets API: {'SẴN SÀNG' if GOOGLE_SHEET_ID and GOOGLE_SHEETS_CREDENTIALS_JSON else 'CHƯA CẤU HÌNH'}")
     print(f"🟢 Poscake Webhook: {'SẴN SÀNG' if POSCAKE_API_KEY else 'CHƯA CẤU HÌNH'}")
     print(f"🟢 Facebook Conversion API: {'SẴN SÀNG' if FACEBOOK_PIXEL_ID and FACEBOOK_ACCESS_TOKEN else 'CHƯA CẤU HÌNH'}")
-    print(f"🟢 OpenAI Function Calling: TÍCH HỢP THÀNH CÔNG")
+    print(f"🟢 OpenAI Function Calling: {'TÍCH HỢP THÀNH CÔNG' if client else 'CHƯA CẤU HÌNH'}")
+    print(f"🟢 Persistent Storage (Google Sheets): {'SẴN SÀNG' if GOOGLE_SHEET_ID and GOOGLE_SHEETS_CREDENTIALS_JSON else 'CHƯA CẤU HÌNH'}")
+    print(f"🟢 Fchat API Integration: {'SẴN SÀNG' if FCHAT_API_TOKEN and FCHAT_SHOP_ID else 'CHƯA CẤU HÌNH'}")
+    print("=" * 80)
     
-    # Start Flask app
-    app.run(host="0.0.0.0", port=get_port(), debug=False)
+    print("🔴 CẢI TIẾN QUAN TRỌNG: THAY THẾ FACEBOOK GRAPH API BẰNG FCHAT API")
+    print("=" * 80)
+    print(f"🔴 1. Fchat API: Sử dụng Fchat API để lấy nội dung bài viết thay vì Facebook Graph API")
+    print(f"🔴 2. Endpoint: {FCHAT_API_BASE_URL}/shops/{FCHAT_SHOP_ID}/facebook/posts/{{post_id}}")
+    print(f"🔴 3. Không cần quyền pages_read_engagement: Loại bỏ dependency với Facebook Graph API hạn chế")
+    print(f"🔴 4. Feed Comment Processing: Vẫn hoạt động bình thường với Fchat API")
+    print(f"🔴 5. Tương thích: Dữ liệu trả về được chuẩn hóa để tương thích với code cũ")
+    print("=" * 80)
+    
+    print("🔴 CẢI TIẾN QUAN TRỌNG: PERSISTENT STORAGE CHO USER_CONTEXT VỚI GOOGLE SHEETS")
+    print("=" * 80)
+    print(f"🔴 1. Database chính: Sử dụng Google Sheets làm database cho user context")
+    print(f"🔴 2. Sheet UserContext: {USER_CONTEXT_SHEET_NAME} (tự động tạo nếu chưa có)")
+    print(f"🔴 3. Tự động lưu: Lưu USER_CONTEXT vào Google Sheets mỗi 5 phút")
+    print(f"🔴 4. Khôi phục khi restart: Load lại context từ Google Sheets khi server khởi động")
+    print(f"🔴 5. Không mất dữ liệu: Giữ nguyên MS và context khi Koyeb sleep/restart")
+    print(f"🔴 6. Tra cứu đơn hàng cũ: Tự động tìm MS từ order history để khôi phục context")
+    print(f"🔴 7. Koyeb sleep support: Bot có thể khôi phục context sau khi Koyeb wake up")
+    print("=" * 80)
+    
+    print("🔴 CẢI TIẾN QUAN TRỌNG: FORM ĐẶT HÀNG TỐI ƯU TỐC ĐỘ")
+    print("=" * 80)
+    print(f"🔴 1. Static HTML: Form load ngay lập tức với CSS inline")
+    print(f"🔴 2. Placeholder image: Sử dụng base64 SVG để không chờ load ảnh")
+    print(f"🔴 3. Static address list: Sử dụng danh sách tỉnh/thành static thay vì gọi API")
+    print(f"🔴 4. Lazy loading: Ảnh sản phẩm load sau khi trang đã hiển thị")
+    print("=" * 80)
+    
+    port = get_port()
+    app.run(host="0.0.0.0", port=port, debug=False)
