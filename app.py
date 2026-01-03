@@ -1675,6 +1675,24 @@ def send_image(recipient_id: str, image_url: str):
     }
     return call_facebook_send_api(payload)
 
+def send_video(recipient_id: str, video_url: str):
+    """
+    Gửi video dưới dạng đính kèm để Messenger có thể phát trực tiếp
+    """
+    if not video_url:
+        return ""
+    
+    payload = {
+        "recipient": {"id": recipient_id},
+        "message": {
+            "attachment": {
+                "type": "video",
+                "payload": {"url": video_url, "is_reusable": True},
+            }
+        },
+    }
+    return call_facebook_send_api(payload)
+
 def send_image_safe(recipient_id: str, image_url: str, timeout: int = 3):
     if not image_url:
         return ""
@@ -2235,10 +2253,10 @@ def execute_tool(uid, name, args):
             return "Sản phẩm không có video."
         
         for url in urls[:2]:
-            send_message(uid, f"📹 Video sản phẩm: {url}")
+            send_video(uid, url)  # Sử dụng hàm send_video mới thay vì send_message
             time.sleep(0.5)
         
-        return "Đã gửi link video."
+        return "Đã gửi video sản phẩm."
     
     elif name == "provide_order_link":
         if ms in PRODUCTS:
@@ -2295,7 +2313,7 @@ def detect_ms_from_text(text: str) -> Optional[str]:
         r'mã sp số', r'ma so sp',
         # Dạng tự nhiên khi khách hỏi (cần có từ khóa)
         r'xem mã', r'xem sp', r'xem sản phẩm', r'cho xem mã', 
-        r'tư vấn mã', r'tư vấn sp', r'giới thiệu mã', r'giới thiệu sp'
+        r'tư ván mã', r'tư ván sp', r'giới thiệu mã', r'giới thiệu sp'
     ]
     
     # Tạo pattern regex tổng hợp
@@ -5767,6 +5785,8 @@ if __name__ == "__main__":
     print(f"🟢 Poscake Webhook: {'SẴN SÀNG' if POSCAKE_API_KEY else 'CHƯA CẤU HÌNH'}")
     print(f"🟢 Facebook Conversion API: {'SẴN SÀNG' if FACEBOOK_PIXEL_ID and FACEBOOK_ACCESS_TOKEN else 'CHƯA CẤU HÌNH'}")
     print(f"🟢 OpenAI Function Calling: SẴN SÀNG")
+    print("=" * 80)
+    print("🚀 Bot đã sẵn sàng hoạt động!")
     print("=" * 80)
     
     app.run(host="0.0.0.0", port=get_port(), debug=False)
