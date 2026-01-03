@@ -2733,7 +2733,7 @@ def prepare_user_data_for_capi(uid: str, phone: str = None, client_ip: str = Non
     # Thêm fbclid nếu có
     fbclid = get_fbclid_from_context(uid)
     if fbclid:
-        user_data["fbc"] = f"fb.1.{            user_data["fbc"] = f"fb.1.{int(time.time())}.{fbclid}"
+        user_data["fbc"] = f"fb.1.{int(time.time())}.{fbclid}"
     
     # Hash phone nếu có
     if phone:
