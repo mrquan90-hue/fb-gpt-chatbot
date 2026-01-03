@@ -5480,8 +5480,8 @@ def check_env():
         "GOOGLE_SHEETS_CREDENTIALS_JSON": "CÓ" if GOOGLE_SHEETS_CREDENTIALS_JSON else "KHÔNG",
         "SHEET_ID_LENGTH": len(GOOGLE_SHEET_ID) if GOOGLE_SHEET_ID else 0,
         "CREDENTIALS_LENGTH": len(GOOGLE_SHEETS_CREDENTIALS_JSON) if GOOGLE_SHEETS_CREDENTIALS_JSON else 0,
-        "FCHAT_API_TOKEN": "CÓ" if FCHAT_API_TOKEN else "KHÔNG",
-        "FCHAT_SHOP_ID": FCHAT_SHOP_ID if FCHAT_SHOP_ID else "KHÔNG"
+        "FCHAT_API_TOKEN": "CÓ" if FCHAT_TOKEN else "KHÔNG",
+        "FCHAT_SHOP_ID": "CÓ" if FCHAT_WEBHOOK_URL else "KHÔNG"
     })
 
 @app.route("/test-context-save", methods=["GET"])
@@ -5766,8 +5766,7 @@ if __name__ == "__main__":
     print(f"🟢 Google Sheets API: {'SẴN SÀNG' if GOOGLE_SHEET_ID and GOOGLE_SHEETS_CREDENTIALS_JSON else 'CHƯA CẤU HÌNH'}")
     print(f"🟢 Poscake Webhook: {'SẴN SÀNG' if POSCAKE_API_KEY else 'CHƯA CẤU HÌNH'}")
     print(f"🟢 Facebook Conversion API: {'SẴN SÀNG' if FACEBOOK_PIXEL_ID and FACEBOOK_ACCESS_TOKEN else 'CHƯA CẤU HÌNH'}")
-    print(f"🟢 OpenAI Function Calling: TÍCH HỢP THÀNH CÔNG")
-    print(f"🟢 Facebook Graph API for Feed Comments: {'SẴN SÀNG' if PAGE_ACCESS_TOKEN else 'CHƯA CẤU HÌNH'}")
+    print(f"🟢 OpenAI Function Calling: SẴN SÀNG")
     print("=" * 80)
     
     app.run(host="0.0.0.0", port=get_port(), debug=False)
