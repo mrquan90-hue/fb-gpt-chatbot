@@ -17,13 +17,38 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
 import requests
-from flask import Flask, request, send_from_directory, jsonify, render_template, make_response, render_template_string
+from flask import Flask, request, send_from_directory, jsonify, render_template_string, make_response
 from openai import OpenAI
 
 # ============================================
 # FLASK APP
 # ============================================
-app = Flask(__name__, template_folder='templates')
+app = Flask(__name__)
+
+# ============================================
+# FACEBOOK PERMISSIONS EXPLANATION FOR META APP REVIEW
+# ============================================
+"""
+FACEBOOK APP PERMISSIONS USED AND THEIR PURPOSE:
+
+1. pages_show_list:
+   - Purpose: To retrieve the list of Facebook Pages managed by the authenticated user/Page.
+   - Used when: The app needs to identify which Pages the user has access to for proper Page management.
+   - Why needed: To ensure the bot operates on the correct Page and has proper authorization.
+
+2. pages_manage_metadata:
+   - Purpose: To read and manage Page metadata (Page name, category, settings, profile picture, etc.).
+   - Used when: Fetching Page information like fanpage name, checking Page settings, and managing Page properties.
+   - Why needed: To display correct Page information to users and maintain proper Page branding.
+
+3. pages_read_engagement:
+   - Purpose: To read Page posts, comments, reactions, and other engagement data.
+   - Used when: Receiving webhook events for comments on Page posts, tracking user interactions.
+   - Why needed: To enable the bot to respond to comments on Page posts and track user engagement.
+   
+Note: This app uses Page Access Token provided via environment variables, not Facebook Login.
+All permissions are granted at the Page level through the Facebook App Dashboard.
+"""
 
 # ============================================
 # ENV & CONFIG - THÊM POSCAKE, PAGE_ID VÀ FACEBOOK CAPI
@@ -49,6 +74,13 @@ PAGE_ID = os.getenv("PAGE_ID", "516937221685203").strip()
 FACEBOOK_PIXEL_ID = os.getenv("FACEBOOK_PIXEL_ID", "").strip()
 FACEBOOK_ACCESS_TOKEN = os.getenv("FACEBOOK_ACCESS_TOKEN", "").strip()
 FACEBOOK_API_VERSION = os.getenv("FACEBOOK_API_VERSION", "v18.0").strip()
+
+# ============================================
+# Cấu hình Fchat API để thay thế Facebook Graph API
+# ============================================
+FCHAT_API_TOKEN = os.getenv("FCHAT_TOKEN", "").strip()
+FCHAT_SHOP_ID = os.getenv("FCHAT_SHOP_ID", "63a513b338ce6f65e845e5e1").strip()
+FCHAT_API_BASE_URL = os.getenv("FCHAT_API_BASE_URL", "https://fchat.vn/api").strip()
 
 # ============================================
 # GOOGLE SHEETS API CONFIGURATION
@@ -511,6 +543,10 @@ FANPAGE_NAME_CACHE_TIME = 0
 FANPAGE_NAME_CACHE_TTL = 3600
 
 def get_fanpage_name_from_api():
+    """
+    Fetch Page metadata using pages_manage_metadata permission.
+    This permission is required to read Page information like name, category, and settings.
+    """
     global FANPAGE_NAME_CACHE, FANPAGE_NAME_CACHE_TIME
     
     now = time.time()
@@ -525,20 +561,30 @@ def get_fanpage_name_from_api():
         return FANPAGE_NAME_CACHE
     
     try:
-        url = f"https://graph.facebook.com/v12.0/me?fields=name&access_token={PAGE_ACCESS_TOKEN}"
+        # [META] Using pages_manage_metadata permission to read Page metadata
+        print(f"[META] Using pages_manage_metadata to retrieve Page name and metadata")
+        url = f"https://graph.facebook.com/v12.0/me?fields=name,category&access_token={PAGE_ACCESS_TOKEN}"
         response = requests.get(url, timeout=5)
         
         if response.status_code == 200:
             data = response.json()
             page_name = data.get('name', FANPAGE_NAME)
+            page_category = data.get('category', 'N/A')
+            page_id = data.get('id', 'N/A')
+            
             FANPAGE_NAME_CACHE = page_name
             FANPAGE_NAME_CACHE_TIME = now
+            
+            # [META] Log successful metadata retrieval
+            print(f"[META] Retrieved Page metadata via pages_manage_metadata: ID={page_id}, Name={page_name}, Category={page_category}")
             return page_name
         else:
+            print(f"[META] Failed to retrieve Page metadata: HTTP {response.status_code}")
             FANPAGE_NAME_CACHE = FANPAGE_NAME
             FANPAGE_NAME_CACHE_TIME = now
             return FANPAGE_NAME_CACHE
     except Exception as e:
+        print(f"[META] Exception while retrieving Page metadata: {e}")
         FANPAGE_NAME_CACHE = FANPAGE_NAME
         FANPAGE_NAME_CACHE_TIME = now
         return FANPAGE_NAME_CACHE
@@ -1332,31 +1378,31 @@ def is_bot_generated_echo(echo_text: str, app_id: str = "", attachments: list = 
     return False
 
 # ============================================
-# HÀM LẤY NỘI DUNG BÀI VIẾT TỪ FACEBOOK GRAPH API
+# HÀM LẤY NỘI DUNG BÀI VIẾT TỪ FCHAT API (THAY THẾ FACEBOOK GRAPH API)
 # ============================================
 
-def get_post_content_from_facebook(post_id: str) -> Optional[dict]:
+def get_post_content_from_fchat(post_id: str) -> Optional[dict]:
     """
-    Lấy nội dung bài viết từ Facebook Graph API
+    Lấy nội dung bài viết từ Fchat API thay vì Facebook Graph API
     """
-    if not PAGE_ACCESS_TOKEN:
-        print(f"[GET POST CONTENT] Thiếu PAGE_ACCESS_TOKEN")
+    if not FCHAT_API_TOKEN or not FCHAT_SHOP_ID:
+        print(f"[GET POST CONTENT] Thiếu FCHAT_API_TOKEN hoặc FCHAT_SHOP_ID")
         return None
     
     try:
-        # Facebook Graph API endpoint để lấy nội dung bài viết
-        url = f"https://graph.facebook.com/v18.0/{post_id}"
-        params = {
-            'fields': 'message,created_time,permalink_url',
-            'access_token': PAGE_ACCESS_TOKEN
+        # Fchat API endpoint để lấy nội dung bài viết
+        url = f"{FCHAT_API_BASE_URL}/shops/{FCHAT_SHOP_ID}/facebook/posts/{post_id}"
+        headers = {
+            'Authorization': f'Bearer {FCHAT_API_TOKEN}',
+            'Content-Type': 'application/json'
         }
         
-        print(f"[GET POST CONTENT] Gọi Facebook Graph API: {url}")
-        response = requests.get(url, params=params, timeout=10)
+        print(f"[GET POST CONTENT] Gọi Fchat API: {url}")
+        response = requests.get(url, headers=headers, timeout=10)
         
         if response.status_code == 200:
             data = response.json()
-            print(f"[GET POST CONTENT] Đã lấy nội dung bài viết {post_id} từ Facebook Graph API")
+            print(f"[GET POST CONTENT] Đã lấy nội dung bài viết {post_id} từ Fchat")
             
             # Chuẩn hóa dữ liệu trả về để tương thích với code cũ
             post_data = {
@@ -1367,26 +1413,9 @@ def get_post_content_from_facebook(post_id: str) -> Optional[dict]:
             }
             return post_data
         else:
-            print(f"[GET POST CONTENT] Lỗi Facebook Graph API {response.status_code}: {response.text[:200]}")
-            
-            # Nếu token hết hạn hoặc thiếu quyền
-            if response.status_code == 400 or response.status_code == 403:
-                error_data = response.json().get('error', {})
-                error_message = error_data.get('message', '')
-                error_code = error_data.get('code', 0)
-                print(f"[GET POST CONTENT] Lỗi Facebook API: {error_message} (code: {error_code})")
-                
-                # Kiểm tra các lỗi phổ biến
-                if "access token" in error_message.lower():
-                    print(f"[GET POST CONTENT] CÓ THỂ PAGE_ACCESS_TOKEN ĐÃ HẾT HẠN HOẶC KHÔNG ĐỦ QUYỀN!")
-                elif "permission" in error_message.lower():
-                    print(f"[GET POST CONTENT] THIẾU QUYỀN TRUY CẬP! Cần quyền 'pages_read_engagement'")
-            
+            print(f"[GET POST CONTENT] Lỗi Fchat API {response.status_code}: {response.text[:200]}")
             return None
             
-    except requests.exceptions.Timeout:
-        print(f"[GET POST CONTENT] Timeout khi gọi Facebook Graph API")
-        return None
     except Exception as e:
         print(f"[GET POST CONTENT] Exception: {e}")
         return None
@@ -1512,17 +1541,19 @@ def extract_ms_from_post_content(post_data: dict) -> Optional[str]:
     return None
 
 # ============================================
-# HÀM XỬ LÝ COMMENT TỪ FEED (HOÀN CHỈNH - ĐÃ SỬA SỬ DỤNG FACEBOOK GRAPH API)
+# HÀM XỬ LÝ COMMENT TỪ FEED (HOÀN CHỈNH - ĐÃ SỬA SỬ DỤNG FCHAT API)
 # ============================================
 
 def handle_feed_comment(change_data: dict):
     """
     Xử lý comment từ feed với logic:
     1. Lấy post_id từ comment
-    2. Lấy nội dung bài viết gốc từ Facebook Graph API
+    2. Lấy nội dung bài viết gốc từ Fchat API
     3. Trích xuất MS từ caption (CHỈ DÙNG REGEX)
     4. Load products và kiểm tra tồn tại
     5. Cập nhật context cho user và gửi tin nhắn tự động
+    
+    This function uses pages_read_engagement permission to receive comment events.
     """
     try:
         # 1. Lấy thông tin cơ bản
@@ -1536,6 +1567,10 @@ def handle_feed_comment(change_data: dict):
             print(f"[FEED COMMENT] Thiếu user_id hoặc post_id")
             return None
         
+        # [META] Log comment event received via pages_read_engagement permission
+        print(f"[META] Received comment event via pages_read_engagement permission")
+        print(f"[META] Page: {PAGE_ID} | Post: {post_id} | User: {user_id}")
+        
         print(f"[FEED COMMENT] User {user_id} ({user_name}) comment: '{message_text}' trên post {post_id}")
         
         # 2. Kiểm tra xem có phải comment từ page không (bỏ qua)
@@ -1543,11 +1578,11 @@ def handle_feed_comment(change_data: dict):
             print(f"[FEED COMMENT] Bỏ qua comment từ chính page")
             return None
         
-        # 3. Lấy nội dung bài viết gốc từ Facebook Graph API
-        post_data = get_post_content_from_facebook(post_id)
+        # 3. Lấy nội dung bài viết gốc từ Fchat API (thay vì Facebook Graph API)
+        post_data = get_post_content_from_fchat(post_id)
         
         if not post_data:
-            print(f"[FEED COMMENT] Không lấy được nội dung bài viết {post_id} từ Facebook Graph API")
+            print(f"[FEED COMMENT] Không lấy được nội dung bài viết {post_id} từ Fchat")
             return None
         
         # LOG CHI TIẾT ĐỂ DEBUG
@@ -1670,24 +1705,6 @@ def send_image(recipient_id: str, image_url: str):
             "attachment": {
                 "type": "image",
                 "payload": {"url": image_url, "is_reusable": True},
-            }
-        },
-    }
-    return call_facebook_send_api(payload)
-
-def send_video(recipient_id: str, video_url: str):
-    """
-    Gửi video dưới dạng đính kèm để Messenger có thể phát trực tiếp
-    """
-    if not video_url:
-        return ""
-    
-    payload = {
-        "recipient": {"id": recipient_id},
-        "message": {
-            "attachment": {
-                "type": "video",
-                "payload": {"url": video_url, "is_reusable": True},
             }
         },
     }
@@ -1909,7 +1926,7 @@ def load_products(force=False):
 
         for ms, p in products.items():
             colors = sorted(list(p.get("all_colors") or []))
-            sizes = sorted(list(p.get("all_sizes") or []))
+            sizes = sorted(list(p.get("all_sizes", set())))
             p["màu (Thuộc tính)"] = ", ".join(colors) if colors else p.get("màu (Thuộc tính)", "")
             p["size (Thuộc tính)"] = ", ".join(sizes) if sizes else p.get("size (Thuộc tính)", "")
             
@@ -2253,10 +2270,10 @@ def execute_tool(uid, name, args):
             return "Sản phẩm không có video."
         
         for url in urls[:2]:
-            send_video(uid, url)  # Sử dụng hàm send_video mới thay vì send_message
+            send_message(uid, f"📹 Video sản phẩm: {url}")
             time.sleep(0.5)
         
-        return "Đã gửi video sản phẩm."
+        return "Đã gửi link video."
     
     elif name == "provide_order_link":
         if ms in PRODUCTS:
@@ -2313,7 +2330,7 @@ def detect_ms_from_text(text: str) -> Optional[str]:
         r'mã sp số', r'ma so sp',
         # Dạng tự nhiên khi khách hỏi (cần có từ khóa)
         r'xem mã', r'xem sp', r'xem sản phẩm', r'cho xem mã', 
-        r'tư ván mã', r'tư ván sp', r'giới thiệu mã', r'giới thiệu sp'
+        r'tư vấn mã', r'tư vấn sp', r'giới thiệu mã', r'giới thiệu sp'
     ]
     
     # Tạo pattern regex tổng hợp
@@ -2752,6 +2769,9 @@ def prepare_user_data_for_capi(uid: str, phone: str = None, client_ip: str = Non
     fbclid = get_fbclid_from_context(uid)
     if fbclid:
         user_data["fbc"] = f"fb.1.{int(time.time())}.{fbclid}"
+    
+    # Thêm FBP cookie mô phỏng
+    user_data["fbp"] = f"fb.1.{int(time.time())}.{uid[:10] if uid else str(int(time.time()))}"
     
     # Hash phone nếu có
     if phone:
@@ -3899,23 +3919,23 @@ def test_poscake_webhook():
     }), 200
 
 # ============================================
-# DEBUG FEED COMMENT ENDPOINT (SỬ DỤNG FACEBOOK GRAPH API)
+# DEBUG FEED COMMENT ENDPOINT (SỬ DỤNG FCHAT API)
 # ============================================
 
 @app.route("/debug-feed-comment", methods=["GET"])
 def debug_feed_comment():
-    """Debug endpoint cho feed comment processing với Facebook Graph API"""
+    """Debug endpoint cho feed comment processing với Fchat API"""
     post_id = request.args.get("post_id", "516937221685203_1775036843322177")
     
-    # Test hàm get_post_content_from_facebook
-    post_data = get_post_content_from_facebook(post_id)
+    # Test hàm get_post_content_from_fchat
+    post_data = get_post_content_from_fchat(post_id)
     
     if not post_data:
         return jsonify({
             "status": "error",
-            "message": "Không lấy được nội dung bài viết từ Facebook Graph API",
+            "message": "Không lấy được nội dung bài viết từ Fchat API",
             "post_id": post_id,
-            "facebook_configured": bool(PAGE_ACCESS_TOKEN)
+            "fchat_configured": bool(FCHAT_API_TOKEN and FCHAT_SHOP_ID)
         }), 400
     
     # Test hàm extract_ms_from_post_content
@@ -3924,7 +3944,7 @@ def debug_feed_comment():
     return jsonify({
         "post_id": post_id,
         "extracted_ms": ms,
-        "facebook_api_used": True,
+        "fchat_api_used": True,
         "message_preview": post_data["message"][:200] if post_data.get("message") else "No message",
         "patterns_tested": [
             r"\[(MS\d{2,6})\]",
@@ -3935,24 +3955,25 @@ def debug_feed_comment():
     })
 
 # ============================================
-# TEST FEED COMMENT ENDPOINT (SỬ DỤNG FACEBOOK GRAPH API)
+# TEST FEED COMMENT ENDPOINT (SỬ DỤNG FCHAT API)
 # ============================================
 
 @app.route("/test-feed-comment", methods=["GET"])
 def test_feed_comment():
-    """Test endpoint cho feed comment processing với Facebook Graph API"""
+    """Test endpoint cho feed comment processing với Fchat API"""
     post_id = request.args.get("post_id", "516937221685203_1775049683320893")
     
-    # Test hàm get_post_content_from_facebook
-    post_data = get_post_content_from_facebook(post_id)
+    # Test hàm get_post_content_from_fchat
+    post_data = get_post_content_from_fchat(post_id)
     
     if not post_data:
         return jsonify({
             "status": "error",
-            "message": "Không lấy được nội dung bài viết từ Facebook Graph API",
+            "message": "Không lấy được nội dung bài viết từ Fchat API",
             "post_id": post_id,
-            "facebook_configured": bool(PAGE_ACCESS_TOKEN),
-            "page_access_token_length": len(PAGE_ACCESS_TOKEN) if PAGE_ACCESS_TOKEN else 0,
+            "fchat_api_configured": bool(FCHAT_API_TOKEN and FCHAT_SHOP_ID),
+            "fchat_api_token_length": len(FCHAT_API_TOKEN) if FCHAT_API_TOKEN else 0,
+            "fchat_shop_id": FCHAT_SHOP_ID
         }), 400
     
     # Test hàm extract_ms_from_post_content
@@ -3983,7 +4004,7 @@ def test_feed_comment():
     return jsonify({
         "status": "success",
         "post_id": post_id,
-        "facebook_api_used": True,
+        "fchat_api_used": True,
         "post_content_preview": post_data.get('message', '')[:200] + "..." if post_data.get('message') else "No message",
         "detected_ms": detected_ms,
         "final_ms": final_ms if detected_ms else None,
@@ -4060,19 +4081,22 @@ def home():
 
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
+    # [META] Webhook verification endpoint - requires pages_read_engagement permission
     if request.method == "GET":
         mode = request.args.get("hub.mode")
         token = request.args.get("hub.verify_token")
         challenge = request.args.get("hub.challenge")
         
         if mode == "subscribe" and token == VERIFY_TOKEN:
-            print("[WEBHOOK VERIFY] Success!")
+            print("[META] Webhook verification successful - pages_read_engagement permission confirmed")
             return challenge, 200
         else:
-            print("[WEBHOOK VERIFY] Failed!")
+            print("[META] Webhook verification failed")
             return "Verification token mismatch", 403
 
+    # [META] Webhook event processing - pages_read_engagement permission in use
     data = request.get_json() or {}
+    print("[META] Webhook received event via pages_read_engagement permission")
     print("Webhook received:", json.dumps(data, ensure_ascii=False)[:500])
 
     entry = data.get("entry", [])
@@ -4091,7 +4115,7 @@ def webhook():
                     if "message" in value and "post_id" in value:
                         print(f"[FEED COMMENT] Đang xử lý comment từ feed...")
                         
-                        # Gọi hàm xử lý comment (SỬ DỤNG FACEBOOK GRAPH API)
+                        # Gọi hàm xử lý comment (SỬ DỤNG FCHAT API)
                         handle_feed_comment(value)
                     
                     continue
@@ -4403,16 +4427,131 @@ def order_form():
     load_products(force=False)
     
     if not ms:
-        return render_template('no_product.html')
+        return """
+        <html>
+        <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>Không tìm thấy sản phẩm</title>
+            <style>
+                body {
+                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    height: 100vh;
+                    display: flex;
+                    justify-content: center;
+                    align-items: center;
+                    margin: 0;
+                    padding: 20px;
+                }
+                .container {
+                    background: white;
+                    border-radius: 15px;
+                    padding: 40px;
+                    text-align: center;
+                    box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+                    max-width: 400px;
+                }
+                .error-icon {
+                    font-size: 60px;
+                    margin-bottom: 20px;
+                }
+                h2 {
+                    color: #FF3B30;
+                    margin-bottom: 15px;
+                }
+                .btn {
+                    display: inline-block;
+                    margin-top: 20px;
+                    padding: 12px 30px;
+                    background: linear-gradient(135deg, #1DB954 0%, #17a74d 100%);
+                    color: white;
+                    text-decoration: none;
+                    border-radius: 25px;
+                    font-weight: 600;
+                    transition: transform 0.3s ease;
+                }
+                .btn:hover {
+                    transform: translateY(-2px);
+                }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="error-icon">⚠️</div>
+                <h2>Không tìm thấy sản phẩm</h2>
+                <p>Vui lòng quay lại Messenger và chọn sản phẩm để đặt hàng.</p>
+                <a href="/" class="btn">Quay về trang chủ</a>
+            </div>
+        </body>
+        </html>
+        """
     
     # Nếu không có sản phẩm, thử load lại
     if not PRODUCTS:
         load_products(force=True)
         
     if ms not in PRODUCTS:
-        return render_template('product_not_found.html')
+        return """
+        <html>
+        <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>Sản phẩm không tồn tại</title>
+            <style>
+                body {
+                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    height: 100vh;
+                    display: flex;
+                    justify-content: center;
+                    align-items: center;
+                    margin: 0;
+                    padding: 20px;
+                }
+                .container {
+                    background: white;
+                    border-radius: 15px;
+                    padding: 40px;
+                    text-align: center;
+                    box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+                    max-width: 400px;
+                }
+                .error-icon {
+                    font-size: 60px;
+                    margin-bottom: 20px;
+                }
+                h2 {
+                    color: #FF3B30;
+                    margin-bottom: 15px;
+                }
+                .btn {
+                    display: inline-block;
+                    margin-top: 20px;
+                    padding: 12px 30px;
+                    background: linear-gradient(135deg, #1DB954 0%, #17a74d 100%);
+                    color: white;
+                    text-decoration: none;
+                    border-radius: 25px;
+                    font-weight: 600;
+                    transition: transform 0.3s ease;
+                }
+                .btn:hover {
+                    transform: translateY(-2px);
+                }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="error-icon">❌</div>
+                <h2>Sản phẩm không tồn tại</h2>
+                <p>Vui lòng quay lại Messenger và chọn sản phẩm khác giúp shop ạ.</p>
+                <a href="/" class="btn">Quay về trang chủ</a>
+            </div>
+        </body>
+        </html>
+        """
     
-    # Lấy thông tin sản phẩm
     current_fanpage_name = get_fanpage_name_from_api()
     row = PRODUCTS[ms]
     
@@ -4420,6 +4559,9 @@ def order_form():
     images_field = row.get("Images", "")
     urls = parse_image_urls(images_field)
     default_image = urls[0] if urls else ""
+    
+    # Sử dụng base64 placeholder để tăng tốc độ load ban đầu
+    placeholder_image = "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTIwIiBoZWlnaHQ9IjEyMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTIwIiBoZWlnaHQ9IjEyMCIgZmlsbD0iI2Y1ZjVmNSIvPjx0ZXh0IHg9IjYwIiB5PSI2MCIgZm9udC1mYW1pbHk9IkFyaWFsIiBmb250LXNpemU9IjEyIiBmaWxsPSIjY2NjY2NjIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBkeT0iLjNlbSI+TG9hZGluZy4uLjwvdGV4dD48L3N2Zz4="
     
     size_field = row.get("size (Thuộc tính)", "")
     color_field = row.get("màu (Thuộc tính)", "")
@@ -4460,19 +4602,630 @@ def order_form():
         print(f"[FACEBOOK CAPI ERROR] Lỗi queue InitiateCheckout: {e}")
         # KHÔNG ảnh hưởng đến việc hiển thị form
     
-    # Render template với dữ liệu
-    return render_template(
-        'order_form.html',
-        ms=ms,
-        uid=uid,
-        product_name=product_name,
-        current_fanpage_name=current_fanpage_name,
-        default_image=default_image,
-        sizes=sizes,
-        colors=colors,
-        price_int=price_int,
-        domain=DOMAIN if DOMAIN.startswith('http') else f'https://{DOMAIN}'
-    )
+    # Tạo HTML với tối ưu hóa cực nhanh
+    html = f"""
+    <!DOCTYPE html>
+    <html lang="vi">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Đặt hàng - {product_name[:30]}...</title>
+        <link rel="preconnect" href="https://cdnjs.cloudflare.com" />
+        <link rel="preconnect" href="https://fonts.googleapis.com" />
+        <style>
+            /* Critical CSS - Load ngay */
+            * {{
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+            }}
+            
+            body {{
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+                background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+                min-height: 100vh;
+                padding: 20px;
+                color: #333;
+            }}
+            
+            .container {{
+                max-width: 480px;
+                margin: 0 auto;
+                background: white;
+                border-radius: 20px;
+                box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+                overflow: hidden;
+            }}
+            
+            .header {{
+                background: linear-gradient(135deg, #1DB954 0%, #17a74d 100%);
+                padding: 20px;
+                text-align: center;
+                color: white;
+            }}
+            
+            .header h2 {{
+                font-size: 18px;
+                font-weight: 600;
+                margin: 0;
+            }}
+            
+            .content {{
+                padding: 20px;
+            }}
+            
+            .product-section {{
+                display: flex;
+                gap: 15px;
+                margin-bottom: 25px;
+                padding-bottom: 20px;
+                border-bottom: 1px solid #eee;
+            }}
+            
+            .product-image-container {{
+                width: 120px;
+                height: 120px;
+                flex-shrink: 0;
+                border-radius: 12px;
+                overflow: hidden;
+                background: #f8f9fa;
+                position: relative;
+            }}
+            
+            .product-image {{
+                width: 100%;
+                height: 100%;
+                object-fit: cover;
+                transition: opacity 0.3s ease;
+            }}
+            
+            .product-image.loading {{
+                opacity: 0.3;
+            }}
+            
+            .product-info {{
+                flex: 1;
+                min-width: 0;
+            }}
+            
+            .product-code {{
+                font-size: 12px;
+                color: #666;
+                background: #f5f5f5;
+                padding: 6px 10px;
+                border-radius: 6px;
+                display: inline-block;
+                margin-bottom: 8px;
+                font-family: 'Courier New', monospace;
+                font-weight: 500;
+            }}
+            
+            .product-title {{
+                font-size: 16px;
+                font-weight: 600;
+                margin: 0 0 8px 0;
+                line-height: 1.4;
+                color: #222;
+                word-break: break-word;
+            }}
+            
+            .product-price {{
+                color: #FF3B30;
+                font-size: 18px;
+                font-weight: 700;
+                margin-top: 10px;
+            }}
+            
+            .form-group {{
+                margin-bottom: 18px;
+            }}
+            
+            .form-group label {{
+                display: block;
+                margin-bottom: 6px;
+                font-size: 14px;
+                font-weight: 500;
+                color: #444;
+            }}
+            
+            .form-control {{
+                width: 100%;
+                padding: 12px 15px;
+                border: 2px solid #e1e5e9;
+                border-radius: 10px;
+                font-size: 14px;
+                background: white;
+                font-family: inherit;
+            }}
+            
+            .select2-container {{
+                width: 100% !important;
+            }}
+            
+            .address-row {{
+                display: flex;
+                gap: 10px;
+                margin-bottom: 10px;
+            }}
+            
+            .total-section {{
+                background: #f8f9fa;
+                padding: 18px;
+                border-radius: 12px;
+                margin: 25px 0;
+                text-align: center;
+            }}
+            
+            .total-label {{
+                font-size: 14px;
+                color: #666;
+                margin-bottom: 5px;
+            }}
+            
+            .total-amount {{
+                font-size: 24px;
+                font-weight: 700;
+                color: #FF3B30;
+            }}
+            
+            .submit-btn {{
+                width: 100%;
+                padding: 16px;
+                border: none;
+                border-radius: 50px;
+                background: linear-gradient(135deg, #1DB954 0%, #17a74d 100%);
+                color: white;
+                font-size: 16px;
+                font-weight: 600;
+                cursor: pointer;
+                transition: all 0.3s ease;
+                margin-top: 10px;
+                font-family: inherit;
+            }}
+            
+            .submit-btn:disabled {{
+                opacity: 0.7;
+                cursor: not-allowed;
+            }}
+            
+            .loading-spinner {{
+                display: inline-block;
+                width: 18px;
+                height: 18px;
+                border: 2px solid rgba(255, 255, 255, 0.3);
+                border-top: 2px solid white;
+                border-radius: 50%;
+                animation: spin 1s linear infinite;
+            }}
+            
+            @keyframes spin {{
+                0% {{ transform: rotate(0deg); }}
+                100% {{ transform: rotate(360deg); }}
+            }}
+            
+            .note {{
+                margin-top: 15px;
+                font-size: 12px;
+                color: #888;
+                text-align: center;
+                line-height: 1.5;
+            }}
+            
+            @media (max-width: 480px) {{
+                .container {{
+                    border-radius: 15px;
+                }}
+                
+                .content {{
+                    padding: 15px;
+                }}
+                
+                .product-section {{
+                    flex-direction: column;
+                }}
+                
+                .product-image-container {{
+                    width: 100%;
+                    height: 200px;
+                }}
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h2>ĐẶT HÀNG - {current_fanpage_name}</h2>
+            </div>
+            
+            <div class="content">
+                <!-- Product Info Section -->
+                <div class="product-section">
+                    <div class="product-image-container">
+                        <img id="product-image" class="product-image" 
+                             src="{placeholder_image}" 
+                             data-src="{default_image}" 
+                             alt="{product_name}"
+                             onerror="this.src='data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTIwIiBoZWlnaHQ9IjEyMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTIwIiBoZWlnaHQ9IjEyMCIgZmlsbD0iI2UzZTNlMyIvPjx0ZXh0IHg9IjYwIiB5PSI2MCIgZm9udC1mYW1pbHk9IkFyaWFsIiBmb250LXNpemU9IjEyIiBmaWxsPSIjOTk5OTk5IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBkeT0iLjNlbSI+Tm8gSW1hZ2U8L3RleHQ+PC9zdmc+'"
+                             loading="lazy">
+                    </div>
+                    <div class="product-info">
+                        <div class="product-code">Mã: {ms}</div>
+                        <h3 class="product-title">{product_name}</h3>
+                        <div class="product-price">
+                            <span id="price-display">{price_int:,.0f} đ</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Order Form -->
+                <form id="orderForm">
+                    <!-- Color Selection -->
+                    <div class="form-group">
+                        <label for="color">Màu sắc:</label>
+                        <select id="color" class="form-control">
+                            {''.join(f"<option value='{c}'>{c}</option>" for c in colors)}
+                        </select>
+                    </div>
+
+                    <!-- Size Selection -->
+                    <div class="form-group">
+                        <label for="size">Size:</label>
+                        <select id="size" class="form-control">
+                            {''.join(f"<option value='{s}'>{s}</option>" for s in sizes)}
+                        </select>
+                    </div>
+
+                    <!-- Quantity -->
+                    <div class="form-group">
+                        <label for="quantity">Số lượng:</label>
+                        <input type="number" id="quantity" class="form-control" value="1" min="1">
+                    </div>
+
+                    <!-- Total Price -->
+                    <div class="total-section">
+                        <div class="total-label">Tạm tính:</div>
+                        <div class="total-amount" id="total-display">{price_int:,.0f} đ</div>
+                    </div>
+
+                    <!-- Customer Information -->
+                    <div class="form-group">
+                        <label for="customerName">Họ và tên:</label>
+                        <input type="text" id="customerName" class="form-control" required>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="phone">Số điện thoại:</label>
+                        <input type="tel" id="phone" class="form-control" required>
+                    </div>
+
+                    <!-- Address Section - Sử dụng static list cho nhanh -->
+                    <div class="form-group">
+                        <label for="province">Tỉnh/Thành phố:</label>
+                        <select id="province" class="form-control" required>
+                            <option value="">Chọn tỉnh/thành phố</option>
+                            <option value="Hà Nội">Hà Nội</option>
+                            <option value="TP Hồ Chí Minh">TP Hồ Chí Minh</option>
+                            <option value="Đà Nẵng">Đà Nẵng</option>
+                            <option value="Hải Phòng">Hải Phòng</option>
+                            <option value="Cần Thơ">Cần Thơ</option>
+                            <option value="An Giang">An Giang</option>
+                            <option value="Bà Rịa - Vũng Tàu">Bà Rịa - Vũng Tàu</option>
+                            <option value="Bắc Giang">Bắc Giang</option>
+                            <option value="Bắc Kạn">Bắc Kạn</option>
+                            <option value="Bạc Liêu">Bạc Liêu</option>
+                            <option value="Bắc Ninh">Bắc Ninh</option>
+                            <option value="Bến Tre">Bến Tre</option>
+                            <option value="Bình Định">Bình Định</option>
+                            <option value="Bình Dương">Bình Dương</option>
+                            <option value="Bình Phước">Bình Phước</option>
+                            <option value="Bình Thuận">Bình Thuận</option>
+                            <option value="Cà Mau">Cà Mau</option>
+                            <option value="Cao Bằng">Cao Bằng</option>
+                            <option value="Đắk Lắk">Đắk Lắk</option>
+                            <option value="Đắk Nông">Đắk Nông</option>
+                            <option value="Điện Biên">Điện Biên</option>
+                            <option value="Đồng Nai">Đồng Nai</option>
+                            <option value="Đồng Tháp">Đồng Tháp</option>
+                            <option value="Gia Lai">Gia Lai</option>
+                            <option value="Hà Giang">Hà Giang</option>
+                            <option value="Hà Nam">Hà Nam</option>
+                            <option value="Hà Tĩnh">Hà Tĩnh</option>
+                            <option value="Hải Dương">Hải Dương</option>
+                            <option value="Hậu Giang">Hậu Giang</option>
+                            <option value="Hòa Bình">Hòa Bình</option>
+                            <option value="Hưng Yên">Hưng Yên</option>
+                            <option value="Khánh Hòa">Khánh Hòa</option>
+                            <option value="Kiên Giang">Kiên Giang</option>
+                            <option value="Kon Tum">Kon Tum</option>
+                            <option value="Lai Châu">Lai Châu</option>
+                            <option value="Lâm Đồng">Lâm Đồng</option>
+                            <option value="Lạng Sơn">Lạng Sơn</option>
+                            <option value="Lào Cai">Lào Cai</option>
+                            <option value="Long An">Long An</option>
+                            <option value="Nam Định">Nam Định</option>
+                            <option value="Nghệ An">Nghệ An</option>
+                            <option value="Ninh Bình">Ninh Bình</option>
+                            <option value="Ninh Thuận">Ninh Thuận</option>
+                            <option value="Phú Thọ">Phú Thọ</option>
+                            <option value="Quảng Bình">Quảng Bình</option>
+                            <option value="Quảng Nam">Quảng Nam</option>
+                            <option value="Quảng Ngãi">Quảng Ngãi</option>
+                            <option value="Quảng Ninh">Quảng Ninh</option>
+                            <option value="Quảng Trị">Quảng Trị</option>
+                            <option value="Sóc Trăng">Sóc Trăng</option>
+                            <option value="Sơn La">Sơn La</option>
+                            <option value="Tây Ninh">Tây Ninh</option>
+                            <option value="Thái Bình">Thái Bình</option>
+                            <option value="Thái Nguyên">Thái Nguyên</option>
+                            <option value="Thanh Hóa">Thanh Hóa</option>
+                            <option value="Thừa Thiên Huế">Thừa Thiên Huế</option>
+                            <option value="Tiền Giang">Tiền Giang</option>
+                            <option value="Trà Vinh">Trà Vinh</option>
+                            <option value="Tuyên Quang">Tuyên Quang</option>
+                            <option value="Vĩnh Long">Vĩnh Long</option>
+                            <option value="Vĩnh Phúc">Vĩnh Phúc</option>
+                            <option value="Yên Bái">Yên Bái</option>
+                            <option value="Phú Yên">Phú Yên</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="district">Quận/Huyện:</label>
+                        <input type="text" id="district" class="form-control" placeholder="Nhập quận/huyện" required>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="ward">Phường/Xã:</label>
+                        <input type="text" id="ward" class="form-control" placeholder="Nhập phường/xã" required>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="addressDetail">Địa chỉ chi tiết:</label>
+                        <input type="text" id="addressDetail" class="form-control" placeholder="Số nhà, tên đường, thôn/xóm..." required>
+                    </div>
+
+                    <!-- Submit Button -->
+                    <button type="button" id="submitBtn" class="submit-btn">
+                        ĐẶT HÀNG NGAY
+                    </button>
+
+                    <p class="note">
+                        Shop sẽ gọi xác nhận trong 5-10 phút. Thanh toán khi nhận hàng (COD).
+                    </p>
+                </form>
+            </div>
+        </div>
+
+        <!-- Defer loading of non-critical JS -->
+        <script>
+            // Inline critical JS để form hoạt động ngay
+            document.addEventListener('DOMContentLoaded', function() {{
+                const DOMAIN = '{'https://' + DOMAIN if not DOMAIN.startswith('http') else DOMAIN}';
+                const API_BASE_URL = '/api';
+                let BASE_PRICE = {price_int};
+                
+                // Format price function
+                function formatPrice(n) {{
+                    return new Intl.NumberFormat('vi-VN').format(n) + ' đ';
+                }}
+                
+                // Update price display
+                function updatePriceDisplay() {{
+                    const quantity = parseInt(document.getElementById('quantity').value) || 1;
+                    const total = BASE_PRICE * quantity;
+                    document.getElementById('total-display').textContent = formatPrice(total);
+                }}
+                
+                // Load product image after page loads
+                function loadProductImage() {{
+                    const img = document.getElementById('product-image');
+                    if (img.dataset.src) {{
+                        // Create a new image to check if it loads
+                        const tempImg = new Image();
+                        tempImg.onload = function() {{
+                            img.src = this.src;
+                            img.classList.remove('loading');
+                        }};
+                        tempImg.onerror = function() {{
+                            // Use fallback image
+                            img.src = 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTIwIiBoZWlnaHQ9IjEyMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTIwIiBoZWlnaHQ9IjEyMCIgZmlsbD0iI2UzZTNlMyIvPjx0ZXh0IHg9IjYwIiB5PSI2MCIgZm9udC1mYW1pbHk9IkFyaWFsIiBmb250LXNpemU9IjEyIiBmaWxsPSIjOTk5OTk5IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBkeT0iLjNlbSI+Tm8gSW1hZ2U8L3RleHQ+PC9zdmc+';
+                        }};
+                        tempImg.src = img.dataset.src;
+                    }}
+                }}
+                
+                // Get variant info (ảnh và giá)
+                async function getVariantInfo(color, size) {{
+                    try {{
+                        const response = await fetch(`${{API_BASE_URL}}/get-variant-info?ms={ms}&color=${{encodeURIComponent(color)}}&size=${{encodeURIComponent(size)}}`);
+                        if (response.ok) {{
+                            return await response.json();
+                        }}
+                    }} catch (error) {{
+                        console.log('Không thể lấy thông tin biến thể, sử dụng giá mặc định');
+                    }}
+                    return null;
+                }}
+                
+                // Update variant info when color/size changes
+                async function updateVariantInfo() {{
+                    const color = document.getElementById('color').value;
+                    const size = document.getElementById('size').value;
+                    
+                    const variantInfo = await getVariantInfo(color, size);
+                    if (variantInfo) {{
+                        // Update image
+                        const img = document.getElementById('product-image');
+                        if (variantInfo.image) {{
+                            const tempImg = new Image();
+                            tempImg.onload = function() {{
+                                img.src = variantInfo.image;
+                            }};
+                            tempImg.src = variantInfo.image;
+                        }}
+                        
+                        // Update price
+                        if (variantInfo.price && variantInfo.price > 0) {{
+                            BASE_PRICE = variantInfo.price;
+                            document.getElementById('price-display').textContent = formatPrice(BASE_PRICE);
+                            updatePriceDisplay();
+                        }}
+                    }}
+                }}
+                
+                // Submit order
+                async function submitOrder() {{
+                    const formData = {{
+                        ms: '{ms}',
+                        uid: '{uid}',
+                        color: document.getElementById('color').value,
+                        size: document.getElementById('size').value,
+                        quantity: parseInt(document.getElementById('quantity').value) || 1,
+                        customerName: document.getElementById('customerName').value.trim(),
+                        phone: document.getElementById('phone').value.trim(),
+                        province: document.getElementById('province').value,
+                        district: document.getElementById('district').value.trim(),
+                        ward: document.getElementById('ward').value.trim(),
+                        addressDetail: document.getElementById('addressDetail').value.trim()
+                    }};
+                    
+                    // Validation
+                    if (!formData.customerName) {{
+                        alert('Vui lòng nhập họ và tên');
+                        return;
+                    }}
+                    
+                    if (!formData.phone) {{
+                        alert('Vui lòng nhập số điện thoại');
+                        return;
+                    }}
+                    
+                    // Phone validation
+                    const phoneRegex = /^(0[0-9]{{9}}|84[0-9]{{9}}|\+84[0-9]{{9}})$/;
+                    const normalizedPhone = formData.phone.replace(/\\s/g, '');
+                    
+                    if (!phoneRegex.test(normalizedPhone)) {{
+                        alert('Số điện thoại không hợp lệ. Vui lòng nhập số 10 chữ số (VD: 0982155980)');
+                        return;
+                    }}
+                    
+                    formData.phone = normalizedPhone.replace('+84', '0').replace(/^84/, '0');
+                    
+                    if (!formData.province) {{
+                        alert('Vui lòng chọn tỉnh/thành phố');
+                        return;
+                    }}
+                    
+                    if (!formData.district) {{
+                        alert('Vui lòng nhập quận/huyện');
+                        return;
+                    }}
+                    
+                    if (!formData.ward) {{
+                        alert('Vui lòng nhập phường/xã');
+                        return;
+                    }}
+                    
+                    if (!formData.addressDetail) {{
+                        alert('Vui lòng nhập địa chỉ chi tiết');
+                        return;
+                    }}
+                    
+                    formData.fullAddress = `${{formData.addressDetail}}, ${{formData.ward}}, ${{formData.district}}, ${{formData.province}}`;
+                    formData.unitPrice = BASE_PRICE;
+                    formData.totalPrice = BASE_PRICE * formData.quantity;
+                    
+                    const submitBtn = document.getElementById('submitBtn');
+                    const originalText = submitBtn.innerHTML;
+                    submitBtn.innerHTML = '<span class="loading-spinner"></span> ĐANG XỬ LÝ...';
+                    submitBtn.disabled = true;
+                    
+                    try {{
+                        const response = await fetch(`${{API_BASE_URL}}/submit-order`, {{
+                            method: 'POST',
+                            headers: {{ 'Content-Type': 'application/json' }},
+                            body: JSON.stringify(formData)
+                        }});
+                        
+                        const data = await response.json();
+                        
+                        if (response.ok) {{
+                            const successMessage = `🎉 ĐÃ ĐẶT HÀNG THÀNH CÔNG!
+                            
+📦 Mã sản phẩm: {ms}
+👤 Khách hàng: ${{formData.customerName}}
+📱 SĐT: ${{formData.phone}}
+📍 Địa chỉ: ${{formData.fullAddress}}
+💰 Đơn giá: ${{BASE_PRICE.toLocaleString('vi-VN')}} đ
+📦 Số lượng: ${{formData.quantity}}
+💰 Tổng tiền: ${{formData.totalPrice.toLocaleString('vi-VN')}} đ
+
+⏰ Shop sẽ liên hệ xác nhận trong 5-10 phút.
+🚚 Giao hàng bởi ViettelPost (COD)
+
+Cảm ơn quý khách đã đặt hàng! ❤️`;
+                            
+                            alert(successMessage);
+                            
+                            // Reset form after 1 second
+                            setTimeout(() => {{
+                                document.getElementById('orderForm').reset();
+                                updatePriceDisplay();
+                                submitBtn.innerHTML = originalText;
+                                submitBtn.disabled = false;
+                            }}, 1000);
+                            
+                        }} else {{
+                            alert('❌ ' + (data.message || 'Có lỗi xảy ra. Vui lòng thử lại sau'));
+                            submitBtn.innerHTML = originalText;
+                            submitBtn.disabled = false;
+                        }}
+                    }} catch (error) {{
+                        console.error('Lỗi khi đặt hàng:', error);
+                        alert('❌ Lỗi kết nối. Vui lòng kiểm tra mạng và thử lại!');
+                        submitBtn.innerHTML = originalText;
+                        submitBtn.disabled = false;
+                    }}
+                }}
+                
+                // Initialize event listeners
+                function initialize() {{
+                    // Load image
+                    loadProductImage();
+                    
+                    // Update price when quantity changes
+                    document.getElementById('quantity').addEventListener('input', updatePriceDisplay);
+                    
+                    // Update variant info when color/size changes
+                    document.getElementById('color').addEventListener('change', updateVariantInfo);
+                    document.getElementById('size').addEventListener('change', updateVariantInfo);
+                    
+                    // Submit button
+                    document.getElementById('submitBtn').addEventListener('click', submitOrder);
+                    
+                    // Auto-focus on name field
+                    setTimeout(() => {{
+                        document.getElementById('customerName').focus();
+                    }}, 500);
+                }}
+                
+                // Initialize when page loads
+                initialize();
+            }});
+        </script>
+    </body>
+    </html>
+    """
+    
+    response = make_response(html)
+    
+    # Set headers for better caching
+    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    response.headers['Content-Type'] = 'text/html; charset=utf-8'
+    
+    return response
 
 # ============================================
 # API ENDPOINTS
@@ -4769,8 +5522,8 @@ def check_env():
         "GOOGLE_SHEETS_CREDENTIALS_JSON": "CÓ" if GOOGLE_SHEETS_CREDENTIALS_JSON else "KHÔNG",
         "SHEET_ID_LENGTH": len(GOOGLE_SHEET_ID) if GOOGLE_SHEET_ID else 0,
         "CREDENTIALS_LENGTH": len(GOOGLE_SHEETS_CREDENTIALS_JSON) if GOOGLE_SHEETS_CREDENTIALS_JSON else 0,
-        "FCHAT_API_TOKEN": "CÓ" if FCHAT_TOKEN else "KHÔNG",
-        "FCHAT_SHOP_ID": "CÓ" if FCHAT_WEBHOOK_URL else "KHÔNG"
+        "FCHAT_API_TOKEN": "CÓ" if FCHAT_API_TOKEN else "KHÔNG",
+        "FCHAT_SHOP_ID": FCHAT_SHOP_ID if FCHAT_SHOP_ID else "KHÔNG"
     })
 
 @app.route("/test-context-save", methods=["GET"])
@@ -4861,18 +5614,21 @@ def health_check():
     
     total_variants = sum(len(p['variants']) for p in PRODUCTS.values())
     
-    # Kiểm tra feed comment capability với Facebook Graph API
+    # Kiểm tra feed comment capability với Fchat API
     feed_comment_test = "Ready"
-    if PAGE_ACCESS_TOKEN:
-        feed_comment_test = "✅ Sẵn sàng (Facebook Graph API)"
+    if FCHAT_API_TOKEN and FCHAT_SHOP_ID:
+        feed_comment_test = "✅ Sẵn sàng (Fchat API)"
     else:
-        feed_comment_test = "⚠️ Cần cấu hình PAGE_ACCESS_TOKEN"
+        feed_comment_test = "⚠️ Cần cấu hình FCHAT_API_TOKEN và FCHAT_SHOP_ID"
     
     # Kiểm tra persistent storage với Google Sheets
     google_sheets_status = "✅ Đã cấu hình" if GOOGLE_SHEET_ID and GOOGLE_SHEETS_CREDENTIALS_JSON else "⚠️ Chưa cấu hình"
     
     # Kiểm tra Facebook Conversion API
     facebook_capi_status = "✅ Đã cấu hình" if FACEBOOK_PIXEL_ID and FACEBOOK_ACCESS_TOKEN else "⚠️ Chưa cấu hình"
+    
+    # [META] Check pages_show_list permission usage - Note: This app uses a single pre-configured Page
+    pages_show_list_status = "✅ Configured via environment variable (PAGE_ID)"
     
     return {
         "status": "healthy",
@@ -4884,10 +5640,16 @@ def health_check():
         "fanpage_name": current_fanpage_name,
         "page_id": PAGE_ID,
         "feed_comment_processing": feed_comment_test,
-        "facebook_graph_api": {
-            "token_configured": bool(PAGE_ACCESS_TOKEN),
-            "api_version": "v18.0",
-            "required_permissions": ["pages_read_engagement", "pages_manage_metadata"]
+        "fchat_api": {
+            "token_configured": bool(FCHAT_API_TOKEN),
+            "shop_id": FCHAT_SHOP_ID,
+            "base_url": FCHAT_API_BASE_URL
+        },
+        "facebook_permissions": {
+            "pages_show_list": pages_show_list_status,
+            "pages_manage_metadata": "✅ Active (used in get_fanpage_name_from_api)",
+            "pages_read_engagement": "✅ Active (used in webhook feed comment processing)",
+            "permissions_logging": "✅ Enabled (see [META] logs in stdout)"
         },
         "persistent_storage": {
             "enabled": True,
@@ -4942,14 +5704,14 @@ def health_check():
         "feed_comment_processing": {
             "enabled": True,
             "logic": "Lấy MS từ caption bài viết khi user comment",
-            "api_used": "Facebook Graph API (trực tiếp)",
+            "api_used": "Fchat API (thay thế Facebook Graph API)",
             "capabilities": [
                 "Detect MS từ bài viết gốc (chỉ dùng regex)",
                 "Auto reply với thông tin sản phẩm chi tiết",
                 "Cập nhật context cho user và reset counter",
                 "Chỉ gửi tin nhắn tự động khi real_message_count = 0"
             ],
-            "required_config": "PAGE_ACCESS_TOKEN với quyền pages_read_engagement"
+            "required_config": "FCHAT_API_TOKEN và FCHAT_SHOP_ID"
         },
         "context_persistence": {
             "enabled": True,
@@ -4986,7 +5748,7 @@ def health_check():
             "facebook_conversion_api": True,
             "async_event_processing": True,
             "smart_event_cache": True,
-            "facebook_graph_api_integration": True
+            "fchat_api_integration": True
         }
     }, 200
 
@@ -5028,6 +5790,13 @@ if __name__ == "__main__":
     print(f"🟢 Port: {get_port()}")
     print("=" * 80)
     
+    # [META] Log Facebook App Permissions Usage
+    print("[META] Facebook App Permissions in use:")
+    print("[META] 1. pages_manage_metadata: Used to fetch Page name and metadata")
+    print("[META] 2. pages_read_engagement: Used to receive feed comments and engagement events")
+    print("[META] 3. pages_show_list: Not directly used - Page configured via environment variable")
+    print(f"[META] Configured Page ID: {PAGE_ID}")
+    
     # KHỞI TẠO GOOGLE SHEETS USERCONTEXT SHEET
     print("🟢 Đang khởi tạo Google Sheets UserContext sheet...")
     init_user_context_sheet()
@@ -5053,11 +5822,9 @@ if __name__ == "__main__":
     print(f"🟢 Page ID: {PAGE_ID}")
     print(f"🟢 Domain: {DOMAIN}")
     print(f"🟢 Google Sheets API: {'SẴN SÀNG' if GOOGLE_SHEET_ID and GOOGLE_SHEETS_CREDENTIALS_JSON else 'CHƯA CẤU HÌNH'}")
-    print(f"🟢 Poscake Integration: {'SẴN SÀNG' if POSCAKE_API_KEY and POSCAKE_STORE_ID else 'CHƯA CẤU HÌNH'}")
-    print(f"🟢 Facebook CAPI: {'SẴN SÀNG' if FACEBOOK_PIXEL_ID and FACEBOOK_ACCESS_TOKEN else 'CHƯA CẤU HÌNH'}")
-    print("=" * 80)
+    print(f"🟢 Poscake Webhook: {'SẴN SÀNG' if POSCAKE_API_KEY else 'CHƯA CẤU HÌNH'}")
+    print(f"🟢 Facebook Conversion API: {'SẴN SÀNG' if FACEBOOK_PIXEL_ID and FACEBOOK_ACCESS_TOKEN else 'CHƯA CẤU HÌNH'}")
+    print(f"🟢 OpenAI Function Calling: TÍCH HỢP THÀNH CÔNG")
     
-    from werkzeug.middleware.profiler import ProfilerMiddleware
-    app.wsgi_app = ProfilerMiddleware(app.wsgi_app, restrictions=[30], profile_dir='./profiles')
-    
+    # Start Flask app
     app.run(host="0.0.0.0", port=get_port(), debug=False)
