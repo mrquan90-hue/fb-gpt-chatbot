@@ -26,31 +26,6 @@ from openai import OpenAI
 app = Flask(__name__)
 
 # ============================================
-# FACEBOOK PERMISSIONS EXPLANATION FOR META APP REVIEW
-# ============================================
-"""
-FACEBOOK APP PERMISSIONS USED AND THEIR PURPOSE:
-
-1. pages_show_list:
-   - Purpose: To retrieve the list of Facebook Pages managed by the authenticated user/Page.
-   - Used when: The app needs to identify which Pages the user has access to for proper Page management.
-   - Why needed: To ensure the bot operates on the correct Page and has proper authorization.
-
-2. pages_manage_metadata:
-   - Purpose: To read and manage Page metadata (Page name, category, settings, profile picture, etc.).
-   - Used when: Fetching Page information like fanpage name, checking Page settings, and managing Page properties.
-   - Why needed: To display correct Page information to users and maintain proper Page branding.
-
-3. pages_read_engagement:
-   - Purpose: To read Page posts, comments, reactions, and other engagement data.
-   - Used when: Receiving webhook events for comments on Page posts, tracking user interactions.
-   - Why needed: To enable the bot to respond to comments on Page posts and track user engagement.
-   
-Note: This app uses Page Access Token provided via environment variables, not Facebook Login.
-All permissions are granted at the Page level through the Facebook App Dashboard.
-"""
-
-# ============================================
 # ENV & CONFIG - THÊM POSCAKE, PAGE_ID VÀ FACEBOOK CAPI
 # ============================================
 PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN", "").strip()
@@ -74,13 +49,6 @@ PAGE_ID = os.getenv("PAGE_ID", "516937221685203").strip()
 FACEBOOK_PIXEL_ID = os.getenv("FACEBOOK_PIXEL_ID", "").strip()
 FACEBOOK_ACCESS_TOKEN = os.getenv("FACEBOOK_ACCESS_TOKEN", "").strip()
 FACEBOOK_API_VERSION = os.getenv("FACEBOOK_API_VERSION", "v18.0").strip()
-
-# ============================================
-# Cấu hình Fchat API để thay thế Facebook Graph API
-# ============================================
-FCHAT_API_TOKEN = os.getenv("FCHAT_TOKEN", "").strip()
-FCHAT_SHOP_ID = os.getenv("FCHAT_SHOP_ID", "63a513b338ce6f65e845e5e1").strip()
-FCHAT_API_BASE_URL = os.getenv("FCHAT_API_BASE_URL", "https://fchat.vn/api").strip()
 
 # ============================================
 # GOOGLE SHEETS API CONFIGURATION
@@ -543,10 +511,6 @@ FANPAGE_NAME_CACHE_TIME = 0
 FANPAGE_NAME_CACHE_TTL = 3600
 
 def get_fanpage_name_from_api():
-    """
-    Fetch Page metadata using pages_manage_metadata permission.
-    This permission is required to read Page information like name, category, and settings.
-    """
     global FANPAGE_NAME_CACHE, FANPAGE_NAME_CACHE_TIME
     
     now = time.time()
@@ -561,30 +525,20 @@ def get_fanpage_name_from_api():
         return FANPAGE_NAME_CACHE
     
     try:
-        # [META] Using pages_manage_metadata permission to read Page metadata
-        print(f"[META] Using pages_manage_metadata to retrieve Page name and metadata")
-        url = f"https://graph.facebook.com/v12.0/me?fields=name,category&access_token={PAGE_ACCESS_TOKEN}"
+        url = f"https://graph.facebook.com/v12.0/me?fields=name&access_token={PAGE_ACCESS_TOKEN}"
         response = requests.get(url, timeout=5)
         
         if response.status_code == 200:
             data = response.json()
             page_name = data.get('name', FANPAGE_NAME)
-            page_category = data.get('category', 'N/A')
-            page_id = data.get('id', 'N/A')
-            
             FANPAGE_NAME_CACHE = page_name
             FANPAGE_NAME_CACHE_TIME = now
-            
-            # [META] Log successful metadata retrieval
-            print(f"[META] Retrieved Page metadata via pages_manage_metadata: ID={page_id}, Name={page_name}, Category={page_category}")
             return page_name
         else:
-            print(f"[META] Failed to retrieve Page metadata: HTTP {response.status_code}")
             FANPAGE_NAME_CACHE = FANPAGE_NAME
             FANPAGE_NAME_CACHE_TIME = now
             return FANPAGE_NAME_CACHE
     except Exception as e:
-        print(f"[META] Exception while retrieving Page metadata: {e}")
         FANPAGE_NAME_CACHE = FANPAGE_NAME
         FANPAGE_NAME_CACHE_TIME = now
         return FANPAGE_NAME_CACHE
@@ -1378,31 +1332,31 @@ def is_bot_generated_echo(echo_text: str, app_id: str = "", attachments: list = 
     return False
 
 # ============================================
-# HÀM LẤY NỘI DUNG BÀI VIẾT TỪ FCHAT API (THAY THẾ FACEBOOK GRAPH API)
+# HÀM LẤY NỘI DUNG BÀI VIẾT TỪ FACEBOOK GRAPH API
 # ============================================
 
-def get_post_content_from_fchat(post_id: str) -> Optional[dict]:
+def get_post_content_from_facebook(post_id: str) -> Optional[dict]:
     """
-    Lấy nội dung bài viết từ Fchat API thay vì Facebook Graph API
+    Lấy nội dung bài viết từ Facebook Graph API
     """
-    if not FCHAT_API_TOKEN or not FCHAT_SHOP_ID:
-        print(f"[GET POST CONTENT] Thiếu FCHAT_API_TOKEN hoặc FCHAT_SHOP_ID")
+    if not PAGE_ACCESS_TOKEN:
+        print(f"[GET POST CONTENT] Thiếu PAGE_ACCESS_TOKEN")
         return None
     
     try:
-        # Fchat API endpoint để lấy nội dung bài viết
-        url = f"{FCHAT_API_BASE_URL}/shops/{FCHAT_SHOP_ID}/facebook/posts/{post_id}"
-        headers = {
-            'Authorization': f'Bearer {FCHAT_API_TOKEN}',
-            'Content-Type': 'application/json'
+        # Facebook Graph API endpoint để lấy nội dung bài viết
+        url = f"https://graph.facebook.com/v18.0/{post_id}"
+        params = {
+            'fields': 'message,created_time,permalink_url',
+            'access_token': PAGE_ACCESS_TOKEN
         }
         
-        print(f"[GET POST CONTENT] Gọi Fchat API: {url}")
-        response = requests.get(url, headers=headers, timeout=10)
+        print(f"[GET POST CONTENT] Gọi Facebook Graph API: {url}")
+        response = requests.get(url, params=params, timeout=10)
         
         if response.status_code == 200:
             data = response.json()
-            print(f"[GET POST CONTENT] Đã lấy nội dung bài viết {post_id} từ Fchat")
+            print(f"[GET POST CONTENT] Đã lấy nội dung bài viết {post_id} từ Facebook Graph API")
             
             # Chuẩn hóa dữ liệu trả về để tương thích với code cũ
             post_data = {
@@ -1413,9 +1367,26 @@ def get_post_content_from_fchat(post_id: str) -> Optional[dict]:
             }
             return post_data
         else:
-            print(f"[GET POST CONTENT] Lỗi Fchat API {response.status_code}: {response.text[:200]}")
+            print(f"[GET POST CONTENT] Lỗi Facebook Graph API {response.status_code}: {response.text[:200]}")
+            
+            # Nếu token hết hạn hoặc thiếu quyền
+            if response.status_code == 400 or response.status_code == 403:
+                error_data = response.json().get('error', {})
+                error_message = error_data.get('message', '')
+                error_code = error_data.get('code', 0)
+                print(f"[GET POST CONTENT] Lỗi Facebook API: {error_message} (code: {error_code})")
+                
+                # Kiểm tra các lỗi phổ biến
+                if "access token" in error_message.lower():
+                    print(f"[GET POST CONTENT] CÓ THỂ PAGE_ACCESS_TOKEN ĐÃ HẾT HẠN HOẶC KHÔNG ĐỦ QUYỀN!")
+                elif "permission" in error_message.lower():
+                    print(f"[GET POST CONTENT] THIẾU QUYỀN TRUY CẬP! Cần quyền 'pages_read_engagement'")
+            
             return None
             
+    except requests.exceptions.Timeout:
+        print(f"[GET POST CONTENT] Timeout khi gọi Facebook Graph API")
+        return None
     except Exception as e:
         print(f"[GET POST CONTENT] Exception: {e}")
         return None
@@ -1541,19 +1512,17 @@ def extract_ms_from_post_content(post_data: dict) -> Optional[str]:
     return None
 
 # ============================================
-# HÀM XỬ LÝ COMMENT TỪ FEED (HOÀN CHỈNH - ĐÃ SỬA SỬ DỤNG FCHAT API)
+# HÀM XỬ LÝ COMMENT TỪ FEED (HOÀN CHỈNH - ĐÃ SỬA SỬ DỤNG FACEBOOK GRAPH API)
 # ============================================
 
 def handle_feed_comment(change_data: dict):
     """
     Xử lý comment từ feed với logic:
     1. Lấy post_id từ comment
-    2. Lấy nội dung bài viết gốc từ Fchat API
+    2. Lấy nội dung bài viết gốc từ Facebook Graph API
     3. Trích xuất MS từ caption (CHỈ DÙNG REGEX)
     4. Load products và kiểm tra tồn tại
     5. Cập nhật context cho user và gửi tin nhắn tự động
-    
-    This function uses pages_read_engagement permission to receive comment events.
     """
     try:
         # 1. Lấy thông tin cơ bản
@@ -1567,10 +1536,6 @@ def handle_feed_comment(change_data: dict):
             print(f"[FEED COMMENT] Thiếu user_id hoặc post_id")
             return None
         
-        # [META] Log comment event received via pages_read_engagement permission
-        print(f"[META] Received comment event via pages_read_engagement permission")
-        print(f"[META] Page: {PAGE_ID} | Post: {post_id} | User: {user_id}")
-        
         print(f"[FEED COMMENT] User {user_id} ({user_name}) comment: '{message_text}' trên post {post_id}")
         
         # 2. Kiểm tra xem có phải comment từ page không (bỏ qua)
@@ -1578,11 +1543,11 @@ def handle_feed_comment(change_data: dict):
             print(f"[FEED COMMENT] Bỏ qua comment từ chính page")
             return None
         
-        # 3. Lấy nội dung bài viết gốc từ Fchat API (thay vì Facebook Graph API)
-        post_data = get_post_content_from_fchat(post_id)
+        # 3. Lấy nội dung bài viết gốc từ Facebook Graph API
+        post_data = get_post_content_from_facebook(post_id)
         
         if not post_data:
-            print(f"[FEED COMMENT] Không lấy được nội dung bài viết {post_id} từ Fchat")
+            print(f"[FEED COMMENT] Không lấy được nội dung bài viết {post_id} từ Facebook Graph API")
             return None
         
         # LOG CHI TIẾT ĐỂ DEBUG
@@ -1926,7 +1891,7 @@ def load_products(force=False):
 
         for ms, p in products.items():
             colors = sorted(list(p.get("all_colors") or []))
-            sizes = sorted(list(p.get("all_sizes", set())))
+            sizes = sorted(list(p.get("all_sizes") or []))
             p["màu (Thuộc tính)"] = ", ".join(colors) if colors else p.get("màu (Thuộc tính)", "")
             p["size (Thuộc tính)"] = ", ".join(sizes) if sizes else p.get("size (Thuộc tính)", "")
             
@@ -2769,9 +2734,6 @@ def prepare_user_data_for_capi(uid: str, phone: str = None, client_ip: str = Non
     fbclid = get_fbclid_from_context(uid)
     if fbclid:
         user_data["fbc"] = f"fb.1.{int(time.time())}.{fbclid}"
-    
-    # Thêm FBP cookie mô phỏng
-    user_data["fbp"] = f"fb.1.{int(time.time())}.{uid[:10] if uid else str(int(time.time()))}"
     
     # Hash phone nếu có
     if phone:
@@ -3919,23 +3881,23 @@ def test_poscake_webhook():
     }), 200
 
 # ============================================
-# DEBUG FEED COMMENT ENDPOINT (SỬ DỤNG FCHAT API)
+# DEBUG FEED COMMENT ENDPOINT (SỬ DỤNG FACEBOOK GRAPH API)
 # ============================================
 
 @app.route("/debug-feed-comment", methods=["GET"])
 def debug_feed_comment():
-    """Debug endpoint cho feed comment processing với Fchat API"""
+    """Debug endpoint cho feed comment processing với Facebook Graph API"""
     post_id = request.args.get("post_id", "516937221685203_1775036843322177")
     
-    # Test hàm get_post_content_from_fchat
-    post_data = get_post_content_from_fchat(post_id)
+    # Test hàm get_post_content_from_facebook
+    post_data = get_post_content_from_facebook(post_id)
     
     if not post_data:
         return jsonify({
             "status": "error",
-            "message": "Không lấy được nội dung bài viết từ Fchat API",
+            "message": "Không lấy được nội dung bài viết từ Facebook Graph API",
             "post_id": post_id,
-            "fchat_configured": bool(FCHAT_API_TOKEN and FCHAT_SHOP_ID)
+            "facebook_configured": bool(PAGE_ACCESS_TOKEN)
         }), 400
     
     # Test hàm extract_ms_from_post_content
@@ -3944,7 +3906,7 @@ def debug_feed_comment():
     return jsonify({
         "post_id": post_id,
         "extracted_ms": ms,
-        "fchat_api_used": True,
+        "facebook_api_used": True,
         "message_preview": post_data["message"][:200] if post_data.get("message") else "No message",
         "patterns_tested": [
             r"\[(MS\d{2,6})\]",
@@ -3955,25 +3917,24 @@ def debug_feed_comment():
     })
 
 # ============================================
-# TEST FEED COMMENT ENDPOINT (SỬ DỤNG FCHAT API)
+# TEST FEED COMMENT ENDPOINT (SỬ DỤNG FACEBOOK GRAPH API)
 # ============================================
 
 @app.route("/test-feed-comment", methods=["GET"])
 def test_feed_comment():
-    """Test endpoint cho feed comment processing với Fchat API"""
+    """Test endpoint cho feed comment processing với Facebook Graph API"""
     post_id = request.args.get("post_id", "516937221685203_1775049683320893")
     
-    # Test hàm get_post_content_from_fchat
-    post_data = get_post_content_from_fchat(post_id)
+    # Test hàm get_post_content_from_facebook
+    post_data = get_post_content_from_facebook(post_id)
     
     if not post_data:
         return jsonify({
             "status": "error",
-            "message": "Không lấy được nội dung bài viết từ Fchat API",
+            "message": "Không lấy được nội dung bài viết từ Facebook Graph API",
             "post_id": post_id,
-            "fchat_api_configured": bool(FCHAT_API_TOKEN and FCHAT_SHOP_ID),
-            "fchat_api_token_length": len(FCHAT_API_TOKEN) if FCHAT_API_TOKEN else 0,
-            "fchat_shop_id": FCHAT_SHOP_ID
+            "facebook_configured": bool(PAGE_ACCESS_TOKEN),
+            "page_access_token_length": len(PAGE_ACCESS_TOKEN) if PAGE_ACCESS_TOKEN else 0,
         }), 400
     
     # Test hàm extract_ms_from_post_content
@@ -4004,7 +3965,7 @@ def test_feed_comment():
     return jsonify({
         "status": "success",
         "post_id": post_id,
-        "fchat_api_used": True,
+        "facebook_api_used": True,
         "post_content_preview": post_data.get('message', '')[:200] + "..." if post_data.get('message') else "No message",
         "detected_ms": detected_ms,
         "final_ms": final_ms if detected_ms else None,
@@ -4081,22 +4042,19 @@ def home():
 
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
-    # [META] Webhook verification endpoint - requires pages_read_engagement permission
     if request.method == "GET":
         mode = request.args.get("hub.mode")
         token = request.args.get("hub.verify_token")
         challenge = request.args.get("hub.challenge")
         
         if mode == "subscribe" and token == VERIFY_TOKEN:
-            print("[META] Webhook verification successful - pages_read_engagement permission confirmed")
+            print("[WEBHOOK VERIFY] Success!")
             return challenge, 200
         else:
-            print("[META] Webhook verification failed")
+            print("[WEBHOOK VERIFY] Failed!")
             return "Verification token mismatch", 403
 
-    # [META] Webhook event processing - pages_read_engagement permission in use
     data = request.get_json() or {}
-    print("[META] Webhook received event via pages_read_engagement permission")
     print("Webhook received:", json.dumps(data, ensure_ascii=False)[:500])
 
     entry = data.get("entry", [])
@@ -4115,7 +4073,7 @@ def webhook():
                     if "message" in value and "post_id" in value:
                         print(f"[FEED COMMENT] Đang xử lý comment từ feed...")
                         
-                        # Gọi hàm xử lý comment (SỬ DỤNG FCHAT API)
+                        # Gọi hàm xử lý comment (SỬ DỤNG FACEBOOK GRAPH API)
                         handle_feed_comment(value)
                     
                     continue
@@ -5522,8 +5480,8 @@ def check_env():
         "GOOGLE_SHEETS_CREDENTIALS_JSON": "CÓ" if GOOGLE_SHEETS_CREDENTIALS_JSON else "KHÔNG",
         "SHEET_ID_LENGTH": len(GOOGLE_SHEET_ID) if GOOGLE_SHEET_ID else 0,
         "CREDENTIALS_LENGTH": len(GOOGLE_SHEETS_CREDENTIALS_JSON) if GOOGLE_SHEETS_CREDENTIALS_JSON else 0,
-        "FCHAT_API_TOKEN": "CÓ" if FCHAT_API_TOKEN else "KHÔNG",
-        "FCHAT_SHOP_ID": FCHAT_SHOP_ID if FCHAT_SHOP_ID else "KHÔNG"
+        "FCHAT_API_TOKEN": "CÓ" if FCHAT_TOKEN else "KHÔNG",
+        "FCHAT_SHOP_ID": "CÓ" if FCHAT_WEBHOOK_URL else "KHÔNG"
     })
 
 @app.route("/test-context-save", methods=["GET"])
@@ -5614,21 +5572,18 @@ def health_check():
     
     total_variants = sum(len(p['variants']) for p in PRODUCTS.values())
     
-    # Kiểm tra feed comment capability với Fchat API
+    # Kiểm tra feed comment capability với Facebook Graph API
     feed_comment_test = "Ready"
-    if FCHAT_API_TOKEN and FCHAT_SHOP_ID:
-        feed_comment_test = "✅ Sẵn sàng (Fchat API)"
+    if PAGE_ACCESS_TOKEN:
+        feed_comment_test = "✅ Sẵn sàng (Facebook Graph API)"
     else:
-        feed_comment_test = "⚠️ Cần cấu hình FCHAT_API_TOKEN và FCHAT_SHOP_ID"
+        feed_comment_test = "⚠️ Cần cấu hình PAGE_ACCESS_TOKEN"
     
     # Kiểm tra persistent storage với Google Sheets
     google_sheets_status = "✅ Đã cấu hình" if GOOGLE_SHEET_ID and GOOGLE_SHEETS_CREDENTIALS_JSON else "⚠️ Chưa cấu hình"
     
     # Kiểm tra Facebook Conversion API
     facebook_capi_status = "✅ Đã cấu hình" if FACEBOOK_PIXEL_ID and FACEBOOK_ACCESS_TOKEN else "⚠️ Chưa cấu hình"
-    
-    # [META] Check pages_show_list permission usage - Note: This app uses a single pre-configured Page
-    pages_show_list_status = "✅ Configured via environment variable (PAGE_ID)"
     
     return {
         "status": "healthy",
@@ -5640,16 +5595,10 @@ def health_check():
         "fanpage_name": current_fanpage_name,
         "page_id": PAGE_ID,
         "feed_comment_processing": feed_comment_test,
-        "fchat_api": {
-            "token_configured": bool(FCHAT_API_TOKEN),
-            "shop_id": FCHAT_SHOP_ID,
-            "base_url": FCHAT_API_BASE_URL
-        },
-        "facebook_permissions": {
-            "pages_show_list": pages_show_list_status,
-            "pages_manage_metadata": "✅ Active (used in get_fanpage_name_from_api)",
-            "pages_read_engagement": "✅ Active (used in webhook feed comment processing)",
-            "permissions_logging": "✅ Enabled (see [META] logs in stdout)"
+        "facebook_graph_api": {
+            "token_configured": bool(PAGE_ACCESS_TOKEN),
+            "api_version": "v18.0",
+            "required_permissions": ["pages_read_engagement", "pages_manage_metadata"]
         },
         "persistent_storage": {
             "enabled": True,
@@ -5704,14 +5653,14 @@ def health_check():
         "feed_comment_processing": {
             "enabled": True,
             "logic": "Lấy MS từ caption bài viết khi user comment",
-            "api_used": "Fchat API (thay thế Facebook Graph API)",
+            "api_used": "Facebook Graph API (trực tiếp)",
             "capabilities": [
                 "Detect MS từ bài viết gốc (chỉ dùng regex)",
                 "Auto reply với thông tin sản phẩm chi tiết",
                 "Cập nhật context cho user và reset counter",
                 "Chỉ gửi tin nhắn tự động khi real_message_count = 0"
             ],
-            "required_config": "FCHAT_API_TOKEN và FCHAT_SHOP_ID"
+            "required_config": "PAGE_ACCESS_TOKEN với quyền pages_read_engagement"
         },
         "context_persistence": {
             "enabled": True,
@@ -5748,7 +5697,7 @@ def health_check():
             "facebook_conversion_api": True,
             "async_event_processing": True,
             "smart_event_cache": True,
-            "fchat_api_integration": True
+            "facebook_graph_api_integration": True
         }
     }, 200
 
@@ -5790,13 +5739,6 @@ if __name__ == "__main__":
     print(f"🟢 Port: {get_port()}")
     print("=" * 80)
     
-    # [META] Log Facebook App Permissions Usage
-    print("[META] Facebook App Permissions in use:")
-    print("[META] 1. pages_manage_metadata: Used to fetch Page name and metadata")
-    print("[META] 2. pages_read_engagement: Used to receive feed comments and engagement events")
-    print("[META] 3. pages_show_list: Not directly used - Page configured via environment variable")
-    print(f"[META] Configured Page ID: {PAGE_ID}")
-    
     # KHỞI TẠO GOOGLE SHEETS USERCONTEXT SHEET
     print("🟢 Đang khởi tạo Google Sheets UserContext sheet...")
     init_user_context_sheet()
@@ -5824,7 +5766,7 @@ if __name__ == "__main__":
     print(f"🟢 Google Sheets API: {'SẴN SÀNG' if GOOGLE_SHEET_ID and GOOGLE_SHEETS_CREDENTIALS_JSON else 'CHƯA CẤU HÌNH'}")
     print(f"🟢 Poscake Webhook: {'SẴN SÀNG' if POSCAKE_API_KEY else 'CHƯA CẤU HÌNH'}")
     print(f"🟢 Facebook Conversion API: {'SẴN SÀNG' if FACEBOOK_PIXEL_ID and FACEBOOK_ACCESS_TOKEN else 'CHƯA CẤU HÌNH'}")
-    print(f"🟢 OpenAI Function Calling: TÍCH HỢP THÀNH CÔNG")
+    print(f"🟢 OpenAI Function Calling: SẴN SÀNG")
+    print("=" * 80)
     
-    # Start Flask app
     app.run(host="0.0.0.0", port=get_port(), debug=False)
