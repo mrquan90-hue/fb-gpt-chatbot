@@ -1,0 +1,615 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Đặt hàng - {{ product_name[:30] }}...</title>
+    <link rel="preconnect" href="https://cdnjs.cloudflare.com" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <style>
+        /* Critical CSS - Load ngay */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+            min-height: 100vh;
+            padding: 20px;
+            color: #333;
+        }
+        
+        .container {
+            max-width: 480px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+            overflow: hidden;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #1DB954 0%, #17a74d 100%);
+            padding: 20px;
+            text-align: center;
+            color: white;
+        }
+        
+        .header h2 {
+            font-size: 18px;
+            font-weight: 600;
+            margin: 0;
+        }
+        
+        .content {
+            padding: 20px;
+        }
+        
+        .product-section {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 25px;
+            padding-bottom: 20px;
+            border-bottom: 1px solid #eee;
+        }
+        
+        .product-image-container {
+            width: 120px;
+            height: 120px;
+            flex-shrink: 0;
+            border-radius: 12px;
+            overflow: hidden;
+            background: #f8f9fa;
+            position: relative;
+        }
+        
+        .product-image {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            transition: opacity 0.3s ease;
+        }
+        
+        .product-image.loading {
+            opacity: 0.3;
+        }
+        
+        .product-info {
+            flex: 1;
+            min-width: 0;
+        }
+        
+        .product-code {
+            font-size: 12px;
+            color: #666;
+            background: #f5f5f5;
+            padding: 6px 10px;
+            border-radius: 6px;
+            display: inline-block;
+            margin-bottom: 8px;
+            font-family: 'Courier New', monospace;
+            font-weight: 500;
+        }
+        
+        .product-title {
+            font-size: 16px;
+            font-weight: 600;
+            margin: 0 0 8px 0;
+            line-height: 1.4;
+            color: #222;
+            word-break: break-word;
+        }
+        
+        .product-price {
+            color: #FF3B30;
+            font-size: 18px;
+            font-weight: 700;
+            margin-top: 10px;
+        }
+        
+        .form-group {
+            margin-bottom: 18px;
+        }
+        
+        .form-group label {
+            display: block;
+            margin-bottom: 6px;
+            font-size: 14px;
+            font-weight: 500;
+            color: #444;
+        }
+        
+        .form-control {
+            width: 100%;
+            padding: 12px 15px;
+            border: 2px solid #e1e5e9;
+            border-radius: 10px;
+            font-size: 14px;
+            background: white;
+            font-family: inherit;
+        }
+        
+        .select2-container {
+            width: 100% !important;
+        }
+        
+        .address-row {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+        
+        .total-section {
+            background: #f8f9fa;
+            padding: 18px;
+            border-radius: 12px;
+            margin: 25px 0;
+            text-align: center;
+        }
+        
+        .total-label {
+            font-size: 14px;
+            color: #666;
+            margin-bottom: 5px;
+        }
+        
+        .total-amount {
+            font-size: 24px;
+            font-weight: 700;
+            color: #FF3B30;
+        }
+        
+        .submit-btn {
+            width: 100%;
+            padding: 16px;
+            border: none;
+            border-radius: 50px;
+            background: linear-gradient(135deg, #1DB954 0%, #17a74d 100%);
+            color: white;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            margin-top: 10px;
+            font-family: inherit;
+        }
+        
+        .submit-btn:disabled {
+            opacity: 0.7;
+            cursor: not-allowed;
+        }
+        
+        .loading-spinner {
+            display: inline-block;
+            width: 18px;
+            height: 18px;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-top: 2px solid white;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .note {
+            margin-top: 15px;
+            font-size: 12px;
+            color: #888;
+            text-align: center;
+            line-height: 1.5;
+        }
+        
+        @media (max-width: 480px) {
+            .container {
+                border-radius: 15px;
+            }
+            
+            .content {
+                padding: 15px;
+            }
+            
+            .product-section {
+                flex-direction: column;
+            }
+            
+            .product-image-container {
+                width: 100%;
+                height: 200px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h2>ĐẶT HÀNG - {{ current_fanpage_name }}</h2>
+        </div>
+        
+        <div class="content">
+            <!-- Product Info Section -->
+            <div class="product-section">
+                <div class="product-image-container">
+                    <img id="product-image" class="product-image" 
+                         src="data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTIwIiBoZWlnaHQ9IjEyMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTIwIiBoZWlnaHQ9IjEyMCIgZmlsbD0iI2Y1ZjVmNSIvPjx0ZXh0IHg9IjYwIiB5PSI2MCIgZm9udC1mYW1pbHk9IkFyaWFsIiBmb250LXNpemU9IjEyIiBmaWxsPSIjY2NjY2NjIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBkeT0iLjNlbSI+TG9hZGluZy4uLjwvdGV4dD48L3N2Zz4=" 
+                         data-src="{{ default_image }}" 
+                         alt="{{ product_name }}"
+                         onerror="this.src='data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTIwIiBoZWlnaHQ9IjEyMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTIwIiBoZWlnaHQ9IjEyMCIgZmlsbD0iI2UzZTNlMyIvPjx0ZXh0IHg9IjYwIiB5PSI2MCIgZm9udC1mYW1pbHk9IkFyaWFsIiBmb250LXNpemU9IjEyIiBmaWxsPSIjOTk5OTk5IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBkeT0iLjNlbSI+Tm8gSW1hZ2U8L3RleHQ+PC9zdmc+'"
+                         loading="lazy">
+                </div>
+                <div class="product-info">
+                    <div class="product-code">Mã: {{ ms }}</div>
+                    <h3 class="product-title">{{ product_name }}</h3>
+                    <div class="product-price">
+                        <span id="price-display">{{ price_int|format_number }} đ</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Order Form -->
+            <form id="orderForm">
+                <!-- Color Selection -->
+                <div class="form-group">
+                    <label for="color">Màu sắc:</label>
+                    <select id="color" class="form-control">
+                        {% for color in colors %}
+                        <option value="{{ color }}">{{ color }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <!-- Size Selection -->
+                <div class="form-group">
+                    <label for="size">Size:</label>
+                    <select id="size" class="form-control">
+                        {% for size in sizes %}
+                        <option value="{{ size }}">{{ size }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <!-- Quantity -->
+                <div class="form-group">
+                    <label for="quantity">Số lượng:</label>
+                    <input type="number" id="quantity" class="form-control" value="1" min="1">
+                </div>
+
+                <!-- Total Price -->
+                <div class="total-section">
+                    <div class="total-label">Tạm tính:</div>
+                    <div class="total-amount" id="total-display">{{ price_int|format_number }} đ</div>
+                </div>
+
+                <!-- Customer Information -->
+                <div class="form-group">
+                    <label for="customerName">Họ và tên:</label>
+                    <input type="text" id="customerName" class="form-control" required>
+                </div>
+
+                <div class="form-group">
+                    <label for="phone">Số điện thoại:</label>
+                    <input type="tel" id="phone" class="form-control" required>
+                </div>
+
+                <!-- Address Section - Sử dụng static list cho nhanh -->
+                <div class="form-group">
+                    <label for="province">Tỉnh/Thành phố:</label>
+                    <select id="province" class="form-control" required>
+                        <option value="">Chọn tỉnh/thành phố</option>
+                        <option value="Hà Nội">Hà Nội</option>
+                        <option value="TP Hồ Chí Minh">TP Hồ Chí Minh</option>
+                        <option value="Đà Nẵng">Đà Nẵng</option>
+                        <option value="Hải Phòng">Hải Phòng</option>
+                        <option value="Cần Thơ">Cần Thơ</option>
+                        <option value="An Giang">An Giang</option>
+                        <option value="Bà Rịa - Vũng Tàu">Bà Rịa - Vũng Tàu</option>
+                        <option value="Bắc Giang">Bắc Giang</option>
+                        <option value="Bắc Kạn">Bắc Kạn</option>
+                        <option value="Bạc Liêu">Bạc Liêu</option>
+                        <option value="Bắc Ninh">Bắc Ninh</option>
+                        <option value="Bến Tre">Bến Tre</option>
+                        <option value="Bình Định">Bình Định</option>
+                        <option value="Bình Dương">Bình Dương</option>
+                        <option value="Bình Phước">Bình Phước</option>
+                        <option value="Bình Thuận">Bình Thuận</option>
+                        <option value="Cà Mau">Cà Mau</option>
+                        <option value="Cao Bằng">Cao Bằng</option>
+                        <option value="Đắk Lắk">Đắk Lắk</option>
+                        <option value="Đắk Nông">Đắk Nông</option>
+                        <option value="Điện Biên">Điện Biên</option>
+                        <option value="Đồng Nai">Đồng Nai</option>
+                        <option value="Đồng Tháp">Đồng Tháp</option>
+                        <option value="Gia Lai">Gia Lai</option>
+                        <option value="Hà Giang">Hà Giang</option>
+                        <option value="Hà Nam">Hà Nam</option>
+                        <option value="Hà Tĩnh">Hà Tĩnh</option>
+                        <option value="Hải Dương">Hải Dương</option>
+                        <option value="Hậu Giang">Hậu Giang</option>
+                        <option value="Hòa Bình">Hòa Bình</option>
+                        <option value="Hưng Yên">Hưng Yên</option>
+                        <option value="Khánh Hòa">Khánh Hòa</option>
+                        <option value="Kiên Giang">Kiên Giang</option>
+                        <option value="Kon Tum">Kon Tum</option>
+                        <option value="Lai Châu">Lai Châu</option>
+                        <option value="Lâm Đồng">Lâm Đồng</option>
+                        <option value="Lạng Sơn">Lạng Sơn</option>
+                        <option value="Lào Cai">Lào Cai</option>
+                        <option value="Long An">Long An</option>
+                        <option value="Nam Định">Nam Định</option>
+                        <option value="Nghệ An">Nghệ An</option>
+                        <option value="Ninh Bình">Ninh Bình</option>
+                        <option value="Ninh Thuận">Ninh Thuận</option>
+                        <option value="Phú Thọ">Phú Thọ</option>
+                        <option value="Quảng Bình">Quảng Bình</option>
+                        <option value="Quảng Nam">Quảng Nam</option>
+                        <option value="Quảng Ngãi">Quảng Ngãi</option>
+                        <option value="Quảng Ninh">Quảng Ninh</option>
+                        <option value="Quảng Trị">Quảng Trị</option>
+                        <option value="Sóc Trăng">Sóc Trăng</option>
+                        <option value="Sơn La">Sơn La</option>
+                        <option value="Tây Ninh">Tây Ninh</option>
+                        <option value="Thái Bình">Thái Bình</option>
+                        <option value="Thái Nguyên">Thái Nguyên</option>
+                        <option value="Thanh Hóa">Thanh Hóa</option>
+                        <option value="Thừa Thiên Huế">Thừa Thiên Huế</option>
+                        <option value="Tiền Giang">Tiền Giang</option>
+                        <option value="Trà Vinh">Trà Vinh</option>
+                        <option value="Tuyên Quang">Tuyên Quang</option>
+                        <option value="Vĩnh Long">Vĩnh Long</option>
+                        <option value="Vĩnh Phúc">Vĩnh Phúc</option>
+                        <option value="Yên Bái">Yên Bái</option>
+                        <option value="Phú Yên">Phú Yên</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label for="district">Quận/Huyện:</label>
+                    <input type="text" id="district" class="form-control" placeholder="Nhập quận/huyện" required>
+                </div>
+
+                <div class="form-group">
+                    <label for="ward">Phường/Xã:</label>
+                    <input type="text" id="ward" class="form-control" placeholder="Nhập phường/xã" required>
+                </div>
+
+                <div class="form-group">
+                    <label for="addressDetail">Địa chỉ chi tiết:</label>
+                    <input type="text" id="addressDetail" class="form-control" placeholder="Số nhà, tên đường, thôn/xóm..." required>
+                </div>
+
+                <!-- Submit Button -->
+                <button type="button" id="submitBtn" class="submit-btn">
+                    ĐẶT HÀNG NGAY
+                </button>
+
+                <p class="note">
+                    Shop sẽ gọi xác nhận trong 5-10 phút. Thanh toán khi nhận hàng (COD).
+                </p>
+            </form>
+        </div>
+    </div>
+
+    <!-- Defer loading of non-critical JS -->
+    <script>
+        // Inline critical JS để form hoạt động ngay
+        document.addEventListener('DOMContentLoaded', function() {
+            const DOMAIN = '{{ domain }}';
+            const API_BASE_URL = '/api';
+            let BASE_PRICE = {{ price_int }};
+            
+            // Format price function
+            function formatPrice(n) {
+                return new Intl.NumberFormat('vi-VN').format(n) + ' đ';
+            }
+            
+            // Update price display
+            function updatePriceDisplay() {
+                const quantity = parseInt(document.getElementById('quantity').value) || 1;
+                const total = BASE_PRICE * quantity;
+                document.getElementById('total-display').textContent = formatPrice(total);
+            }
+            
+            // Load product image after page loads
+            function loadProductImage() {
+                const img = document.getElementById('product-image');
+                if (img.dataset.src) {
+                    // Create a new image to check if it loads
+                    const tempImg = new Image();
+                    tempImg.onload = function() {
+                        img.src = this.src;
+                        img.classList.remove('loading');
+                    };
+                    tempImg.onerror = function() {
+                        // Use fallback image
+                        img.src = 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTIwIiBoZWlnaHQ9IjEyMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTIwIiBoZWlnaHQ9IjEyMCIgZmlsbD0iI2UzZTNlMyIvPjx0ZXh0IHg9IjYwIiB5PSI2MCIgZm9udC1mYW1pbHk9IkFyaWFsIiBmb250LXNpemU9IjEyIiBmaWxsPSIjOTk5OTk5IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBkeT0iLjNlbSI+Tm8gSW1hZ2U8L3RleHQ+PC9zdmc+';
+                    };
+                    tempImg.src = img.dataset.src;
+                }
+            }
+            
+            // Get variant info (ảnh và giá)
+            async function getVariantInfo(color, size) {
+                try {
+                    const response = await fetch(`${API_BASE_URL}/get-variant-info?ms={{ ms }}&color=${encodeURIComponent(color)}&size=${encodeURIComponent(size)}`);
+                    if (response.ok) {
+                        return await response.json();
+                    }
+                } catch (error) {
+                    console.log('Không thể lấy thông tin biến thể, sử dụng giá mặc định');
+                }
+                return null;
+            }
+            
+            // Update variant info when color/size changes
+            async function updateVariantInfo() {
+                const color = document.getElementById('color').value;
+                const size = document.getElementById('size').value;
+                
+                const variantInfo = await getVariantInfo(color, size);
+                if (variantInfo) {
+                    // Update image
+                    const img = document.getElementById('product-image');
+                    if (variantInfo.image) {
+                        const tempImg = new Image();
+                        tempImg.onload = function() {
+                            img.src = variantInfo.image;
+                        };
+                        tempImg.src = variantInfo.image;
+                    }
+                    
+                    // Update price
+                    if (variantInfo.price && variantInfo.price > 0) {
+                        BASE_PRICE = variantInfo.price;
+                        document.getElementById('price-display').textContent = formatPrice(BASE_PRICE);
+                        updatePriceDisplay();
+                    }
+                }
+            }
+            
+            // Submit order
+            async function submitOrder() {
+                const formData = {
+                    ms: '{{ ms }}',
+                    uid: '{{ uid }}',
+                    color: document.getElementById('color').value,
+                    size: document.getElementById('size').value,
+                    quantity: parseInt(document.getElementById('quantity').value) || 1,
+                    customerName: document.getElementById('customerName').value.trim(),
+                    phone: document.getElementById('phone').value.trim(),
+                    province: document.getElementById('province').value,
+                    district: document.getElementById('district').value.trim(),
+                    ward: document.getElementById('ward').value.trim(),
+                    addressDetail: document.getElementById('addressDetail').value.trim()
+                };
+                
+                // Validation
+                if (!formData.customerName) {
+                    alert('Vui lòng nhập họ và tên');
+                    return;
+                }
+                
+                if (!formData.phone) {
+                    alert('Vui lòng nhập số điện thoại');
+                    return;
+                }
+                
+                // Phone validation
+                const phoneRegex = /^(0[0-9]{9}|84[0-9]{9}|\+84[0-9]{9})$/;
+                const normalizedPhone = formData.phone.replace(/\s/g, '');
+                
+                if (!phoneRegex.test(normalizedPhone)) {
+                    alert('Số điện thoại không hợp lệ. Vui lòng nhập số 10 chữ số (VD: 0982155980)');
+                    return;
+                }
+                
+                formData.phone = normalizedPhone.replace('+84', '0').replace(/^84/, '0');
+                
+                if (!formData.province) {
+                    alert('Vui lòng chọn tỉnh/thành phố');
+                    return;
+                }
+                
+                if (!formData.district) {
+                    alert('Vui lòng nhập quận/huyện');
+                    return;
+                }
+                
+                if (!formData.ward) {
+                    alert('Vui lòng nhập phường/xã');
+                    return;
+                }
+                
+                if (!formData.addressDetail) {
+                    alert('Vui lòng nhập địa chỉ chi tiết');
+                    return;
+                }
+                
+                formData.fullAddress = `${formData.addressDetail}, ${formData.ward}, ${formData.district}, ${formData.province}`;
+                formData.unitPrice = BASE_PRICE;
+                formData.totalPrice = BASE_PRICE * formData.quantity;
+                
+                const submitBtn = document.getElementById('submitBtn');
+                const originalText = submitBtn.innerHTML;
+                submitBtn.innerHTML = '<span class="loading-spinner"></span> ĐANG XỬ LÝ...';
+                submitBtn.disabled = true;
+                
+                try {
+                    const response = await fetch(`${API_BASE_URL}/submit-order`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(formData)
+                    });
+                    
+                    const data = await response.json();
+                    
+                    if (response.ok) {
+                        const successMessage = `🎉 ĐÃ ĐẶT HÀNG THÀNH CÔNG!
+                        
+📦 Mã sản phẩm: {{ ms }}
+👤 Khách hàng: ${formData.customerName}
+📱 SĐT: ${formData.phone}
+📍 Địa chỉ: ${formData.fullAddress}
+💰 Đơn giá: ${BASE_PRICE.toLocaleString('vi-VN')} đ
+📦 Số lượng: ${formData.quantity}
+💰 Tổng tiền: ${formData.totalPrice.toLocaleString('vi-VN')} đ
+
+⏰ Shop sẽ liên hệ xác nhận trong 5-10 phút.
+🚚 Giao hàng bởi ViettelPost (COD)
+
+Cảm ơn quý khách đã đặt hàng! ❤️`;
+                        
+                        alert(successMessage);
+                        
+                        // Reset form after 1 second
+                        setTimeout(() => {
+                            document.getElementById('orderForm').reset();
+                            updatePriceDisplay();
+                            submitBtn.innerHTML = originalText;
+                            submitBtn.disabled = false;
+                        }, 1000);
+                        
+                    } else {
+                        alert('❌ ' + (data.message || 'Có lỗi xảy ra. Vui lòng thử lại sau'));
+                        submitBtn.innerHTML = originalText;
+                        submitBtn.disabled = false;
+                    }
+                } catch (error) {
+                    console.error('Lỗi khi đặt hàng:', error);
+                    alert('❌ Lỗi kết nối. Vui lòng kiểm tra mạng và thử lại!');
+                    submitBtn.innerHTML = originalText;
+                    submitBtn.disabled = false;
+                }
+            }
+            
+            // Initialize event listeners
+            function initialize() {
+                // Load image
+                loadProductImage();
+                
+                // Update price when quantity changes
+                document.getElementById('quantity').addEventListener('input', updatePriceDisplay);
+                
+                // Update variant info when color/size changes
+                document.getElementById('color').addEventListener('change', updateVariantInfo);
+                document.getElementById('size').addEventListener('change', updateVariantInfo);
+                
+                // Submit button
+                document.getElementById('submitBtn').addEventListener('click', submitOrder);
+                
+                // Auto-focus on name field
+                setTimeout(() => {
+                    document.getElementById('customerName').focus();
+                }, 500);
+            }
+            
+            // Initialize when page loads
+            initialize();
+        });
+    </script>
+</body>
+</html>
