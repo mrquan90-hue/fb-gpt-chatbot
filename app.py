@@ -217,7 +217,7 @@ def init_user_context_sheet():
         return False
 
 def save_user_context_to_sheets():
-    """Lưu USER_CONTEXT vào Google Sheets"""
+    """Lưu USER_CONTEXT vào Google Sheets - MỖI USER LÀ 1 DÒNG RIÊNG"""
     if not GOOGLE_SHEET_ID or not GOOGLE_SHEETS_CREDENTIALS_JSON:
         print("[SAVE CONTEXT] Chưa cấu hình Google Sheets, bỏ qua lưu context")
         return
@@ -228,16 +228,34 @@ def save_user_context_to_sheets():
             print("[SAVE CONTEXT] Không thể khởi tạo Google Sheets service")
             return
         
-        # Chuẩn bị dữ liệu để ghi
-        values = []
+        # Lấy tất cả dữ liệu hiện tại từ sheet
+        try:
+            result = service.spreadsheets().values().get(
+                spreadsheetId=GOOGLE_SHEET_ID,
+                range=f"{USER_CONTEXT_SHEET_NAME}!A2:L"
+            ).execute()
+            existing_values = result.get('values', [])
+        except Exception as e:
+            print(f"[SAVE CONTEXT] Lỗi khi lấy dữ liệu cũ: {e}")
+            existing_values = []
+        
+        # Tạo mapping user_id -> row index để cập nhật
+        user_row_map = {}
+        for i, row in enumerate(existing_values):
+            if len(row) > 0 and row[0]:  # Có user_id
+                user_row_map[row[0]] = i + 2  # +2 vì bắt đầu từ row 2
+        
+        # Chuẩn bị các request để cập nhật
+        update_requests = []
+        
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
         for user_id, context in USER_CONTEXT.items():
-            # Chỉ lưu context có dữ liệu
-            if not context:
+            # Kiểm tra user_id hợp lệ
+            if not user_id or len(user_id.strip()) < 5:
                 continue
             
-            # Kiểm tra thời gian cập nhật
+            # Chỉ lưu context có dữ liệu và có last_updated gần đây
             last_updated = context.get("last_updated", 0)
             if isinstance(last_updated, (int, float)):
                 if last_updated < time.time() - 86400 * 30:  # 30 ngày
@@ -246,7 +264,7 @@ def save_user_context_to_sheets():
                 # Nếu last_updated không phải số, sử dụng thời gian hiện tại
                 context["last_updated"] = time.time()
             
-            # Chuyển đổi dữ liệu thành chuỗi JSON để lưu
+            # Chuẩn bị dữ liệu
             product_history = json.dumps(context.get("product_history", []), ensure_ascii=False)
             order_data = json.dumps(context.get("order_data", {}), ensure_ascii=False)
             conversation_history = json.dumps(context.get("conversation_history", []), ensure_ascii=False)
@@ -260,51 +278,116 @@ def save_user_context_to_sheets():
             
             # Lấy các trường khác
             last_ms = context.get("last_ms", "")
-            last_msg_time = context.get("last_msg_time", "")
+            last_msg_time = context.get("last_msg_time", 0)
             real_message_count = context.get("real_message_count", 0)
             referral_source = context.get("referral_source", "")
             has_sent_first_carousel = context.get("has_sent_first_carousel", False)
             
-            row = [
-                user_id,
-                last_ms,
-                product_history,
-                order_data,
-                conversation_history,
-                str(real_message_count),
-                referral_source,
-                now,
-                phone,
-                customer_name,
-                str(last_msg_time),
-                str(has_sent_first_carousel)
+            # Chuẩn bị row data (12 cột)
+            row_data = [
+                user_id,  # Cột A: user_id
+                last_ms,  # Cột B: last_ms
+                product_history,  # Cột C: product_history
+                order_data,  # Cột D: order_data
+                conversation_history,  # Cột E: conversation_history
+                str(real_message_count),  # Cột F: real_message_count
+                referral_source,  # Cột G: referral_source
+                now,  # Cột H: last_updated
+                phone,  # Cột I: phone
+                customer_name,  # Cột J: customer_name
+                str(last_msg_time),  # Cột K: last_msg_time
+                str(has_sent_first_carousel)  # Cột L: has_sent_first_carousel
             ]
-            values.append(row)
-        
-        if values:
-            print(f"[CONTEXT SAVE] Đang lưu {len(values)} users vào Google Sheets...")
             
-            # Xóa toàn bộ dữ liệu cũ và ghi mới (đơn giản)
-            try:
-                service.spreadsheets().values().clear(
-                    spreadsheetId=GOOGLE_SHEET_ID,
-                    range=f"{USER_CONTEXT_SHEET_NAME}!A2:L"
-                ).execute()
-            except Exception as clear_error:
-                print(f"[CONTEXT CLEAR ERROR] Lỗi khi xóa dữ liệu cũ: {clear_error}")
-                # Nếu lỗi xóa, thử ghi đè lên
+            # Kiểm tra xem user đã có trong sheet chưa
+            if user_id in user_row_map:
+                # Cập nhật dòng hiện có
+                range_name = f"{USER_CONTEXT_SHEET_NAME}!A{user_row_map[user_id]}:L{user_row_map[user_id]}"
+                update_requests.append({
+                    'range': range_name,
+                    'values': [row_data]
+                })
+            else:
+                # Thêm dòng mới (sẽ thêm ở cuối)
                 pass
+        
+        # Nếu có dữ liệu mới, thêm vào cuối
+        new_rows = []
+        for user_id, context in USER_CONTEXT.items():
+            if not user_id or len(user_id.strip()) < 5:
+                continue
             
-            # Ghi dữ liệu mới
-            update_result = service.spreadsheets().values().update(
-                spreadsheetId=GOOGLE_SHEET_ID,
-                range=f"{USER_CONTEXT_SHEET_NAME}!A2",
-                valueInputOption="USER_ENTERED",
-                body={'values': values}
-            ).execute()
+            # Kiểm tra user_id đã có trong user_row_map chưa
+            if user_id not in user_row_map:
+                # Chuẩn bị row data cho user mới
+                product_history = json.dumps(context.get("product_history", []), ensure_ascii=False)
+                order_data = json.dumps(context.get("order_data", {}), ensure_ascii=False)
+                conversation_history = json.dumps(context.get("conversation_history", []), ensure_ascii=False)
+                
+                phone = ""
+                customer_name = ""
+                if context.get("order_data"):
+                    phone = context["order_data"].get("phone", "")
+                    customer_name = context["order_data"].get("customer_name", "")
+                
+                last_ms = context.get("last_ms", "")
+                last_msg_time = context.get("last_msg_time", 0)
+                real_message_count = context.get("real_message_count", 0)
+                referral_source = context.get("referral_source", "")
+                has_sent_first_carousel = context.get("has_sent_first_carousel", False)
+                
+                row_data = [
+                    user_id,
+                    last_ms,
+                    product_history,
+                    order_data,
+                    conversation_history,
+                    str(real_message_count),
+                    referral_source,
+                    now,
+                    phone,
+                    customer_name,
+                    str(last_msg_time),
+                    str(has_sent_first_carousel)
+                ]
+                new_rows.append(row_data)
+        
+        # Thực hiện cập nhật
+        if update_requests or new_rows:
+            print(f"[CONTEXT SAVE] Đang lưu {len(update_requests)} updates và {len(new_rows)} new rows vào Google Sheets...")
             
-            updated_cells = update_result.get('updatedCells', 0)
-            print(f"[CONTEXT SAVED] Đã lưu {len(values)} users ({updated_cells} cells) vào Google Sheets")
+            # Cập nhật các dòng hiện có
+            for update_req in update_requests:
+                try:
+                    service.spreadsheets().values().update(
+                        spreadsheetId=GOOGLE_SHEET_ID,
+                        range=update_req['range'],
+                        valueInputOption="USER_ENTERED",
+                        body={'values': update_req['values']}
+                    ).execute()
+                except Exception as e:
+                    print(f"[CONTEXT UPDATE ERROR] Lỗi khi cập nhật user: {e}")
+            
+            # Thêm dòng mới
+            if new_rows:
+                try:
+                    # Xác định vị trí thêm mới
+                    start_row = len(existing_values) + 2  # +2 vì bắt đầu từ row 2
+                    range_name = f"{USER_CONTEXT_SHEET_NAME}!A{start_row}"
+                    
+                    service.spreadsheets().values().append(
+                        spreadsheetId=GOOGLE_SHEET_ID,
+                        range=range_name,
+                        valueInputOption="USER_ENTERED",
+                        insertDataOption="INSERT_ROWS",
+                        body={'values': new_rows}
+                    ).execute()
+                    
+                    print(f"[CONTEXT SAVE] Đã thêm {len(new_rows)} users mới")
+                except Exception as e:
+                    print(f"[CONTEXT APPEND ERROR] Lỗi khi thêm users mới: {e}")
+            
+            print(f"[CONTEXT SAVED] Hoàn thành lưu context vào Google Sheets")
         else:
             print(f"[CONTEXT SAVE] Không có dữ liệu để lưu")
         
@@ -314,7 +397,7 @@ def save_user_context_to_sheets():
         traceback.print_exc()
 
 def load_user_context_from_sheets():
-    """Load USER_CONTEXT từ Google Sheets"""
+    """Load USER_CONTEXT từ Google Sheets - CHỈ LOAD DÒNG CÓ user_id KHÁC RỖNG"""
     if not GOOGLE_SHEET_ID or not GOOGLE_SHEETS_CREDENTIALS_JSON:
         print("[LOAD CONTEXT] Chưa cấu hình Google Sheets, bỏ qua load context")
         return
@@ -324,7 +407,7 @@ def load_user_context_from_sheets():
         if not service:
             return
         
-        # Lấy dữ liệu từ sheet
+        # Lấy dữ liệu từ sheet (KHÔNG load header)
         result = service.spreadsheets().values().get(
             spreadsheetId=GOOGLE_SHEET_ID,
             range=f"{USER_CONTEXT_SHEET_NAME}!A2:L"
@@ -334,66 +417,100 @@ def load_user_context_from_sheets():
         
         loaded_count = 0
         for row in values:
-            if len(row) < 8:  # Ít nhất có 8 cột bắt buộc
+            # Kiểm tra dòng có đủ dữ liệu và có user_id không
+            if len(row) < 1 or not row[0]:  # Cột đầu tiên là user_id
+                continue  # Bỏ qua dòng trống hoặc không có user_id
+            
+            user_id = row[0].strip()
+            if not user_id:
+                continue  # Bỏ qua user_id rỗng
+            
+            # Kiểm tra xem user_id có hợp lệ không (không phải là header)
+            if user_id.lower() in ['user_id', 'id', 'uid']:
                 continue
             
-            user_id = row[0]
-            if not user_id:
-                continue
+            # Xóa context cũ nếu có (đảm bảo không bị chồng chéo)
+            if user_id in USER_CONTEXT:
+                del USER_CONTEXT[user_id]
             
             # Tạo context mặc định
             context = default_user_context()
             
-            # Cập nhật từ dữ liệu Google Sheets
+            # Cập nhật từ dữ liệu Google Sheets (CÓ KIỂM TRA TỪNG CỘT)
+            # Cột 1: user_id (đã lấy)
+            # Cột 2: last_ms
             if len(row) > 1 and row[1]:
                 context["last_ms"] = row[1]
             
+            # Cột 3: product_history
             if len(row) > 2 and row[2]:
                 try:
                     context["product_history"] = json.loads(row[2])
                 except:
                     context["product_history"] = []
             
+            # Cột 4: order_data
             if len(row) > 3 and row[3]:
                 try:
                     context["order_data"] = json.loads(row[3])
                 except:
                     context["order_data"] = {}
             
+            # Cột 5: conversation_history
             if len(row) > 4 and row[4]:
                 try:
                     context["conversation_history"] = json.loads(row[4])
                 except:
                     context["conversation_history"] = []
             
+            # Cột 6: real_message_count
             if len(row) > 5 and row[5]:
                 try:
                     context["real_message_count"] = int(row[5])
                 except:
                     context["real_message_count"] = 0
             
+            # Cột 7: referral_source
             if len(row) > 6 and row[6]:
                 context["referral_source"] = row[6]
             
-            # Thêm các trường mới
+            # Cột 8: last_updated (timestamp)
+            if len(row) > 7 and row[7]:
+                try:
+                    # Chuyển đổi từ string sang timestamp nếu có thể
+                    context["last_updated"] = float(row[7]) if '.' in row[7] else int(row[7])
+                except:
+                    context["last_updated"] = time.time()
+            
+            # Cột 9: phone
+            if len(row) > 8 and row[8]:
+                # Cập nhật phone vào order_data
+                if "order_data" not in context:
+                    context["order_data"] = {}
+                context["order_data"]["phone"] = row[8]
+            
+            # Cột 10: customer_name
             if len(row) > 9 and row[9]:
-                # Cập nhật tên khách hàng từ sheet
+                # Cập nhật customer_name vào order_data
                 if "order_data" not in context:
                     context["order_data"] = {}
                 context["order_data"]["customer_name"] = row[9]
             
+            # Cột 11: last_msg_time
             if len(row) > 10 and row[10]:
                 try:
                     context["last_msg_time"] = float(row[10])
                 except:
                     context["last_msg_time"] = 0
             
+            # Cột 12: has_sent_first_carousel
             if len(row) > 11 and row[11]:
                 try:
                     context["has_sent_first_carousel"] = row[11].lower() == "true"
                 except:
                     context["has_sent_first_carousel"] = False
             
+            # Lưu context vào USER_CONTEXT
             USER_CONTEXT[user_id] = context
             loaded_count += 1
         
@@ -404,8 +521,159 @@ def load_user_context_from_sheets():
         import traceback
         traceback.print_exc()
 
+def get_user_context_from_sheets(user_id: str) -> Optional[Dict]:
+    """Load context của 1 user cụ thể từ Google Sheets"""
+    if not GOOGLE_SHEET_ID or not GOOGLE_SHEETS_CREDENTIALS_JSON:
+        return None
+    
+    try:
+        service = get_google_sheets_service()
+        if not service:
+            return None
+        
+        # Lấy tất cả dữ liệu
+        result = service.spreadsheets().values().get(
+            spreadsheetId=GOOGLE_SHEET_ID,
+            range=f"{USER_CONTEXT_SHEET_NAME}!A2:L"
+        ).execute()
+        
+        values = result.get('values', [])
+        
+        for row in values:
+            if len(row) > 0 and row[0] == user_id:
+                # Tìm thấy user
+                context = default_user_context()
+                
+                # Cập nhật từ dữ liệu
+                if len(row) > 1 and row[1]:
+                    context["last_ms"] = row[1]
+                
+                if len(row) > 2 and row[2]:
+                    try:
+                        context["product_history"] = json.loads(row[2])
+                    except:
+                        context["product_history"] = []
+                
+                if len(row) > 3 and row[3]:
+                    try:
+                        context["order_data"] = json.loads(row[3])
+                    except:
+                        context["order_data"] = {}
+                
+                if len(row) > 4 and row[4]:
+                    try:
+                        context["conversation_history"] = json.loads(row[4])
+                    except:
+                        context["conversation_history"] = []
+                
+                if len(row) > 5 and row[5]:
+                    try:
+                        context["real_message_count"] = int(row[5])
+                    except:
+                        context["real_message_count"] = 0
+                
+                if len(row) > 6 and row[6]:
+                    context["referral_source"] = row[6]
+                
+                if len(row) > 7 and row[7]:
+                    try:
+                        context["last_updated"] = float(row[7]) if '.' in row[7] else int(row[7])
+                    except:
+                        context["last_updated"] = time.time()
+                
+                if len(row) > 8 and row[8]:
+                    if "order_data" not in context:
+                        context["order_data"] = {}
+                    context["order_data"]["phone"] = row[8]
+                
+                if len(row) > 9 and row[9]:
+                    if "order_data" not in context:
+                        context["order_data"] = {}
+                    context["order_data"]["customer_name"] = row[9]
+                
+                if len(row) > 10 and row[10]:
+                    try:
+                        context["last_msg_time"] = float(row[10])
+                    except:
+                        context["last_msg_time"] = 0
+                
+                if len(row) > 11 and row[11]:
+                    try:
+                        context["has_sent_first_carousel"] = row[11].lower() == "true"
+                    except:
+                        context["has_sent_first_carousel"] = False
+                
+                print(f"[GET CONTEXT] Đã load context cho user {user_id} từ Google Sheets")
+                return context
+        
+        print(f"[GET CONTEXT] Không tìm thấy context cho user {user_id} trong Google Sheets")
+        return None
+        
+    except Exception as e:
+        print(f"[GET CONTEXT ERROR] Lỗi khi load context cho user {user_id}: {e}")
+        return None
+
+def delete_user_context_from_sheets(user_id: str):
+    """Xóa context của user khỏi Google Sheets (khi cần)"""
+    if not GOOGLE_SHEET_ID or not GOOGLE_SHEETS_CREDENTIALS_JSON:
+        return False
+    
+    try:
+        service = get_google_sheets_service()
+        if not service:
+            return False
+        
+        # Lấy tất cả dữ liệu hiện tại
+        result = service.spreadsheets().values().get(
+            spreadsheetId=GOOGLE_SHEET_ID,
+            range=f"{USER_CONTEXT_SHEET_NAME}!A2:L"
+        ).execute()
+        
+        values = result.get('values', [])
+        
+        # Tìm dòng cần xóa
+        rows_to_delete = []
+        for i, row in enumerate(values):
+            if len(row) > 0 and row[0] == user_id:
+                rows_to_delete.append(i + 2)  # +2 vì bắt đầu từ row 2
+        
+        if not rows_to_delete:
+            return True  # Không có dòng nào để xóa
+        
+        # Xóa từ dưới lên để không làm hỏng index
+        rows_to_delete.sort(reverse=True)
+        
+        for row_index in rows_to_delete:
+            try:
+                # Xóa dòng
+                requests = [{
+                    'deleteDimension': {
+                        'range': {
+                            'sheetId': 0,
+                            'dimension': 'ROWS',
+                            'startIndex': row_index - 1,
+                            'endIndex': row_index
+                        }
+                    }
+                }]
+                
+                service.spreadsheets().batchUpdate(
+                    spreadsheetId=GOOGLE_SHEET_ID,
+                    body={'requests': requests}
+                ).execute()
+                
+                print(f"[CONTEXT DELETE] Đã xóa context của user {user_id} khỏi Google Sheets")
+            except Exception as e:
+                print(f"[CONTEXT DELETE ERROR] Lỗi khi xóa user {user_id}: {e}")
+        
+        return True
+        
+    except Exception as e:
+        print(f"[CONTEXT DELETE ERROR] Lỗi khi xóa context: {e}")
+        return False
+
 def periodic_context_save():
-    """Lưu context định kỳ vào Google Sheets"""
+    """Lưu context định kỳ vào Google Sheets - CÓ KIỂM TRA TRÙNG LẶP"""
     print(f"[PERIODIC SAVE THREAD] Thread lưu context đã bắt đầu")
     
     # Đợi app khởi động xong
@@ -420,9 +688,20 @@ def periodic_context_save():
     
     while True:
         try:
-            print(f"[PERIODIC SAVE] Đang lưu context vào Google Sheets...")
-            save_user_context_to_sheets()
-            print(f"[PERIODIC SAVE] Hoàn thành, đợi 5 phút...")
+            # Kiểm tra xem có user nào trong memory không
+            active_users = 0
+            for uid, ctx in USER_CONTEXT.items():
+                if ctx.get("last_updated", 0) > time.time() - 86400:  # 24h
+                    active_users += 1
+            
+            print(f"[PERIODIC SAVE] Đang lưu context cho {active_users} active users vào Google Sheets...")
+            
+            if active_users > 0:
+                save_user_context_to_sheets()
+                print(f"[PERIODIC SAVE] Hoàn thành, đợi 5 phút...")
+            else:
+                print(f"[PERIODIC SAVE] Không có active users, bỏ qua lưu")
+                
         except Exception as e:
             print(f"[PERIODIC SAVE ERROR] Lỗi khi lưu context: {e}")
             import traceback
@@ -731,13 +1010,20 @@ def update_context_with_new_ms(uid: str, new_ms: str, source: str = "unknown"):
     return True
 
 def restore_user_context_on_wakeup(uid: str):
-    """Khôi phục context cho user khi app wake up từ sleep"""
+    """Khôi phục context cho user khi app wake up từ sleep - ƯU TIÊN LOAD TỪ SHEETS"""
     # 1. Thử load từ USER_CONTEXT trong RAM (nếu còn)
     if uid in USER_CONTEXT and USER_CONTEXT[uid].get("last_ms"):
         print(f"[RESTORE CONTEXT] User {uid} đã có context trong RAM")
         return True
     
-    # 2. Thử tra cứu đơn hàng từ Google Sheets
+    # 2. Thử load từ Google Sheets (ƯU TIÊN MỚI)
+    context_from_sheets = get_user_context_from_sheets(uid)
+    if context_from_sheets:
+        USER_CONTEXT[uid] = context_from_sheets
+        print(f"[RESTORE CONTEXT] Đã khôi phục context cho user {uid} từ Google Sheets")
+        return True
+    
+    # 3. Thử tra cứu đơn hàng từ Google Sheets (Orders sheet)
     orders = get_user_order_history_from_sheets(uid)
     
     if orders:
@@ -758,7 +1044,7 @@ def restore_user_context_on_wakeup(uid: str):
             print(f"[RESTORE CONTEXT] Đã khôi phục context cho user {uid} từ đơn hàng: {last_ms}")
             return True
     
-    # 3. Thử tìm bằng số điện thoại trong context của user khác
+    # 4. Thử tìm bằng số điện thoại trong context của user khác
     for other_uid, other_ctx in USER_CONTEXT.items():
         if other_uid != uid and other_ctx.get("order_data", {}).get("phone"):
             # Kiểm tra xem có đơn hàng nào với số điện thoại này không
@@ -4109,6 +4395,32 @@ def api_get_variant_info():
     }
 
 # ============================================
+# API MỚI: Xóa context của user
+# ============================================
+
+@app.route("/api/clear-user-context/<user_id>", methods=["POST"])
+def clear_user_context(user_id):
+    """Xóa context của user khỏi cả memory và Google Sheets"""
+    try:
+        # Xóa khỏi memory
+        if user_id in USER_CONTEXT:
+            del USER_CONTEXT[user_id]
+        
+        # Xóa khỏi Google Sheets
+        delete_user_context_from_sheets(user_id)
+        
+        return jsonify({
+            "status": "success",
+            "message": f"Đã xóa context của user {user_id}",
+            "user_id": user_id
+        })
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": f"Lỗi khi xóa context: {str(e)}"
+        }), 500
+
+# ============================================
 # WEBHOOK HANDLER (ĐÃ SỬA ĐỂ XÓA LOGIC FCHAT ECHO)
 # ============================================
 
@@ -5118,734 +5430,260 @@ def order_form():
                         customerName: document.getElementById('customerName').value.trim(),
                         phone: document.getElementById('phone').value.trim(),
                         province: document.getElementById('province').value,
-                        district: document.getElementById('district').value.trim(),
-                        ward: document.getElementById('ward').value.trim(),
+                        district: document.getElementById('district').value,
+                        ward: document.getElementById('ward').value,
                         addressDetail: document.getElementById('addressDetail').value.trim()
                     }};
                     
-                    // Validation
+                    // Validate required fields
                     if (!formData.customerName) {{
                         alert('Vui lòng nhập họ và tên');
                         return;
                     }}
-                    
                     if (!formData.phone) {{
                         alert('Vui lòng nhập số điện thoại');
                         return;
                     }}
-                    
-                    // Phone validation
-                    const phoneRegex = /^(0[0-9]{{9}}|84[0-9]{{9}}|\+84[0-9]{{9}})$/;
-                    const normalizedPhone = formData.phone.replace(/\\s/g, '');
-                    
-                    if (!phoneRegex.test(normalizedPhone)) {{
-                        alert('Số điện thoại không hợp lệ. Vui lòng nhập số 10 chữ số (VD: 0982155980)');
-                        return;
-                    }}
-                    
-                    formData.phone = normalizedPhone.replace('+84', '0').replace(/^84/, '0');
-                    
                     if (!formData.province) {{
                         alert('Vui lòng chọn tỉnh/thành phố');
                         return;
                     }}
-                    
                     if (!formData.district) {{
                         alert('Vui lòng nhập quận/huyện');
                         return;
                     }}
-                    
-                    if (!formData.ward) {{
-                        alert('Vui lòng nhập phường/xã');
-                        return;
-                    }}
-                    
                     if (!formData.addressDetail) {{
                         alert('Vui lòng nhập địa chỉ chi tiết');
                         return;
                     }}
                     
-                    formData.fullAddress = `${{formData.addressDetail}}, ${{formData.ward}}, ${{formData.district}}, ${{formData.province}}`;
-                    formData.unitPrice = BASE_PRICE;
-                    formData.totalPrice = BASE_PRICE * formData.quantity;
-                    
+                    // Disable button and show loading
                     const submitBtn = document.getElementById('submitBtn');
-                    const originalText = submitBtn.innerHTML;
-                    submitBtn.innerHTML = '<span class="loading-spinner"></span> ĐANG XỬ LÝ...';
+                    const originalText = submitBtn.textContent;
                     submitBtn.disabled = true;
+                    submitBtn.innerHTML = '<div class="loading-spinner"></div> Đang xử lý...';
                     
                     try {{
-                        const response = await fetch(`${{API_BASE_URL}}/submit-order`, {{
+                        const response = await fetch('/api/submit-order', {{
                             method: 'POST',
-                            headers: {{ 'Content-Type': 'application/json' }},
+                            headers: {{
+                                'Content-Type': 'application/json'
+                            }},
                             body: JSON.stringify(formData)
                         }});
                         
-                        const data = await response.json();
+                        const result = await response.json();
                         
                         if (response.ok) {{
-                            const successMessage = `🎉 ĐÃ ĐẶT HÀNG THÀNH CÔNG!
-                            
-📦 Mã sản phẩm: {ms}
-👤 Khách hàng: ${{formData.customerName}}
-📱 SĐT: ${{formData.phone}}
-📍 Địa chỉ: ${{formData.fullAddress}}
-💰 Đơn giá: ${{BASE_PRICE.toLocaleString('vi-VN')}} đ
-📦 Số lượng: ${{formData.quantity}}
-💰 Tổng tiền: ${{formData.totalPrice.toLocaleString('vi-VN')}} đ
-
-⏰ Shop sẽ liên hệ xác nhận trong 5-10 phút.
-🚚 Giao hàng bởi ViettelPost (COD)
-
-Cảm ơn quý khách đã đặt hàng! ❤️`;
-                            
-                            alert(successMessage);
-                            
-                            // Reset form after 1 second
-                            setTimeout(() => {{
-                                document.getElementById('orderForm').reset();
-                                updatePriceDisplay();
-                                submitBtn.innerHTML = originalText;
-                                submitBtn.disabled = false;
-                            }}, 1000);
-                            
+                            // Success
+                            document.querySelector('.container').innerHTML = `
+                                <div class="header">
+                                    <h2>ĐẶT HÀNG THÀNH CÔNG!</h2>
+                                </div>
+                                <div class="content" style="text-align: center; padding: 40px 20px;">
+                                    <div style="font-size: 60px; color: #1DB954; margin-bottom: 20px;">✅</div>
+                                    <h3 style="color: #222; margin-bottom: 15px;">Cảm ơn bạn đã đặt hàng!</h3>
+                                    <p style="color: #666; line-height: 1.6; margin-bottom: 25px;">
+                                        Shop sẽ gọi điện xác nhận đơn hàng trong 5-10 phút.<br>
+                                        Mã đơn hàng: <strong>${{result.order_id}}</strong>
+                                    </p>
+                                    <p style="color: #888; font-size: 14px; margin-top: 30px;">
+                                        Bạn có thể đóng trang này hoặc quay lại Messenger để tiếp tục mua sắm.
+                                    </p>
+                                </div>
+                            `;
                         }} else {{
-                            alert('❌ ' + (data.message || 'Có lỗi xảy ra. Vui lòng thử lại sau'));
-                            submitBtn.innerHTML = originalText;
+                            // Error
+                            alert('Có lỗi xảy ra: ' + (result.message || 'Vui lòng thử lại sau'));
                             submitBtn.disabled = false;
+                            submitBtn.textContent = originalText;
                         }}
                     }} catch (error) {{
-                        console.error('Lỗi khi đặt hàng:', error);
-                        alert('❌ Lỗi kết nối. Vui lòng kiểm tra mạng và thử lại!');
-                        submitBtn.innerHTML = originalText;
+                        console.error('Submit error:', error);
+                        alert('Có lỗi kết nối, vui lòng thử lại sau');
                         submitBtn.disabled = false;
+                        submitBtn.textContent = originalText;
                     }}
                 }}
                 
-                // Initialize event listeners
-                function initialize() {{
-                    // Load image
-                    loadProductImage();
-                    
-                    // Update price when quantity changes
-                    document.getElementById('quantity').addEventListener('input', updatePriceDisplay);
-                    
-                    // Update variant info when color/size changes
-                    document.getElementById('color').addEventListener('change', updateVariantInfo);
-                    document.getElementById('size').addEventListener('change', updateVariantInfo);
-                    
-                    // Submit button
-                    document.getElementById('submitBtn').addEventListener('click', submitOrder);
-                    
-                    // Auto-focus on name field
-                    setTimeout(() => {{
-                        document.getElementById('customerName').focus();
-                    }}, 500);
-                }}
+                // Initialize
+                loadProductImage();
+                updatePriceDisplay();
                 
-                // Initialize when page loads
-                initialize();
+                // Event listeners
+                document.getElementById('quantity').addEventListener('input', updatePriceDisplay);
+                document.getElementById('color').addEventListener('change', updateVariantInfo);
+                document.getElementById('size').addEventListener('change', updateVariantInfo);
+                document.getElementById('submitBtn').addEventListener('click', submitOrder);
+                
+                // Initial variant info update
+                updateVariantInfo();
             }});
         </script>
     </body>
     </html>
     """
     
-    response = make_response(html)
-    
-    # Set headers for better caching
-    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
-    response.headers['Pragma'] = 'no-cache'
-    response.headers['Expires'] = '0'
-    response.headers['Content-Type'] = 'text/html; charset=utf-8'
-    
-    return response
+    return html
 
 # ============================================
-# API ENDPOINTS
+# API XỬ LÝ ĐẶT HÀNG
 # ============================================
-
-@app.route("/api/get-product")
-def api_get_product():
-    load_products()
-    ms = (request.args.get("ms") or "").upper()
-    if ms not in PRODUCTS:
-        return {"error": "not_found"}, 404
-
-    row = PRODUCTS[ms]
-    images_field = row.get("Images", "")
-    urls = parse_image_urls(images_field)
-    image = urls[0] if urls else ""
-
-    size_field = row.get("size (Thuộc tính)", "")
-    color_field = row.get("màu (Thuộc tính)", "")
-
-    sizes = []
-    if size_field:
-        sizes = [s.strip() for s in size_field.split(",") if s.strip()]
-
-    colors = []
-    if color_field:
-        colors = [c.strip() for c in color_field.split(",") if c.strip()]
-
-    if not sizes:
-        sizes = ["Mặc định"]
-    if not colors:
-        colors = ["Mặc định"]
-
-    price_str = row.get("Gia", "0")
-    price_int = extract_price_int(price_str) or 0
-
-    return {
-        "ms": ms,
-        "name": row.get("Ten", ""),
-        "image": image,
-        "sizes": sizes,
-        "colors": colors,
-        "price": price_int,
-        "price_display": f"{price_int:,.0f} đ",
-    }
-
-@app.route("/api/get-variant-image")
-def api_get_variant_image():
-    ms = (request.args.get("ms") or "").upper()
-    color = request.args.get("color", "").strip()
-    size = request.args.get("size", "").strip()
-    
-    load_products()
-    if ms not in PRODUCTS:
-        return {"error": "not_found"}, 404
-    
-    variant_image = get_variant_image(ms, color, size)
-    
-    return {
-        "ms": ms,
-        "color": color,
-        "size": size,
-        "image": variant_image
-    }
 
 @app.route("/api/submit-order", methods=["POST"])
 def api_submit_order():
-    data = request.get_json() or {}
-    ms = (data.get("ms") or "").upper()
-    uid = data.get("uid") or ""
-    color = data.get("color") or ""
-    size = data.get("size") or ""
-    quantity = int(data.get("quantity") or 1)
-    customer_name = data.get("customerName") or ""
-    phone = data.get("phone") or ""
-    
-    # Debug log
-    print(f"[ORDER DEBUG] MS: {ms}, Color: {color}, Size: {size}")
-    
-    # Địa chỉ mới
-    address_detail = data.get("addressDetail") or ""
-    province_name = data.get("provinceName") or ""
-    district_name = data.get("districtName") or ""
-    ward_name = data.get("wardName") or ""
-    full_address = data.get("fullAddress") or ""
-    
-    # Kiểm tra dữ liệu bắt buộc
-    if not all([ms, customer_name, phone, full_address]):
-        return {"error": "missing_data", "message": "Vui lòng điền đầy đủ thông tin bắt buộc"}, 400
-    
-    load_products()
-    row = PRODUCTS.get(ms)
-    if not row:
-        return {"error": "not_found", "message": "Sản phẩm không tồn tại"}, 404
-
-    # QUAN TRỌNG: Tìm giá đúng của biến thể (màu + size)
-    unit_price = 0
-    variant_found = False
-    
-    # Debug: Log các biến thể có sẵn
-    print(f"[ORDER DEBUG] Tìm biến thể với màu='{color}', size='{size}'")
-    
-    # Tìm biến thể phù hợp trong danh sách variants
-    for idx, variant in enumerate(row.get("variants", [])):
-        variant_color = variant.get("mau", "").strip().lower()
-        variant_size = variant.get("size", "").strip().lower()
-        
-        input_color = color.strip().lower()
-        input_size = size.strip().lower()
-        
-        # So khớp màu và size
-        color_match = (not input_color) or (variant_color == input_color) or (input_color == "mặc định" and not variant_color)
-        size_match = (not input_size) or (variant_size == input_size) or (input_size == "mặc định" and not variant_size)
-        
-        if color_match and size_match:
-            variant_found = True
-            # Ưu tiên lấy giá số (gia) trước, nếu không có thì lấy giá dạng chuỗi (gia_raw)
-            if variant.get("gia"):
-                unit_price = variant.get("gia", 0)
-            else:
-                # Nếu không có gia dạng số, thử chuyển đổi từ gia_raw
-                gia_raw = variant.get("gia_raw", "")
-                if gia_raw:
-                    unit_price = extract_price_int(gia_raw) or 0
-            print(f"[ORDER DEBUG] Biến thể {idx} phù hợp: màu='{variant_color}', size='{variant_size}', giá={unit_price}")
-            break
-    
-    # Nếu không tìm thấy biến thể phù hợp, lấy giá chung của sản phẩm
-    if not variant_found or unit_price == 0:
-        price_str = row.get("Gia", "0")
-        unit_price = extract_price_int(price_str) or 0
-        print(f"[ORDER DEBUG] Không tìm thấy biến thể phù hợp, sử dụng giá chung: {unit_price}")
-    
-    total = unit_price * quantity
-    
-    # LẤY TÊN SẢN PHẨM (KHÔNG BAO GỒM MÃ SẢN PHẨM)
-    product_name = row.get('Ten', '')
-    
-    # KIỂM TRA NẾU TÊN ĐÃ CHỨA MÃ SẢN PHẨM, CHỈ GIỮ TÊN
-    if f"[{ms}]" in product_name or ms in product_name:
-        # Xóa mã sản phẩm khỏi tên
-        product_name = product_name.replace(f"[{ms}]", "").replace(ms, "").strip()
-    
-    print(f"[ORDER DEBUG] Biến thể tìm thấy: {variant_found}, Đơn giá: {unit_price}, Tổng tiền: {total}")
-
-    # Gửi tin nhắn xác nhận cho khách hàng nếu có uid hợp lệ
-    if uid and len(uid) > 5:  # UID Facebook thường dài
-        try:
-            ctx = USER_CONTEXT.get(uid, {})
-            referral_source = ctx.get("referral_source", "direct")
-            
-            # Tin nhắn với giá đúng của biến thể (KHÔNG HIỂN THỊ MÃ SẢN PHẨM 2 LẦN)
-            msg = (
-                "🎉 Shop đã nhận được đơn hàng mới:\n"
-                f"🛍 Sản phẩm: {product_name}\n"  # CHỈ HIỂN THỊ TÊN SẢN PHẨM
-                f"🎨 Phân loại: {color} / {size}\n"
-                f"💰 Đơn giá: {unit_price:,.0f} đ\n"
-                f"📦 Số lượng: {quantity}\n"
-                f"💰 Thành tiền: {total:,.0f} đ\n"
-                f"👤 Người nhận: {customer_name}\n"
-                f"📱 SĐT: {phone}\n"
-                f"🏠 Địa chỉ: {full_address}\n"
-                "────────────────────\n"
-                "⏰ Shop sẽ gọi điện xác nhận trong 5-10 phút.\n"
-                "🚚 Đơn hàng sẽ được giao bởi ViettelPost\n"
-                "💳 Thanh toán khi nhận hàng (COD)\n"
-                "────────────────────\n"
-                "Cảm ơn anh/chị đã đặt hàng! ❤️"
-            )
-            send_message(uid, msg)
-            print(f"✅ Đã gửi tin nhắn xác nhận cho user {uid}")
-            
-        except Exception as e:
-            print(f"⚠️ Không thể gửi tin nhắn cho user {uid}: {str(e)}")
-            # Vẫn tiếp tục xử lý đơn hàng ngay cả khi không gửi được tin nhắn
-    
-    order_data = {
-        "ms": ms,
-        "uid": uid,
-        "color": color,
-        "size": size,
-        "quantity": quantity,
-        "customer_name": customer_name,
-        "phone": phone,
-        "address": full_address,
-        "address_detail": address_detail,
-        "province": province_name,
-        "district": district_name,
-        "ward": ward_name,
-        "product_name": product_name,
-        "unit_price": unit_price,  # Lưu giá của biến thể
-        "total_price": total,
-        "referral_source": ctx.get("referral_source", "direct") if uid else "direct",
-        "variant_found": variant_found  # Đánh dấu đã tìm thấy biến thể
-    }
-    
-    # GHI SỰ KIỆN PURCHASE VÀO FACEBOOK CONVERSION API (BẤT ĐỒNG BỘ)
     try:
-        # Thêm order_id cho sự kiện Purchase
-        order_data["order_id"] = f"ORD{int(time.time())}_{uid[-4:] if uid else '0000'}"
+        data = request.get_json()
+        if not data:
+            return jsonify({"status": "error", "message": "No data provided"}), 400
+        
+        ms = (data.get("ms") or "").upper()
+        uid = data.get("uid", "")
+        
+        load_products()
+        
+        if ms not in PRODUCTS:
+            return jsonify({"status": "error", "message": "Sản phẩm không tồn tại"}), 404
+        
+        # Lấy thông tin sản phẩm
+        product = PRODUCTS[ms]
+        product_name = product.get('Ten', '')
+        if f"[{ms}]" in product_name or ms in product_name:
+            product_name = product_name.replace(f"[{ms}]", "").replace(ms, "").strip()
+        
+        # Lấy giá từ biến thể (nếu có)
+        variant_price = 0
+        color = data.get("color", "Mặc định")
+        size = data.get("size", "Mặc định")
+        
+        # Tìm giá biến thể phù hợp
+        for variant in product.get("variants", []):
+            variant_color = variant.get("mau", "").strip()
+            variant_size = variant.get("size", "").strip()
+            
+            if (color == variant_color or (color == "Mặc định" and not variant_color)) and \
+               (size == variant_size or (size == "Mặc định" and not variant_size)):
+                variant_price = variant.get("gia", 0)
+                break
+        
+        if variant_price == 0:
+            variant_price = extract_price_int(product.get("Gia", "")) or 0
+        
+        # Tính tổng tiền
+        quantity = int(data.get("quantity", 1))
+        total_price = variant_price * quantity
+        
+        # Chuẩn bị dữ liệu đơn hàng
+        order_data = {
+            "uid": uid,
+            "ms": ms,
+            "product_name": product_name,
+            "color": color,
+            "size": size,
+            "quantity": quantity,
+            "unit_price": variant_price,
+            "total_price": total_price,
+            "customer_name": data.get("customerName", ""),
+            "phone": data.get("phone", ""),
+            "province": data.get("province", ""),
+            "district": data.get("district", ""),
+            "ward": data.get("ward", ""),
+            "address_detail": data.get("addressDetail", ""),
+            "referral_source": USER_CONTEXT.get(uid, {}).get("referral_source", "direct")
+        }
+        
+        # Tạo địa chỉ đầy đủ
+        full_address = f"{data.get('addressDetail', '')}, {data.get('ward', '')}, {data.get('district', '')}, {data.get('province', '')}"
+        order_data["address"] = full_address
         
         # Gửi sự kiện Purchase SMART (bất đồng bộ)
-        send_purchase_smart(
-            uid=uid,
-            ms=ms,
-            product_name=product_name,
-            order_data=order_data
-        )
-        
-        print(f"[FACEBOOK CAPI] Đã queue Purchase cho đơn hàng {order_data['order_id']}")
-    except Exception as e:
-        print(f"[FACEBOOK CAPI ERROR] Lỗi queue Purchase: {e}")
-        # KHÔNG ảnh hưởng đến việc lưu đơn hàng
-    
-    # Ghi vào Google Sheets
-    write_success = False
-    if GOOGLE_SHEET_ID and GOOGLE_SHEETS_CREDENTIALS_JSON:
-        write_success = write_order_to_google_sheet_api(order_data)
-        if write_success:
-            print(f"✅ Đã ghi đơn hàng vào Google Sheets: {ms} - {customer_name}")
-        else:
-            print(f"⚠️ Không thể ghi vào Google Sheets, sẽ lưu backup")
-    
-    # Luôn lưu backup local
-    save_order_to_local_csv(order_data)
-    print(f"📁 Đã lưu backup đơn hàng local: {ms} - {customer_name}")
-    
-    # Gửi thông báo đến Fchat nếu được cấu hình
-    if FCHAT_WEBHOOK_URL and FCHAT_TOKEN:
         try:
-            fchat_payload = {
-                "token": FCHAT_TOKEN,
-                "message": f"🛒 ĐƠN HÀNG MỚI\nMã: {ms}\nKH: {customer_name}\nSĐT: {phone}\nĐơn giá: {unit_price:,.0f}đ\nSố lượng: {quantity}\nTổng: {total:,.0f}đ",
-                "metadata": {
-                    "order_data": order_data,
-                    "timestamp": datetime.now().isoformat()
-                }
-            }
-            requests.post(FCHAT_WEBHOOK_URL, json=fchat_payload, timeout=5)
-            print(f"📨 Đã gửi thông báo đến Fchat")
+            send_purchase_smart(
+                uid=uid,
+                ms=ms,
+                product_name=product_name,
+                order_data=order_data
+            )
+            print(f"[FACEBOOK CAPI] Đã queue Purchase cho đơn hàng {ms}")
         except Exception as e:
-            print(f"⚠️ Không thể gửi notification đến Fchat: {str(e)}")
-
-    return {
-        "status": "ok", 
-        "message": "Đơn hàng đã được tiếp nhận",
-        "order_written": write_success,
-        "order_details": {
-            "order_id": f"ORD{int(time.time())}_{uid[-4:] if uid else '0000'}",
-            "product_code": ms,
-            "product_name": product_name,
-            "variant": f"{color} / {size}",
-            "unit_price": unit_price,
-            "quantity": quantity,
-            "total": total,
-            "customer_name": customer_name,
-            "phone": phone,
-            "address": full_address,
-            "timestamp": datetime.now().isoformat()
-        }
-    }
-
-# ============================================
-# API ENDPOINT ĐỂ XEM VÀ QUẢN LÝ CONTEXT
-# ============================================
-
-@app.route("/api/user-context/<user_id>", methods=["GET"])
-def get_user_context(user_id):
-    """API để xem context của user"""
-    if user_id in USER_CONTEXT:
+            print(f"[FACEBOOK CAPI ERROR] Lỗi queue Purchase: {e}")
+            # KHÔNG ảnh hưởng đến việc lưu đơn hàng
+        
+        # Lưu vào Google Sheets (nếu có)
+        sheet_success = False
+        if GOOGLE_SHEET_ID and GOOGLE_SHEETS_CREDENTIALS_JSON:
+            sheet_success = write_order_to_google_sheet_api(order_data)
+        
+        # Lưu vào file local backup
+        save_order_to_local_csv(order_data)
+        
+        # Cập nhật context với MS mới từ đơn hàng
+        if uid:
+            update_context_with_new_ms(uid, ms, "order_form")
+            
+            # Lưu thông tin khách hàng vào context
+            if uid in USER_CONTEXT:
+                USER_CONTEXT[uid]["order_data"] = {
+                    "phone": data.get("phone", ""),
+                    "customer_name": data.get("customerName", ""),
+                    "address": full_address,
+                    "last_order_time": time.time()
+                }
+        
+        # Tạo order ID
+        order_id = f"ORD{int(time.time())}_{uid[-4:] if uid else '0000'}"
+        
         return jsonify({
             "status": "success",
-            "user_id": user_id,
-            "context": USER_CONTEXT[user_id],
-            "last_ms": USER_CONTEXT[user_id].get("last_ms")
+            "message": "Đã nhận đơn hàng thành công!",
+            "order_id": order_id,
+            "product_name": product_name,
+            "total_price": total_price,
+            "sheet_saved": sheet_success
         })
-    return jsonify({"status": "not_found"}), 404
-
-@app.route("/api/save-context", methods=["POST"])
-def api_save_context():
-    """API để trigger lưu context thủ công"""
-    save_user_context_to_sheets()
-    return jsonify({"status": "success", "message": "Đã lưu context vào Google Sheets"})
-
-# ============================================
-# THÊM CÁC ENDPOINT TEST
-# ============================================
-
-@app.route("/check-env", methods=["GET"])
-def check_env():
-    """Kiểm tra biến môi trường"""
-    return jsonify({
-        "GOOGLE_SHEET_ID": "CÓ" if GOOGLE_SHEET_ID else "KHÔNG",
-        "GOOGLE_SHEETS_CREDENTIALS_JSON": "CÓ" if GOOGLE_SHEETS_CREDENTIALS_JSON else "KHÔNG",
-        "SHEET_ID_LENGTH": len(GOOGLE_SHEET_ID) if GOOGLE_SHEET_ID else 0,
-        "CREDENTIALS_LENGTH": len(GOOGLE_SHEETS_CREDENTIALS_JSON) if GOOGLE_SHEETS_CREDENTIALS_JSON else 0,
-        "FCHAT_API_TOKEN": "CÓ" if FCHAT_TOKEN else "KHÔNG",
-        "FCHAT_SHOP_ID": "CÓ" if FCHAT_WEBHOOK_URL else "KHÔNG"
-    })
-
-@app.route("/test-context-save", methods=["GET"])
-def test_context_save():
-    """Test lưu context thủ công"""
-    print(f"[TEST] Đang test lưu context thủ công...")
-    print(f"[TEST] Số users trong memory: {len(USER_CONTEXT)}")
-    
-    # Test một user
-    test_user_id = "26225402767048945"
-    if test_user_id in USER_CONTEXT:
-        print(f"[TEST] User context: {USER_CONTEXT[test_user_id].get('last_ms')}")
-    
-    # Lưu thủ công
-    save_user_context_to_sheets()
-    
-    return jsonify({
-        "status": "success",
-        "users_in_memory": len(USER_CONTEXT),
-        "test_user_found": test_user_id in USER_CONTEXT,
-        "test_user_ms": USER_CONTEXT.get(test_user_id, {}).get("last_ms") if test_user_id in USER_CONTEXT else None
-    })
+        
+    except Exception as e:
+        print(f"[SUBMIT ORDER ERROR] {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"status": "error", "message": f"Lỗi xử lý đơn hàng: {str(e)}"}), 500
 
 # ============================================
-# FACEBOOK CAPI TEST ENDPOINTS
-# ============================================
-
-@app.route("/test-facebook-capi", methods=["GET"])
-def test_facebook_capi():
-    """Test endpoint cho Facebook Conversion API"""
-    uid = request.args.get("uid", "test_user_123")
-    ms = request.args.get("ms", "MS000001")
-    
-    # Test ViewContent
-    send_view_content_smart(
-        uid=uid,
-        ms=ms,
-        product_name="Sản phẩm test",
-        price=100000,
-        referral_source="test"
-    )
-    
-    # Test AddToCart
-    send_add_to_cart_smart(
-        uid=uid,
-        ms=ms,
-        product_name="Sản phẩm test",
-        price=100000
-    )
-    
-    # Test InitiateCheckout
-    send_initiate_checkout_smart(
-        uid=uid,
-        ms=ms,
-        product_name="Sản phẩm test",
-        price=100000
-    )
-    
-    return jsonify({
-        "status": "test_queued",
-        "facebook_pixel_id": FACEBOOK_PIXEL_ID,
-        "queue_size": FACEBOOK_EVENT_QUEUE.qsize(),
-        "worker_running": FACEBOOK_WORKER_RUNNING,
-        "test_user": uid,
-        "test_product": ms
-    })
-
-@app.route("/facebook-queue-status", methods=["GET"])
-def facebook_queue_status():
-    """Kiểm tra trạng thái Facebook Event Queue"""
-    cache_size = len(getattr(send_view_content_smart, 'cache', {})) if hasattr(send_view_content_smart, 'cache') else 0
-    
-    return jsonify({
-        "queue_size": FACEBOOK_EVENT_QUEUE.qsize(),
-        "worker_running": FACEBOOK_WORKER_RUNNING,
-        "cache_size": cache_size,
-        "facebook_pixel_id_configured": bool(FACEBOOK_PIXEL_ID),
-        "facebook_access_token_configured": bool(FACEBOOK_ACCESS_TOKEN)
-    })
-
-# ============================================
-# HEALTH CHECK
+# HEALTH CHECK ENDPOINT
 # ============================================
 
 @app.route("/health", methods=["GET"])
 def health_check():
-    current_fanpage_name = get_fanpage_name_from_api()
-    
-    total_variants = sum(len(p['variants']) for p in PRODUCTS.values())
-    
-    # Kiểm tra feed comment capability với Facebook Graph API
-    feed_comment_test = "Ready"
-    if PAGE_ACCESS_TOKEN:
-        feed_comment_test = "✅ Sẵn sàng (Facebook Graph API)"
-    else:
-        feed_comment_test = "⚠️ Cần cấu hình PAGE_ACCESS_TOKEN"
-    
-    # Kiểm tra persistent storage với Google Sheets
-    google_sheets_status = "✅ Đã cấu hình" if GOOGLE_SHEET_ID and GOOGLE_SHEETS_CREDENTIALS_JSON else "⚠️ Chưa cấu hình"
-    
-    # Kiểm tra Facebook Conversion API
-    facebook_capi_status = "✅ Đã cấu hình" if FACEBOOK_PIXEL_ID and FACEBOOK_ACCESS_TOKEN else "⚠️ Chưa cấu hình"
-    
-    return {
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
-        "products_loaded": len(PRODUCTS),
-        "variants_loaded": total_variants,
-        "openai_configured": bool(client),
-        "facebook_configured": bool(PAGE_ACCESS_TOKEN),
-        "fanpage_name": current_fanpage_name,
-        "page_id": PAGE_ID,
-        "feed_comment_processing": feed_comment_test,
-        "facebook_graph_api": {
-            "token_configured": bool(PAGE_ACCESS_TOKEN),
-            "api_version": "v18.0",
-            "required_permissions": ["pages_read_engagement", "pages_manage_metadata"]
-        },
-        "persistent_storage": {
-            "enabled": True,
-            "type": "Google Sheets",
-            "status": google_sheets_status,
-            "sheet_name": USER_CONTEXT_SHEET_NAME,
-            "users_in_memory": len(USER_CONTEXT),
-            "save_interval_seconds": 300
-        },
-        "google_sheets_integration": {
-            "sheet_id_configured": bool(GOOGLE_SHEET_ID),
-            "credentials_configured": bool(GOOGLE_SHEETS_CREDENTIALS_JSON),
-            "user_context_sheet": USER_CONTEXT_SHEET_NAME
-        },
-        "poscake_integration": {
-            "api_key_configured": bool(POSCAKE_API_KEY),
-            "webhook_secret_configured": bool(POSCAKE_WEBHOOK_SECRET),
-            "store_id_configured": bool(POSCAKE_STORE_ID),
-            "endpoints": {
-                "webhook": "/poscake-webhook",
-                "test": "/test-poscake-webhook"
-            }
-        },
-        "facebook_conversion_api": {
-            "pixel_id_configured": bool(FACEBOOK_PIXEL_ID),
-            "access_token_configured": bool(FACEBOOK_ACCESS_TOKEN),
-            "api_version": FACEBOOK_API_VERSION,
-            "events_tracked": ["ViewContent", "AddToCart", "InitiateCheckout", "Purchase"],
-            "async_processing": True,
-            "queue_size": FACEBOOK_EVENT_QUEUE.qsize(),
-            "worker_running": FACEBOOK_WORKER_RUNNING,
-            "cache_enabled": True,
-            "test_endpoint": "/test-facebook-capi",
-            "queue_status_endpoint": "/facebook-queue-status"
-        },
-        "gpt_function_calling": {
-            "enabled": True,
-            "tools": ["get_product_price_details", "get_product_basic_info", "send_product_images", "send_product_videos", "provide_order_link"],
-            "model": "gpt-4o-mini",
-            "first_message_logic": "Carousel 1 sản phẩm (chưa gửi carousel)",
-            "second_message_logic": "GPT Function Calling (đã gửi carousel)",
-            "price_analysis": "Thông minh (color_based, size_based, complex_based, single_price)",
-            "policy_handling": "GPT tự đọc mô tả sản phẩm (không dùng tool riêng, không dùng từ khóa)"
-        },
-        "image_processing": {
-            "enabled": True,
-            "technology": "OpenAI Vision API (3 phương pháp fallback: URL trực tiếp, base64, URL đơn giản)",
-            "emoji_detection": True,
-            "product_matching": "Text-based similarity matching nâng cao với trọng số",
-            "suggestion_carousel": "Carousel 3 sản phẩm gợi ý khi không tìm thấy từ ảnh"
-        },
-        "feed_comment_processing": {
-            "enabled": True,
-            "logic": "Lấy MS từ caption bài viết khi user comment",
-            "api_used": "Facebook Graph API (trực tiếp)",
-            "capabilities": [
-                "Detect MS từ bài viết gốc (chỉ dùng regex)",
-                "Auto reply với thông tin sản phẩm chi tiết",
-                "Cập nhật context cho user và reset counter",
-                "Chỉ gửi tin nhắn tự động khi real_message_count = 0"
-            ],
-            "required_config": "PAGE_ACCESS_TOKEN với quyền pages_read_engagement"
-        },
-        "context_persistence": {
-            "enabled": True,
-            "type": "Google Sheets + In-memory cache",
-            "capabilities": [
-                "Tự động lưu context vào Google Sheets mỗi 5 phút",
-                "Tự động load context từ Google Sheets khi khởi động",
-                "Khôi phục context từ order history khi Koyeb wake up",
-                "Tra cứu đơn hàng cũ để nhận diện khách hàng"
-            ],
-            "koyeb_sleep_support": "✅ Có thể khôi phục context sau khi Koyeb wake up"
-        },
-        "features": {
-            "carousel_first_message": True,
-            "catalog_support": True,
-            "ads_referral_processing": True,
-            "fchat_echo_processing": False,
-            "image_processing": True,
-            "order_form": True,
-            "google_sheets_api": True,
-            "poscake_webhook": True,
-            "facebook_shop_order_processing": True,
-            "ms_context_update": True,
-            "no_duplicate_ms_display": True,
-            "optimized_form_loading": True,
-            "address_api_cache": True,
-            "lazy_image_loading": True,
-            "gzip_compression": True,
-            "feed_comment_processing": True,
-            "feed_comment_auto_reply": True,
-            "persistent_storage": True,
-            "form_static_address": True,
-            "context_restoration_after_sleep": True,
-            "facebook_conversion_api": True,
-            "async_event_processing": True,
-            "smart_event_cache": True,
-            "facebook_graph_api_integration": True
-        }
-    }, 200
-
-# ============================================
-# HEALTH CHECK NHANH (CHO LOAD BALANCER)
-# ============================================
-
-@app.route("/health-light", methods=["GET"])
-def health_light():
-    """Health check nhanh, không load products"""
     return jsonify({
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
-        "service": "order-form",
-        "uptime": time.time() - LAST_LOAD if LAST_LOAD > 0 else 0,
-        "users_in_memory": len(USER_CONTEXT),
-        "facebook_queue_size": FACEBOOK_EVENT_QUEUE.qsize(),
-        "facebook_worker_running": FACEBOOK_WORKER_RUNNING
-    }), 200
+        "products_loaded": len(PRODUCTS) > 0,
+        "users_in_context": len(USER_CONTEXT),
+        "facebook_pixel_configured": bool(FACEBOOK_PIXEL_ID),
+        "openai_configured": bool(OPENAI_API_KEY),
+        "google_sheets_configured": bool(GOOGLE_SHEET_ID and GOOGLE_SHEETS_CREDENTIALS_JSON)
+    })
 
 # ============================================
-# PORT CONFIGURATION FOR KOYEB/RENDER
-# ============================================
-def get_port():
-    """Get port from environment variable with fallback"""
-    return int(os.environ.get("PORT", 5000))
-
-# ============================================
-# MAIN
+# INITIALIZATION
 # ============================================
 
 if __name__ == "__main__":
-    import os
+    print("🚀 Starting Facebook GPT Chatbot...")
     
-    print("=" * 80)
-    print("🟢 KHỞI ĐỘNG FACEBOOK CHATBOT - GPT FUNCTION CALLING MODE")
-    print("=" * 80)
-    print(f"🟢 Process ID: {os.getpid()}")
-    print(f"🟢 Port: {get_port()}")
-    print("=" * 80)
+    # Khởi động worker Facebook CAPI
+    start_facebook_worker()
     
-    # KHỞI TẠO GOOGLE SHEETS USERCONTEXT SHEET
-    print("🟢 Đang khởi tạo Google Sheets UserContext sheet...")
-    init_user_context_sheet()
+    # Khởi động thread lưu context định kỳ
+    threading.Thread(target=periodic_context_save, daemon=True).start()
     
-    # LOAD CONTEXT TỪ GOOGLE SHEETS
-    print("🟢 Đang load context từ Google Sheets...")
-    load_user_context_from_sheets()
-    print(f"🟢 Đã load {len(USER_CONTEXT)} users từ Google Sheets")
+    # Load products ngay khi khởi động
+    load_products(force=True)
     
-    # BẮT ĐẦU THREAD LƯU CONTEXT ĐỊNH KỲ
-    print("🟢 Đang khởi động thread lưu context định kỳ...")
-    saver_thread = threading.Thread(target=periodic_context_save, daemon=True)
-    saver_thread.start()
-    print(f"🟢 Thread lưu context đã khởi động, sẽ lưu mỗi 5 phút")
+    # Load context từ Google Sheets nếu có
+    if GOOGLE_SHEET_ID and GOOGLE_SHEETS_CREDENTIALS_JSON:
+        load_user_context_from_sheets()
     
-    # KHỞI ĐỘNG FACEBOOK EVENT WORKER
-    print("🟢 Đang khởi động Facebook Event Worker...")
-    facebook_worker = start_facebook_worker()
-    print("🟢 Facebook Event Worker đã sẵn sàng (async mode)")
-    
-    print(f"🟢 GPT-4o-mini: {'SẴN SÀNG' if client else 'CHƯA CẤU HÌNH'}")
-    print(f"🟢 Fanpage: {get_fanpage_name_from_api()}")
-    print(f"🟢 Page ID: {PAGE_ID}")
-    print(f"🟢 Domain: {DOMAIN}")
-    print(f"🟢 Google Sheets API: {'SẴN SÀNG' if GOOGLE_SHEET_ID and GOOGLE_SHEETS_CREDENTIALS_JSON else 'CHƯA CẤU HÌNH'}")
-    print(f"🟢 Poscake Webhook: {'SẴN SÀNG' if POSCAKE_API_KEY else 'CHƯA CẤU HÌNH'}")
-    print(f"🟢 Facebook Conversion API: {'SẴN SÀNG' if FACEBOOK_PIXEL_ID and FACEBOOK_ACCESS_TOKEN else 'CHƯA CẤU HÌNH'}")
-    print(f"🟢 OpenAI Function Calling: SẴN SÀNG")
-    print("=" * 80)
-    print("🚀 Bot đã sẵn sàng!")
-    print("=" * 80)
-    
-    # RUN FLASK APP
-    app.run(host="0.0.0.0", port=get_port(), debug=False)
+    # Khởi chạy Flask app
+    port = int(os.environ.get("PORT", 8000))
+    app.run(host="0.0.0.0", port=port, debug=False)
