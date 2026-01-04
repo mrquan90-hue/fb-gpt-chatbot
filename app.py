@@ -148,13 +148,13 @@ def init_user_context_sheet():
     """Khởi tạo sheet UserContext nếu chưa tồn tại"""
     if not GOOGLE_SHEET_ID or not GOOGLE_SHEETS_CREDENTIALS_JSON:
         print(f"[INIT SHEET] Chưa cấu hình Google Sheets, bỏ qua khởi tạo UserContext sheet")
-        return
+        return False
     
     try:
         service = get_google_sheets_service()
         if not service:
             print(f"[INIT SHEET] Không thể khởi tạo Google Sheets service")
-            return
+            return False
         
         # Lấy thông tin tất cả sheets
         spreadsheet = service.spreadsheets().get(spreadsheetId=GOOGLE_SHEET_ID).execute()
@@ -165,9 +165,11 @@ def init_user_context_sheet():
         for sheet in sheets:
             if sheet['properties']['title'] == USER_CONTEXT_SHEET_NAME:
                 sheet_exists = True
+                print(f"[INIT SHEET] Sheet {USER_CONTEXT_SHEET_NAME} đã tồn tại")
                 break
         
         if not sheet_exists:
+            print(f"[INIT SHEET] Tạo sheet mới: {USER_CONTEXT_SHEET_NAME}")
             # Tạo sheet mới
             requests = [{
                 'addSheet': {
@@ -175,7 +177,7 @@ def init_user_context_sheet():
                         'title': USER_CONTEXT_SHEET_NAME,
                         'gridProperties': {
                             'rowCount': 1000,
-                            'columnCount': 10
+                            'columnCount': 12  # Tăng cột để đảm bảo đủ
                         }
                     }
                 }
@@ -186,26 +188,33 @@ def init_user_context_sheet():
                 body={'requests': requests}
             ).execute()
             
-            # Thêm header
+            # Đợi một chút để sheet được tạo
+            time.sleep(2)
+            
+            # Thêm header với đủ các cột cần thiết
             headers = [
                 ['user_id', 'last_ms', 'product_history', 'order_data', 
                  'conversation_history', 'real_message_count', 
-                 'referral_source', 'last_updated', 'phone', 'customer_name']
+                 'referral_source', 'last_updated', 'phone', 'customer_name',
+                 'last_msg_time', 'has_sent_first_carousel']
             ]
             
             service.spreadsheets().values().update(
                 spreadsheetId=GOOGLE_SHEET_ID,
-                range=f"{USER_CONTEXT_SHEET_NAME}!A1:J1",
+                range=f"{USER_CONTEXT_SHEET_NAME}!A1:L1",
                 valueInputOption="USER_ENTERED",
                 body={'values': headers}
             ).execute()
             
             print(f"[INIT SHEET] Đã tạo sheet {USER_CONTEXT_SHEET_NAME} thành công")
+            return True
         else:
             print(f"[INIT SHEET] Sheet {USER_CONTEXT_SHEET_NAME} đã tồn tại")
+            return True
             
     except Exception as e:
         print(f"[INIT SHEET ERROR] Lỗi khi khởi tạo sheet: {e}")
+        return False
 
 def save_user_context_to_sheets():
     """Lưu USER_CONTEXT vào Google Sheets"""
@@ -216,6 +225,7 @@ def save_user_context_to_sheets():
     try:
         service = get_google_sheets_service()
         if not service:
+            print("[SAVE CONTEXT] Không thể khởi tạo Google Sheets service")
             return
         
         # Chuẩn bị dữ liệu để ghi
@@ -224,8 +234,17 @@ def save_user_context_to_sheets():
         
         for user_id, context in USER_CONTEXT.items():
             # Chỉ lưu context có dữ liệu
-            if not context or context.get("last_updated", 0) < time.time() - 86400 * 30:  # 30 ngày
+            if not context:
                 continue
+            
+            # Kiểm tra thời gian cập nhật
+            last_updated = context.get("last_updated", 0)
+            if isinstance(last_updated, (int, float)):
+                if last_updated < time.time() - 86400 * 30:  # 30 ngày
+                    continue
+            else:
+                # Nếu last_updated không phải số, sử dụng thời gian hiện tại
+                context["last_updated"] = time.time()
             
             # Chuyển đổi dữ liệu thành chuỗi JSON để lưu
             product_history = json.dumps(context.get("product_history", []), ensure_ascii=False)
@@ -239,39 +258,60 @@ def save_user_context_to_sheets():
                 phone = context["order_data"].get("phone", "")
                 customer_name = context["order_data"].get("customer_name", "")
             
+            # Lấy các trường khác
+            last_ms = context.get("last_ms", "")
+            last_msg_time = context.get("last_msg_time", "")
+            real_message_count = context.get("real_message_count", 0)
+            referral_source = context.get("referral_source", "")
+            has_sent_first_carousel = context.get("has_sent_first_carousel", False)
+            
             row = [
                 user_id,
-                context.get("last_ms", ""),
+                last_ms,
                 product_history,
                 order_data,
                 conversation_history,
-                str(context.get("real_message_count", 0)),
-                context.get("referral_source", ""),
+                str(real_message_count),
+                referral_source,
                 now,
                 phone,
-                customer_name
+                customer_name,
+                str(last_msg_time),
+                str(has_sent_first_carousel)
             ]
             values.append(row)
         
         if values:
-            # Xóa toàn bộ dữ liệu cũ và ghi mới (đơn giản)
-            # Hoặc có thể implement cập nhật từng dòng để tối ưu
-            service.spreadsheets().values().clear(
-                spreadsheetId=GOOGLE_SHEET_ID,
-                range=f"{USER_CONTEXT_SHEET_NAME}!A2:J"
-            ).execute()
+            print(f"[CONTEXT SAVE] Đang lưu {len(values)} users vào Google Sheets...")
             
-            service.spreadsheets().values().update(
+            # Xóa toàn bộ dữ liệu cũ và ghi mới (đơn giản)
+            try:
+                service.spreadsheets().values().clear(
+                    spreadsheetId=GOOGLE_SHEET_ID,
+                    range=f"{USER_CONTEXT_SHEET_NAME}!A2:L"
+                ).execute()
+            except Exception as clear_error:
+                print(f"[CONTEXT CLEAR ERROR] Lỗi khi xóa dữ liệu cũ: {clear_error}")
+                # Nếu lỗi xóa, thử ghi đè lên
+                pass
+            
+            # Ghi dữ liệu mới
+            update_result = service.spreadsheets().values().update(
                 spreadsheetId=GOOGLE_SHEET_ID,
                 range=f"{USER_CONTEXT_SHEET_NAME}!A2",
                 valueInputOption="USER_ENTERED",
                 body={'values': values}
             ).execute()
             
-            print(f"[CONTEXT SAVED] Đã lưu {len(values)} users vào Google Sheets")
+            updated_cells = update_result.get('updatedCells', 0)
+            print(f"[CONTEXT SAVED] Đã lưu {len(values)} users ({updated_cells} cells) vào Google Sheets")
+        else:
+            print(f"[CONTEXT SAVE] Không có dữ liệu để lưu")
         
     except Exception as e:
         print(f"[CONTEXT SAVE ERROR] Lỗi khi lưu context vào Google Sheets: {e}")
+        import traceback
+        traceback.print_exc()
 
 def load_user_context_from_sheets():
     """Load USER_CONTEXT từ Google Sheets"""
@@ -287,7 +327,7 @@ def load_user_context_from_sheets():
         # Lấy dữ liệu từ sheet
         result = service.spreadsheets().values().get(
             spreadsheetId=GOOGLE_SHEET_ID,
-            range=f"{USER_CONTEXT_SHEET_NAME}!A2:J"
+            range=f"{USER_CONTEXT_SHEET_NAME}!A2:L"
         ).execute()
         
         values = result.get('values', [])
@@ -335,11 +375,24 @@ def load_user_context_from_sheets():
             if len(row) > 6 and row[6]:
                 context["referral_source"] = row[6]
             
+            # Thêm các trường mới
             if len(row) > 9 and row[9]:
                 # Cập nhật tên khách hàng từ sheet
                 if "order_data" not in context:
                     context["order_data"] = {}
                 context["order_data"]["customer_name"] = row[9]
+            
+            if len(row) > 10 and row[10]:
+                try:
+                    context["last_msg_time"] = float(row[10])
+                except:
+                    context["last_msg_time"] = 0
+            
+            if len(row) > 11 and row[11]:
+                try:
+                    context["has_sent_first_carousel"] = row[11].lower() == "true"
+                except:
+                    context["has_sent_first_carousel"] = False
             
             USER_CONTEXT[user_id] = context
             loaded_count += 1
@@ -348,6 +401,8 @@ def load_user_context_from_sheets():
         
     except Exception as e:
         print(f"[CONTEXT LOAD ERROR] Lỗi khi load context từ Google Sheets: {e}")
+        import traceback
+        traceback.print_exc()
 
 def periodic_context_save():
     """Lưu context định kỳ vào Google Sheets"""
@@ -356,9 +411,23 @@ def periodic_context_save():
     # Đợi app khởi động xong
     time.sleep(30)
     
+    # Kiểm tra và tạo sheet nếu cần
+    if GOOGLE_SHEET_ID and GOOGLE_SHEETS_CREDENTIALS_JSON:
+        try:
+            init_user_context_sheet()
+        except Exception as e:
+            print(f"[PERIODIC SAVE INIT ERROR] Lỗi khi khởi tạo sheet: {e}")
+    
     while True:
-        print(f"[PERIODIC SAVE] Đang lưu context vào Google Sheets...")
-        save_user_context_to_sheets()
+        try:
+            print(f"[PERIODIC SAVE] Đang lưu context vào Google Sheets...")
+            save_user_context_to_sheets()
+            print(f"[PERIODIC SAVE] Hoàn thành, đợi 5 phút...")
+        except Exception as e:
+            print(f"[PERIODIC SAVE ERROR] Lỗi khi lưu context: {e}")
+            import traceback
+            traceback.print_exc()
+        
         time.sleep(300)  # 5 phút
 
 def get_user_order_history_from_sheets(user_id: str, phone: str = None) -> List[Dict]:
@@ -652,6 +721,13 @@ def update_context_with_new_ms(uid: str, new_ms: str, source: str = "unknown"):
     ctx["last_updated"] = time.time()
     
     print(f"[CONTEXT UPDATE COMPLETE] Đã cập nhật MS {new_ms} cho user {uid} (nguồn: {source}, real_message_count: {ctx['real_message_count']})")
+    
+    # Lưu ngay lập tức vào Google Sheets để đảm bảo không mất dữ liệu
+    try:
+        save_user_context_to_sheets()
+    except Exception as e:
+        print(f"[CONTEXT IMMEDIATE SAVE ERROR] Lỗi khi lưu ngay context: {e}")
+    
     return True
 
 def restore_user_context_on_wakeup(uid: str):
@@ -5768,5 +5844,8 @@ if __name__ == "__main__":
     print(f"🟢 Facebook Conversion API: {'SẴN SÀNG' if FACEBOOK_PIXEL_ID and FACEBOOK_ACCESS_TOKEN else 'CHƯA CẤU HÌNH'}")
     print(f"🟢 OpenAI Function Calling: SẴN SÀNG")
     print("=" * 80)
+    print("🚀 Bot đã sẵn sàng!")
+    print("=" * 80)
     
+    # RUN FLASK APP
     app.run(host="0.0.0.0", port=get_port(), debug=False)
