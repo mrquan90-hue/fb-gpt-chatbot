@@ -983,9 +983,9 @@ def update_context_with_new_ms(uid: str, new_ms: str, source: str = "unknown"):
     if old_ms != new_ms:
         print(f"[CONTEXT UPDATE] User {uid}: Chuyển từ {old_ms} sang {new_ms} (nguồn: {source})")
         
-        # Reset counter để bot gửi carousel cho sản phẩm mới
+        # Reset COMPLETE để bot gửi carousel cho sản phẩm mới
         ctx["real_message_count"] = 0
-        ctx["has_sent_first_carousel"] = False
+        ctx["has_sent_first_carousel"] = False  # QUAN TRỌNG: reset này!
         ctx["last_msg_time"] = 0  # Reset thời gian tin nhắn cuối
         ctx["last_processed_text"] = ""  # Reset text đã xử lý
     else:
@@ -1010,7 +1010,7 @@ def update_context_with_new_ms(uid: str, new_ms: str, source: str = "unknown"):
     # Cập nhật thời gian
     ctx["last_updated"] = time.time()
     
-    print(f"[CONTEXT UPDATE COMPLETE] Đã cập nhật MS {new_ms} cho user {uid} (nguồn: {source}, real_message_count: {ctx['real_message_count']})")
+    print(f"[CONTEXT UPDATE COMPLETE] Đã cập nhật MS {new_ms} cho user {uid} (nguồn: {source}, real_message_count: {ctx['real_message_count']}, has_sent_first_carousel: {ctx['has_sent_first_carousel']})")
     
     # Lưu ngay lập tức vào Google Sheets để đảm bảo không mất dữ liệu
     try:
@@ -2110,6 +2110,89 @@ def send_quick_replies(recipient_id: str, text: str, quick_replies: list):
     return call_facebook_send_api(payload)
 
 # ============================================
+# HÀM GỬI NÚT ĐẶT HÀNG ĐẸP
+# ============================================
+
+def send_order_button_template(uid: str, ms: str, product_name: str = None):
+    """
+    Gửi template với nút đặt hàng đẹp - THAY THẾ CHO VIỆC GỬI LINK THÔ
+    """
+    if ms not in PRODUCTS:
+        return
+    
+    product = PRODUCTS[ms]
+    
+    # Lấy thông tin sản phẩm
+    if not product_name:
+        product_name = product.get('Ten', '')
+        if f"[{ms}]" in product_name or ms in product_name:
+            product_name = product_name.replace(f"[{ms}]", "").replace(ms, "").strip()
+    
+    gia_int = extract_price_int(product.get("Gia", "")) or 0
+    
+    # URL webview đặt hàng
+    webview_url = f"https://{DOMAIN}/messenger-order?ms={ms}&uid={uid}"
+    
+    payload = {
+        "recipient": {"id": uid},
+        "message": {
+            "attachment": {
+                "type": "template",
+                "payload": {
+                    "template_type": "button",
+                    "text": f"🎯 **ĐẶT HÀNG {ms}**\n\n📦 {product_name}\n💰 Giá: {gia_int:,.0f} đ\n\nBấm nút bên dưới để vào trang đặt hàng chính thức:",
+                    "buttons": [
+                        {
+                            "type": "web_url",
+                            "title": "🛒 ĐẶT HÀNG NGAY",
+                            "url": webview_url,
+                            "webview_height_ratio": "tall",
+                            "messenger_extensions": True,
+                            "webview_share_button": "hide"
+                        },
+                        {
+                            "type": "postback",
+                            "title": "ℹ️ Thông tin SP",
+                            "payload": f"PRODUCT_HIGHLIGHTS_{ms}"
+                        },
+                        {
+                            "type": "postback",
+                            "title": "🖼️ Xem ảnh",
+                            "payload": f"VIEW_IMAGES_{ms}"
+                        }
+                    ]
+                }
+            }
+        }
+    }
+    
+    return call_facebook_send_api(payload)
+
+def send_order_button_quick_reply(uid: str, ms: str):
+    """
+    Gửi nút đặt hàng bằng Quick Replies - rất trực quan trên Messenger
+    """
+    webview_url = f"https://{DOMAIN}/messenger-order?ms={ms}&uid={uid}"
+    
+    quick_replies = [
+        {
+            "content_type": "text",
+            "title": "🛒 ĐẶT HÀNG NGAY",
+            "payload": f"ORDER_NOW_{ms}"
+        },
+        {
+            "content_type": "text",
+            "title": "📞 TƯ VẤN THÊM",
+            "payload": "NEED_HELP"
+        }
+    ]
+    
+    # Tin nhắn kèm theo nút
+    message_text = f"✅ Sẵn sàng đặt hàng **{ms}**!\n\nBấm nút bên dưới để vào trang đặt hàng:"
+    
+    return send_quick_replies(uid, message_text, quick_replies)
+
+# ============================================
 # HELPER: PRODUCTS
 # ============================================
 
@@ -2618,13 +2701,21 @@ def execute_tool(uid, name, args):
     
     elif name == "provide_order_link":
         if ms in PRODUCTS:
-            # Webview URL cho Messenger
-            webview_url = f"https://{DOMAIN}/messenger-order?ms={ms}&uid={uid}"
+            # Gửi template với nút đặt hàng đẹp THAY VÌ link thô
+            product = PRODUCTS[ms]
+            product_name = product.get('Ten', '')
+            
+            if f"[{ms}]" in product_name or ms in product_name:
+                product_name = product_name.replace(f"[{ms}]", "").replace(ms, "").strip()
+            
+            # Gửi template đẹp
+            send_order_button_template(uid, ms, product_name)
+            
             return json.dumps({
-                "order_link": webview_url,
+                "order_sent": True,
                 "ms": ms,
-                "product_name": PRODUCTS[ms].get('Ten', ''),
-                "is_webview": True
+                "product_name": product_name,
+                "message": "Đã gửi nút đặt hàng"
             }, ensure_ascii=False)
         return "Không tìm thấy sản phẩm."
     
@@ -3449,7 +3540,7 @@ def handle_order_form_step(uid: str, text: str) -> bool:
     return False
 
 # ============================================
-# HANDLE POSTBACK THÔNG MINH
+# HANDLE POSTBACK THÔNG MINH - ĐÃ SỬA ĐỂ GỬI NÚT ĐẶT HÀNG ĐẸP
 # ============================================
 
 def handle_postback_with_recovery(uid: str, payload: str, postback_id: str = None):
@@ -3624,10 +3715,9 @@ Hãy liệt kê 5 ưu điểm nổi bật nhất của sản phẩm này theo đ
             except Exception as e:
                 print(f"[FACEBOOK CAPI ERROR] Lỗi queue AddToCart: {e}")
             
-            # Gửi link webview đặt hàng
-            webview_url = f"https://{DOMAIN}/messenger-order?ms={ms}&uid={uid}"
+            # THAY VÌ GỬI LINK THÔ, GỬI NÚT ĐẶT HÀNG ĐẸP
+            send_order_button_template(uid, ms, product_name)
             
-            send_message(uid, f"Để đặt hàng sản phẩm này, anh/chị vui lòng nhấn vào nút 'Đặt ngay' trong carousel hoặc truy cập: {webview_url}")
             return True
     
     elif payload in ["PRICE_QUERY", "COLOR_QUERY", "SIZE_QUERY", "MATERIAL_QUERY", "STOCK_QUERY"]:
@@ -3657,7 +3747,7 @@ Vui lòng gửi mã sản phẩm (ví dụ: MS123456) hoặc mô tả sản ph�
     return False
 
 # ============================================
-# HANDLE TEXT MESSAGES - ĐÃ SỬA ĐỔI LOGIC
+# HANDLE TEXT MESSAGES - ĐÃ SỬA ĐỔI LOGIC CAROUSEL
 # ============================================
 
 def handle_text(uid: str, text: str):
@@ -3705,6 +3795,7 @@ def handle_text(uid: str, text: str):
         
         print(f"[MESSAGE COUNT] User {uid}: tin nhắn thứ {message_count}")
         print(f"[DEBUG] Current last_ms in context: {ctx.get('last_ms')}")
+        print(f"[DEBUG] has_sent_first_carousel: {ctx.get('has_sent_first_carousel')}")
         
         # Xử lý order state nếu có
         if handle_order_form_step(uid, text):
@@ -3743,9 +3834,9 @@ def handle_text(uid: str, text: str):
         if current_ms and current_ms in PRODUCTS:
             print(f"[HAS MS FROM CONTEXT] User {uid} đã có MS từ context: {current_ms}")
             
-            # Gửi carousel nếu chưa gửi (cho MS mới hoặc MS cũ nhưng chưa gửi carousel)
-            if not ctx.get("has_sent_first_carousel"):
-                print(f"🚨 [FIRST CAROUSEL FOR PRODUCT] Chưa gửi carousel cho sản phẩm {current_ms}")
+            # Gửi carousel nếu: chưa gửi carousel cho sản phẩm này VÀ tin nhắn trong 3 tin đầu tiên
+            if not ctx.get("has_sent_first_carousel") and message_count <= 3:
+                print(f"🚨 [FIRST CAROUSEL FOR PRODUCT] Gửi carousel cho sản phẩm {current_ms} (tin nhắn thứ {message_count})")
                 send_single_product_carousel(uid, current_ms)
                 ctx["has_sent_first_carousel"] = True
             
@@ -3782,7 +3873,7 @@ def handle_text(uid: str, text: str):
 # ============================================
 
 def handle_image(uid: str, image_url: str):
-    """Xử lý ảnh sản phẩm với công nghệ AI thông minh và carousel gợi ý"""
+    """Xử lý ảnh sản phẩm với công nghệ AI thông minh và carousel gợi Ý"""
     ctx = USER_CONTEXT[uid]
     
     now = time.time()
@@ -4956,7 +5047,7 @@ def messenger_order():
                             wardSelect.empty();
                             wardSelect.append(new Option('Chọn phường/xã', ''));
                             
-                            wards.forEach(ward => {{
+ wards.forEach(ward => {{
                                 wardSelect.append(new Option(ward.name, ward.code));
                             }});
                             
