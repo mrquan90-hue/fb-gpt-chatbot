@@ -2001,82 +2001,28 @@ def handle_feed_comment(change_data: dict):
         return None
 
 # ============================================
-# HELPER: SEND MESSAGE - THÊM DEBUG LOGGING CHI TIẾT
+# HELPER: SEND MESSAGE
 # ============================================
 
 def call_facebook_send_api(payload: dict, retry_count=2):
-    """Gửi request đến Facebook Send API với debug logging chi tiết"""
     if not PAGE_ACCESS_TOKEN:
         print("[WARN] PAGE_ACCESS_TOKEN chưa được cấu hình")
         return {}
     
     url = f"https://graph.facebook.com/v12.0/me/messages?access_token={PAGE_ACCESS_TOKEN}"
     
-    # Xác định loại message để debug
-    message_type = "unknown"
-    if "message" in payload:
-        if "text" in payload["message"]:
-            message_type = "text"
-            debug_text = payload["message"]["text"][:100]
-        elif "attachment" in payload["message"]:
-            if payload["message"]["attachment"]["type"] == "template":
-                message_type = "template"
-                template_type = payload["message"]["attachment"]["payload"].get("template_type", "unknown")
-                message_type = f"template_{template_type}"
-            elif payload["message"]["attachment"]["type"] == "image":
-                message_type = "image"
-    
-    print(f"[FACEBOOK API DEBUG] Gửi {message_type} message đến user {payload.get('recipient', {}).get('id', 'unknown')}")
-    print(f"[FACEBOOK API DEBUG] URL: {url}")
-    print(f"[FACEBOOK API DEBUG] Payload type: {message_type}")
-    
-    if message_type == "text":
-        print(f"[FACEBOOK API DEBUG] Text content: {debug_text}")
-    
     for attempt in range(retry_count):
         try:
-            print(f"[FACEBOOK API DEBUG] Attempt {attempt + 1}/{retry_count}")
             resp = requests.post(url, json=payload, timeout=10)
-            
-            # DEBUG CHI TIẾT
-            print(f"[FACEBOOK API DEBUG] Status Code: {resp.status_code}")
-            
             if resp.status_code == 200:
-                result = resp.json()
-                message_id = result.get('message_id', 'unknown')
-                recipient_id = result.get('recipient_id', 'unknown')
-                print(f"[FACEBOOK API DEBUG] SUCCESS! Message ID: {message_id}, Recipient ID: {recipient_id}")
-                return result
+                return resp.json()
             else:
-                error_text = resp.text[:500] if resp.text else "No response text"
-                print(f"[FACEBOOK API DEBUG] ERROR {resp.status_code}: {error_text}")
-                
-                # Parse error details
-                try:
-                    error_json = resp.json()
-                    error_message = error_json.get('error', {}).get('message', 'unknown')
-                    error_type = error_json.get('error', {}).get('type', 'unknown')
-                    error_code = error_json.get('error', {}).get('code', 0)
-                    print(f"[FACEBOOK API DEBUG] Error details: {error_message} (type: {error_type}, code: {error_code})")
-                except:
-                    pass
-                
                 if attempt < retry_count - 1:
-                    print(f"[FACEBOOK API DEBUG] Retrying in 0.5s...")
                     time.sleep(0.5)
-                else:
-                    print(f"[FACEBOOK API DEBUG] All retries failed")
-                    
-        except requests.exceptions.Timeout as e:
-            print(f"[FACEBOOK API DEBUG] Timeout on attempt {attempt + 1}: {e}")
-            if attempt < retry_count - 1:
-                time.sleep(0.5)
         except Exception as e:
-            print(f"[FACEBOOK API DEBUG] Exception on attempt {attempt + 1}: {e}")
             if attempt < retry_count - 1:
                 time.sleep(0.5)
     
-    print(f"[FACEBOOK API DEBUG] All attempts failed for {message_type} message")
     return {}
 
 def send_message(recipient_id: str, text: str):
@@ -3442,7 +3388,7 @@ def send_initiate_checkout_smart(uid: str, ms: str, product_name: str, price: fl
         print(f"[FACEBOOK CAPI SMART] Không thể queue InitiateCheckout, queue đầy")
 
 # ============================================
-# GỬI CAROUSEL 1 SẢN PHẨM - THÊM DEBUG LOGGING
+# GỬI CAROUSEL 1 SẢN PHẨM
 # ============================================
 
 def send_single_product_carousel(uid: str, ms: str):
@@ -3450,28 +3396,19 @@ def send_single_product_carousel(uid: str, ms: str):
     Gửi carousel chỉ với 1 sản phẩm duy nhất
     Sử dụng khi bot đã nhận diện được MS từ ad_title, catalog, Fchat
     """
-    print(f"[SINGLE CAROUSEL DEBUG] Bắt đầu gửi carousel cho user {uid}, sản phẩm {ms}")
-    
     if ms not in PRODUCTS:
-        print(f"[SINGLE CAROUSEL ERROR] Sản phẩm {ms} không tồn tại trong PRODUCTS")
-        print(f"[SINGLE CAROUSEL DEBUG] Danh sách MS có sẵn: {list(PRODUCTS.keys())[:5]}...")
+        print(f"[SINGLE CAROUSEL ERROR] Sản phẩm {ms} không tồn tại")
         return
     
     load_products()
     product = PRODUCTS[ms]
     
-    print(f"[SINGLE CAROUSEL DEBUG] Đã load product: {ms}")
-    
     images_field = product.get("Images", "")
     urls = parse_image_urls(images_field)
     image_url = urls[0] if urls else ""
     
-    print(f"[SINGLE CAROUSEL DEBUG] Image URL: {image_url[:100] if image_url else 'No image'}")
-    
     gia_raw = product.get("Gia", "")
     gia_int = extract_price_int(gia_raw) or 0
-    
-    print(f"[SINGLE CAROUSEL DEBUG] Giá sản phẩm: {gia_int}")
     
     # LẤY TÊN SẢN PHẨM (KHÔNG BAO GỒM MÃ SẢN PHẨM)
     product_name = product.get('Ten', '')
@@ -3480,8 +3417,6 @@ def send_single_product_carousel(uid: str, ms: str):
     if f"[{ms}]" in product_name or ms in product_name:
         # Xóa mã sản phẩm khỏi tên
         product_name = product_name.replace(f"[{ms}]", "").replace(ms, "").strip()
-    
-    print(f"[SINGLE CAROUSEL DEBUG] Tên sản phẩm: {product_name[:50]}...")
     
     element = {
         "title": product_name,  # CHỈ HIỂN THỊ TÊN SẢN PHẨM
@@ -3509,11 +3444,7 @@ def send_single_product_carousel(uid: str, ms: str):
         ]
     }
     
-    print(f"[SINGLE CAROUSEL DEBUG] Element đã tạo, đang gửi carousel...")
-    
-    result = send_carousel_template(uid, [element])
-    
-    print(f"[SINGLE CAROUSEL DEBUG] Kết quả gửi carousel: {result}")
+    send_carousel_template(uid, [element])
     
     ctx = USER_CONTEXT[uid]
     ctx["last_ms"] = ms
@@ -3531,8 +3462,6 @@ def send_single_product_carousel(uid: str, ms: str):
         ctx["product_history"] = ctx["product_history"][:5]
     
     ctx["has_sent_first_carousel"] = True
-    
-    print(f"[SINGLE CAROUSEL DEBUG] Đã cập nhật context: last_ms={ms}, has_sent_first_carousel={ctx['has_sent_first_carousel']}")
     
     # GỬI SỰ KIỆN VIEWCONTENT THÔNG MINH (BẤT ĐỒNG BỘ)
     try:
@@ -3818,7 +3747,7 @@ Vui lòng gửi mã sản phẩm (ví dụ: MS123456) hoặc mô tả sản ph�
     return False
 
 # ============================================
-# HANDLE TEXT MESSAGES - ĐÃ SỬA ĐỔI LOGIC CAROUSEL VÀ THÊM XỬ LÝ ĐẶT HÀNG TRỰC TIẾP
+# HANDLE TEXT MESSAGES - ĐÃ SỬA ĐỔI LOGIC CAROUSEL
 # ============================================
 
 def handle_text(uid: str, text: str):
@@ -3874,42 +3803,6 @@ def handle_text(uid: str, text: str):
             return
         
         # ============================================
-        # XỬ LÝ ĐẶT HÀNG TRỰC TIẾP - KHÔNG QUA GPT
-        # ============================================
-        text_norm = normalize_vietnamese(text.lower())
-        
-        # Danh sách từ khóa đặt hàng
-        order_keywords = [
-            'mua', 'đặt hàng', 'đặt mua', 'mua hàng', 'mua 1 bộ', 'mua một bộ',
-            'tôi muốn mua', 'tôi muốn đặt', 'cho tôi mua', 'cho tôi đặt',
-            'đặt cho tôi', 'muốn mua', 'muốn đặt', 'cần mua', 'cần đặt',
-            'mua ngay', 'đặt ngay', 'mua sản phẩm', 'đặt sản phẩm'
-        ]
-        
-        # Kiểm tra xem có phải yêu cầu đặt hàng không
-        is_order_request = any(keyword in text_norm for keyword in order_keywords)
-        
-        if is_order_request:
-            # Kiểm tra xem đã có MS trong context chưa
-            current_ms = ctx.get("last_ms")
-            
-            if current_ms and current_ms in PRODUCTS:
-                print(f"[ORDER DIRECT] User {uid} yêu cầu đặt hàng sản phẩm {current_ms}")
-                
-                # Gửi trực tiếp nút đặt hàng mà không qua GPT
-                product = PRODUCTS[current_ms]
-                product_name = product.get('Ten', '')
-                
-                if f"[{current_ms}]" in product_name or current_ms in product_name:
-                    product_name = product_name.replace(f"[{current_ms}]", "").replace(current_ms, "").strip()
-                
-                # Gửi template nút đặt hàng đẹp
-                send_order_button_template(uid, current_ms, product_name)
-                
-                ctx["processing_lock"] = False
-                return
-        
-        # ============================================
         # QUAN TRỌNG: LUÔN ƯU TIÊN MS MỚI NHẤT TRƯỚC KHI TRẢ LỜI
         # ============================================
         
@@ -3922,6 +3815,7 @@ def handle_text(uid: str, text: str):
         
         # BƯỚC 2: Tìm số trong tin nhắn với tiền tố
         if not detected_ms:
+            text_norm = normalize_vietnamese(text.lower())
             numbers = re.findall(r'\b(?:ms|mã|sp|ma|san pham)\s*(\d{1,6})\b', text_norm, re.IGNORECASE)
             for num in numbers:
                 clean_num = num.lstrip('0')
@@ -3957,6 +3851,7 @@ def handle_text(uid: str, text: str):
         
         # Kiểm tra nếu tin nhắn là câu hỏi chung (không có MS)
         general_questions = ['giá', 'bao nhiêu', 'màu gì', 'size nào', 'còn hàng', 'đặt hàng', 'mua', 'tư vấn']
+        text_norm = normalize_vietnamese(text.lower())
         if any(keyword in text_norm for keyword in general_questions):
             # Yêu cầu khách gửi MS cụ thể
             send_message(uid, "Dạ, để em tư vấn chính xác cho anh/chị, vui lòng cho em biết mã sản phẩm (ví dụ: MS000034) hoặc gửi ảnh sản phẩm ạ! 🤗")
@@ -3966,8 +3861,6 @@ def handle_text(uid: str, text: str):
 
     except Exception as e:
         print(f"Error in handle_text for {uid}: {e}")
-        import traceback
-        traceback.print_exc()
         try:
             send_message(uid, "Dạ em đang gặp chút trục trặc, anh/chị vui lòng thử lại sau ạ.")
         except:
@@ -5724,163 +5617,168 @@ Em thấy anh/chị quan tâm đến sản phẩm **[{ms_from_ad}]** từ quản
                         send_message(sender_id, welcome_msg)
                         handled = True
                     
-                    if not handled:
-                        # Nếu không xác định được sản phẩm từ ad_title, gửi thông báo chung
-                        send_message(sender_id, f"Chào anh/chị! 👋\nEm là trợ lý AI của {get_fanpage_name_from_api()}.\n\nVui lòng gửi mã sản phẩm hoặc ảnh sản phẩm để em tư vấn ạ!")
-                
-                continue  # Đã xử lý xong referral
+                    if not handled and referral_payload:
+                        detected_ms = detect_ms_from_text(referral_payload)
+                        if detected_ms and detected_ms in PRODUCTS:
+                            print(f"[ADS REFERRAL] Nhận diện mã từ payload: {detected_ms}")
+                            
+                            # SỬ DỤNG HÀM MỚI ĐỂ CẬP NHẬT MS VÀ RESET COUNTER
+                            update_context_with_new_ms(sender_id, detected_ms, "ADS")
+                            
+                            welcome_msg = f"""Chào anh/chị! 👋 
+Em là trợ lý AI của {get_fanpage_name_from_api()}.
 
+Em thấy anh/chị quan tâm đến sản phẩm **[{detected_ms}]**.
+Để xem thông tin chi tiết, anh/chị vui lòng gửi tin nhắn bất kỳ ạ!"""
+                            
+                            send_message(sender_id, welcome_msg)
+                            handled = True
+                
+                if handled:
+                    continue
+                
+                if ctx.get("referral_source") != "ADS" or not ctx.get("last_ms"):
+                    ctx["last_ms"] = None
+                    ctx["product_history"] = []
+                
+                if referral_payload:
+                    detected_ms = detect_ms_from_text(referral_payload)
+                    
+                    if detected_ms and detected_ms in PRODUCTS:
+                        print(f"[REFERRAL AUTO] Nhận diện mã sản phẩm từ referral: {detected_ms}")
+                        
+                        # SỬ DỤNG HÀM MỚI ĐỂ CẬP NHẬT MS VÀ RESET COUNTER
+                        update_context_with_new_ms(sender_id, detected_ms, "referral")
+                        
+                        welcome_msg = f"""Chào anh/chị! 👋 
+Em là trợ lý AI của {FANPAGE_NAME}.
+
+Em thấy anh/chị quan tâm đến sản phẩm mã [{detected_ms}].
+Để xem thông tin chi tiết, anh/chị vui lòng gửi tin nhắn bất kỳ ạ!"""
+                        send_message(sender_id, welcome_msg)
+                        continue
+                    else:
+                        ctx["has_sent_first_carousel"] = False
+                        welcome_msg = f"""Chào anh/chị! 👋 
+Em là trợ lý AI của {FANPAGE_NAME}.
+
+Để em tư vấn chính xác, anh/chị vui lòng:
+1. Gửi mã sản phẩm (ví dụ: [MS123456])
+2. Hoặc gõ "xem sản phẩm" để xem danh sách
+3. Hoặc mô tả sản phẩm bạn đang tìm
+
+Anh/chị quan tâm sản phẩm nào ạ?"""
+                        send_message(sender_id, welcome_msg)
+                        continue
+            
             # Xử lý postback
-            if m.get("postback"):
-                payload = m["postback"].get("payload", "")
-                postback_id = m.get("postback", {}).get("mid")  # Lấy message ID của postback
-                print(f"[POSTBACK] User {sender_id}: {payload}")
-                
-                # Xử lý postback với idempotency check
-                handle_postback_with_recovery(sender_id, payload, postback_id)
-                continue
-
-            # Xử lý tin nhắn
-            if m.get("message"):
+            if "postback" in m:
+                payload = m["postback"].get("payload")
+                if payload:
+                    postback_id = m["postback"].get("mid")
+                    
+                    ctx = USER_CONTEXT.get(sender_id, {})
+                    last_payload = ctx.get("last_postback_payload")
+                    last_payload_time = ctx.get("last_postback_time", 0)
+                    
+                    now = time.time()
+                    if payload == last_payload and (now - last_payload_time) < 1:
+                        continue
+                    
+                    handle_postback_with_recovery(sender_id, payload, postback_id)
+                    continue
+            
+            # Xử lý tin nhắn thường (text & ảnh)
+            if "message" in m:
                 msg = m["message"]
-                text = msg.get("text", "")
-                attachments = msg.get("attachments", [])
-
-                # Xử lý ảnh nếu có
-                if attachments:
+                text = msg.get("text")
+                attachments = msg.get("attachments") or []
+                
+                msg_mid = msg.get("mid")
+                
+                if msg_mid:
+                    ctx = USER_CONTEXT[sender_id]
+                    if "processed_message_mids" not in ctx:
+                        ctx["processed_message_mids"] = {}
+                    
+                    if msg_mid in ctx["processed_message_mids"]:
+                        processed_time = ctx["processed_message_mids"][msg_mid]
+                        now = time.time()
+                        if now - processed_time < 30:
+                            print(f"[MSG DUPLICATE] Bỏ qua message đã xử lý: {msg_mid}")
+                            continue
+                    
+                    last_msg_time = ctx.get("last_msg_time", 0)
+                    now = time.time()
+                    
+                    if now - last_msg_time < 0.5:
+                        print(f"[MSG DEBOUNCE] Message đến quá nhanh, bỏ qua: {msg_mid}")
+                        continue
+                    
+                    ctx["last_msg_time"] = now
+                    ctx["processed_message_mids"][msg_mid] = now
+                    
+                    if len(ctx["processed_message_mids"]) > 50:
+                        sorted_items = sorted(ctx["processed_message_mids"].items(), key=lambda x: x[1], reverse=True)[:30]
+                        ctx["processed_message_mids"] = dict(sorted_items)
+                
+                if text:
+                    ctx = USER_CONTEXT[sender_id]
+                    if ctx.get("processing_lock"):
+                        print(f"[TEXT LOCKED] User {sender_id} đang được xử lý, bỏ qua text: {text[:50]}...")
+                        continue
+                    
+                    handle_text(sender_id, text)
+                elif attachments:
                     for att in attachments:
                         if att.get("type") == "image":
-                            image_url = att.get("payload", {}).get("url", "")
-                            print(f"[IMAGE MESSAGE] User {sender_id} gửi ảnh: {image_url[:100]}...")
-                            
-                            # Gọi hàm xử lý ảnh
-                            handle_image(sender_id, image_url)
-                            continue  # Bỏ qua xử lý text nếu có ảnh
-                
-                # Xử lý tin nhắn văn bản
-                if text:
-                    print(f"[TEXT MESSAGE] User {sender_id}: {text}")
-                    handle_text(sender_id, text)
+                            image_url = att.get("payload", {}).get("url")
+                            if image_url:
+                                ctx = USER_CONTEXT[sender_id]
+                                if ctx.get("processing_lock"):
+                                    print(f"[IMAGE LOCKED] User {sender_id} đang được xử lý, bỏ qua image")
+                                    continue
+                                
+                                handle_image(sender_id, image_url)
 
     return "OK", 200
 
 # ============================================
-# POSCAKE WEBHOOK ENDPOINT
-# ============================================
-
-@app.route("/poscake-webhook", methods=["POST"])
-def poscake_webhook():
-    """
-    Webhook nhận sự kiện từ Poscake (đơn hàng mới, cập nhật trạng thái)
-    """
-    # Kiểm tra secret key
-    secret = request.headers.get("X-Poscake-Secret", "")
-    if secret != POSCAKE_WEBHOOK_SECRET:
-        print(f"[POSCAKE WEBHOOK] Secret không khớp: {secret}")
-        return jsonify({"status": "error", "message": "Unauthorized"}), 401
-    
-    try:
-        data = request.get_json()
-        if not data:
-            return jsonify({"status": "error", "message": "No data"}), 400
-        
-        event_type = data.get("event")
-        event_data = data.get("data", {})
-        
-        print(f"[POSCAKE WEBHOOK] Nhận sự kiện: {event_type}")
-        print(f"[POSCAKE WEBHOOK DATA] {json.dumps(event_data, ensure_ascii=False)[:500]}")
-        
-        # Xử lý các loại sự kiện đơn hàng
-        if event_type.startswith("order."):
-            return handle_poscake_order_event(event_type, event_data)
-        
-        return jsonify({
-            "status": "success",
-            "event": event_type,
-            "message": "Event processed"
-        }), 200
-        
-    except Exception as e:
-        print(f"[POSCAKE WEBHOOK ERROR] {e}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-# ============================================
-# HEALTH CHECK & ADMIN ENDPOINTS
+# HEALTH CHECK ENDPOINT
 # ============================================
 
 @app.route("/health", methods=["GET"])
 def health_check():
-    """Health check endpoint cho Koyeb"""
     return jsonify({
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
-        "user_count": len(USER_CONTEXT),
-        "product_count": len(PRODUCTS),
-        "facebook_queue_size": FACEBOOK_EVENT_QUEUE.qsize(),
-        "facebook_worker_running": FACEBOOK_WORKER_RUNNING
-    }), 200
-
-@app.route("/admin/context/<user_id>", methods=["GET"])
-def admin_get_context(user_id):
-    """Endpoint admin để xem context của user"""
-    if user_id in USER_CONTEXT:
-        return jsonify(USER_CONTEXT[user_id]), 200
-    else:
-        # Thử load từ Google Sheets
-        context = get_user_context_from_sheets(user_id)
-        if context:
-            return jsonify(context), 200
-        return jsonify({"error": "User not found"}), 404
-
-@app.route("/admin/products", methods=["GET"])
-def admin_get_products():
-    """Endpoint admin để xem danh sách sản phẩm"""
-    load_products(force=True)
-    return jsonify({
-        "count": len(PRODUCTS),
-        "products": {ms: PRODUCTS[ms].get("Ten", "") for ms in list(PRODUCTS.keys())[:50]},
-        "last_load": LAST_LOAD
-    }), 200
+        "products_loaded": len(PRODUCTS) > 0,
+        "users_in_context": len(USER_CONTEXT),
+        "facebook_pixel_configured": bool(FACEBOOK_PIXEL_ID),
+        "openai_configured": bool(OPENAI_API_KEY),
+        "google_sheets_configured": bool(GOOGLE_SHEET_ID and GOOGLE_SHEETS_CREDENTIALS_JSON)
+    })
 
 # ============================================
-# STARTUP TASKS
-# ============================================
-
-def startup_tasks():
-    """Chạy các tác vụ khởi động"""
-    print("🚀 Đang khởi động ứng dụng...")
-    
-    # Load products lần đầu
-    load_products(force=True)
-    
-    # Khởi động worker xử lý sự kiện Facebook bất đồng bộ
-    start_facebook_worker()
-    
-    # Khởi động thread lưu context định kỳ
-    save_thread = threading.Thread(target=periodic_context_save, daemon=True)
-    save_thread.start()
-    print(f"[STARTUP] Đã khởi động thread lưu context định kỳ")
-    
-    # Load user context từ Google Sheets
-    if GOOGLE_SHEET_ID and GOOGLE_SHEETS_CREDENTIALS_JSON:
-        try:
-            load_user_context_from_sheets()
-            print(f"[STARTUP] Đã load user context từ Google Sheets")
-        except Exception as e:
-            print(f"[STARTUP ERROR] Lỗi khi load context từ Google Sheets: {e}")
-    
-    print("✅ Ứng dụng đã sẵn sàng!")
-
-# ============================================
-# MAIN ENTRY POINT
+# INITIALIZATION
 # ============================================
 
 if __name__ == "__main__":
-    # Chạy startup tasks
-    startup_tasks()
+    print("🚀 Starting Facebook GPT Chatbot with Messenger Webview...")
     
-    # Khởi động Flask app
+    # Khởi động worker Facebook CAPI
+    start_facebook_worker()
+    
+    # Khởi động thread lưu context định kỳ
+    threading.Thread(target=periodic_context_save, daemon=True).start()
+    
+    # Load products ngay khi khởi động
+    load_products(force=True)
+    
+    # Load context từ Google Sheets nếu có
+    if GOOGLE_SHEET_ID and GOOGLE_SHEETS_CREDENTIALS_JSON:
+        load_user_context_from_sheets()
+    
+    # Khởi chạy Flask app
     port = int(os.environ.get("PORT", 8000))
     app.run(host="0.0.0.0", port=port, debug=False)
