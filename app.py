@@ -5285,63 +5285,26 @@ def api_submit_order():
         if f"[{ms}]" in product_name or ms in product_name:
             product_name = product_name.replace(f"[{ms}]", "").replace(ms, "").strip()
         
-        # Lấy giá từ biến thể (nếu có)
-        variant_price = 0
-        color = data.get("color", "Mặc định")
-        size = data.get("size", "Mặc định")
-        
-        # Tìm giá biến thể phù hợp
-        for variant in product.get("variants", []):
-            variant_color = variant.get("mau", "").strip()
-            variant_size = variant.get("size", "").strip()
-            
-            if (color == variant_color or (color == "Mặc định" and not variant_color)) and \
-               (size == variant_size or (size == "Mặc định" and not variant_size)):
-                variant_price = variant.get("gia", 0)
-                break
-        
-        if variant_price == 0:
-            variant_price = extract_price_int(product.get("Gia", "")) or 0
-        
-        # Tính tổng tiền
-        quantity = int(data.get("quantity", 1))
-        total_price = variant_price * quantity
+        # Tạo địa chỉ đầy đủ
+        full_address = f"{data.get('addressDetail', '')}, {data.get('ward', '')}, {data.get('district', '')}, {data.get('province', '')}"
         
         # Chuẩn bị dữ liệu đơn hàng
         order_data = {
             "uid": uid,
             "ms": ms,
             "product_name": product_name,
-            "color": color,
-            "size": size,
-            "quantity": quantity,
-            "unit_price": variant_price,
-            "total_price": total_price,
+            "color": data.get("color", "Mặc định"),
+            "size": data.get("size", "Mặc định"),
+            "quantity": int(data.get("quantity", 1)),
             "customer_name": data.get("customerName", ""),
             "phone": data.get("phone", ""),
             "province": data.get("province", ""),
             "district": data.get("district", ""),
             "ward": data.get("ward", ""),
             "address_detail": data.get("addressDetail", ""),
+            "address": full_address,
             "referral_source": USER_CONTEXT.get(uid, {}).get("referral_source", "direct")
         }
-        
-        # Tạo địa chỉ đầy đủ
-        full_address = f"{data.get('addressDetail', '')}, {data.get('ward', '')}, {data.get('district', '')}, {data.get('province', '')}"
-        order_data["address"] = full_address
-        
-        # Gửi sự kiện Purchase SMART (bất đồng bộ)
-        try:
-            send_purchase_smart(
-                uid=uid,
-                ms=ms,
-                product_name=product_name,
-                order_data=order_data
-            )
-            print(f"[FACEBOOK CAPI] Đã queue Purchase cho đơn hàng {ms}")
-        except Exception as e:
-            print(f"[FACEBOOK CAPI ERROR] Lỗi queue Purchase: {e}")
-            # KHÔNG ảnh hưởng đến việc lưu đơn hàng
         
         # Lưu vào Google Sheets (nếu có)
         sheet_success = False
@@ -5367,11 +5330,193 @@ def api_submit_order():
         # Tạo order ID
         order_id = f"ORD{int(time.time())}_{uid[-4:] if uid else '0000'}"
         
+        # ============================================
+        # SỬA LỖI: LẤY ĐÚNG GIÁ THEO PHÂN LOẠI HÀNG
+        # ============================================
+        
+        # Tìm giá chính xác theo màu và size
+        unit_price = 0
+        found_exact_variant = False
+        
+        color = data.get("color", "Mặc định")
+        size = data.get("size", "Mặc định")
+        
+        # TRƯỚC HẾT: Tìm biến thể CHÍNH XÁC theo màu và size
+        for variant in product.get("variants", []):
+            variant_color = variant.get("mau", "").strip()
+            variant_size = variant.get("size", "").strip()
+            
+            # So sánh chính xác
+            color_match = False
+            size_match = False
+            
+            # So sánh màu
+            if color == "Mặc định":
+                color_match = (variant_color == "" or variant_color is None)
+            else:
+                color_match = (variant_color.lower() == color.lower())
+            
+            # So sánh size
+            if size == "Mặc định":
+                size_match = (variant_size == "" or variant_size is None)
+            else:
+                size_match = (variant_size.lower() == size.lower())
+            
+            if color_match and size_match:
+                unit_price = variant.get("gia", 0)
+                found_exact_variant = True
+                print(f"[PRICE MATCH] Tìm thấy biến thể chính xác: màu='{variant_color}', size='{variant_size}', giá={unit_price}")
+                break
+        
+        # NẾU KHÔNG TÌM THẤY BIẾN THỂ CHÍNH XÁC
+        if not found_exact_variant:
+            print(f"[PRICE WARNING] Không tìm thấy biến thể chính xác cho màu='{color}', size='{size}'")
+            
+            # THỬ 1: Tìm biến thể chỉ khớp màu (bỏ qua size)
+            for variant in product.get("variants", []):
+                variant_color = variant.get("mau", "").strip()
+                
+                if color == "Mặc định":
+                    color_match = (variant_color == "" or variant_color is None)
+                else:
+                    color_match = (variant_color.lower() == color.lower())
+                
+                if color_match:
+                    unit_price = variant.get("gia", 0)
+                    print(f"[PRICE FALLBACK 1] Dùng giá theo màu: {color} -> {unit_price}")
+                    found_exact_variant = True
+                    break
+            
+            # THỬ 2: Tìm biến thể chỉ khớp size (bỏ qua màu)
+            if not found_exact_variant:
+                for variant in product.get("variants", []):
+                    variant_size = variant.get("size", "").strip()
+                    
+                    if size == "Mặc định":
+                        size_match = (variant_size == "" or variant_size is None)
+                    else:
+                        size_match = (variant_size.lower() == size.lower())
+                    
+                    if size_match:
+                        unit_price = variant.get("gia", 0)
+                        print(f"[PRICE FALLBACK 2] Dùng giá theo size: {size} -> {unit_price}")
+                        found_exact_variant = True
+                        break
+            
+            # THỬ 3: Lấy giá đầu tiên từ danh sách biến thể
+            if not found_exact_variant and product.get("variants"):
+                unit_price = product["variants"][0].get("gia", 0)
+                print(f"[PRICE FALLBACK 3] Dùng giá biến thể đầu tiên: {unit_price}")
+                found_exact_variant = True
+        
+        # CUỐI CÙNG: Nếu vẫn không có giá, dùng giá chung của sản phẩm
+        if unit_price == 0:
+            unit_price = extract_price_int(product.get("Gia", "")) or 0
+            print(f"[PRICE FALLBACK 4] Dùng giá chung sản phẩm: {unit_price}")
+        
+        # Tính tổng tiền CHÍNH XÁC
+        quantity = int(data.get("quantity", 1))
+        total_price = unit_price * quantity
+        
+        print(f"[PRICE FINAL] Giá đơn vị: {unit_price}, Số lượng: {quantity}, Tổng: {total_price}")
+        
+        # CẬP NHẬT LẠI order_data với giá chính xác
+        order_data.update({
+            "unit_price": unit_price,
+            "total_price": total_price
+        })
+        
+        # ============================================
+        # GỬI TIN NHẮN CẢM ƠN SAU KHI ĐẶT HÀNG THÀNH CÔNG
+        # ============================================
+        
+        if uid:
+            try:
+                # Xây dựng tin nhắn chi tiết với giá ĐÃ ĐƯỢC SỬA
+                full_address = f"{order_data['address_detail']}, {order_data['ward']}, {order_data['district']}, {order_data['province']}"
+                
+                thank_you_message = f"""🎉 **CẢM ƠN ANH/CHỊ ĐÃ ĐẶT HÀNG!** 🎉
+
+📋 **THÔNG TIN ĐƠN HÀNG**
+─────────────────────
+🆔 Mã đơn: {order_id}
+📦 Sản phẩm: {product_name}
+📌 Mã SP: {ms}
+🎨 Màu: {color}
+📏 Size: {size}
+🔢 Số lượng: {quantity}
+💰 Đơn giá: {unit_price:,.0f} đ
+💰 Tổng tiền: **{total_price:,.0f} đ**
+
+👤 **THÔNG TIN GIAO HÀNG**
+─────────────────────
+📛 Người nhận: {order_data['customer_name']}
+📱 SĐT: {order_data['phone']}
+📍 Địa chỉ: {full_address}
+
+⏰ **THÔNG BÁO**
+─────────────────────
+Shop sẽ gọi điện xác nhận đơn hàng trong 5-10 phút.
+📞 Vui lòng giữ máy để nhận cuộc gọi từ shop!
+
+💬 **HỖ TRỢ**
+─────────────────────
+Nếu cần thay đổi thông tin đơn hàng hoặc hỗ trợ thêm, vui lòng nhắn tin cho em ạ! ❤️
+
+Cảm ơn anh/chị đã tin tưởng {get_fanpage_name_from_api()}!"""
+                
+                # Gửi tin nhắn chính
+                send_message(uid, thank_you_message)
+                
+                # Gửi thêm quick replies để tiện tương tác
+                time.sleep(0.5)  # Delay nhẹ để tin nhắn không bị dồn
+                
+                quick_replies = [
+                    {
+                        "content_type": "text",
+                        "title": "📞 Gọi lại cho tôi",
+                        "payload": f"CALL_BACK_{order_id}"
+                    },
+                    {
+                        "content_type": "text",
+                        "title": "📍 Theo dõi đơn hàng",
+                        "payload": f"TRACK_ORDER_{order_id}"
+                    },
+                    {
+                        "content_type": "text", 
+                        "title": "🛒 Mua thêm",
+                        "payload": "BUY_MORE"
+                    }
+                ]
+                
+                send_quick_replies(uid, "Anh/chị có thể bấm các nút bên dưới để:", quick_replies)
+                
+                # Gửi sự kiện Facebook CAPI Purchase với giá CHÍNH XÁC
+                try:
+                    send_purchase_smart(
+                        uid=uid,
+                        ms=ms,
+                        product_name=product_name,
+                        order_data=order_data
+                    )
+                    print(f"[FACEBOOK CAPI] Đã gửi Purchase event cho đơn hàng {order_id}, giá {total_price}")
+                except Exception as capi_error:
+                    print(f"[FACEBOOK CAPI ERROR] Lỗi gửi Purchase event: {capi_error}")
+                
+                print(f"[ORDER THANK YOU] Đã gửi tin nhắn cảm ơn cho user {uid}, đơn hàng {order_id}, tổng {total_price:,.0f} đ")
+                
+            except Exception as msg_error:
+                print(f"[ORDER THANK YOU ERROR] Lỗi khi gửi tin nhắn cảm ơn: {msg_error}")
+                # KHÔNG ảnh hưởng đến response của API, vẫn trả về thành công
+                # Chỉ ghi log lỗi và tiếp tục
+
         return jsonify({
             "status": "success",
             "message": "Đã nhận đơn hàng thành công!",
             "order_id": order_id,
             "product_name": product_name,
+            "unit_price": unit_price,
+            "quantity": quantity,
             "total_price": total_price,
             "sheet_saved": sheet_success
         })
@@ -5788,60 +5933,30 @@ Anh/chị quan tâm sản phẩm nào ạ?"""
                 if text:
                     ctx = USER_CONTEXT[sender_id]
                     if ctx.get("processing_lock"):
-                        print(f"[TEXT LOCKED] User {sender_id} đang được xử lý, bỏ qua text: {text[:50]}...")
-                        continue
-                    
+                        print(f"[TEXT LOCKED] User {sender_id} đang được xử lý")
+                        return
+
                     handle_text(sender_id, text)
+                
                 elif attachments:
                     for att in attachments:
                         if att.get("type") == "image":
                             image_url = att.get("payload", {}).get("url")
                             if image_url:
-                                ctx = USER_CONTEXT[sender_id]
-                                if ctx.get("processing_lock"):
-                                    print(f"[IMAGE LOCKED] User {sender_id} đang được xử lý, bỏ qua image")
-                                    continue
-                                
                                 handle_image(sender_id, image_url)
+                                break
 
     return "OK", 200
 
-# ============================================
-# HEALTH CHECK ENDPOINT
-# ============================================
-
-@app.route("/health", methods=["GET"])
-def health_check():
-    return jsonify({
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
-        "products_loaded": len(PRODUCTS) > 0,
-        "users_in_context": len(USER_CONTEXT),
-        "facebook_pixel_configured": bool(FACEBOOK_PIXEL_ID),
-        "openai_configured": bool(OPENAI_API_KEY),
-        "google_sheets_configured": bool(GOOGLE_SHEET_ID and GOOGLE_SHEETS_CREDENTIALS_JSON)
-    })
-
-# ============================================
-# INITIALIZATION
-# ============================================
-
 if __name__ == "__main__":
-    print("🚀 Starting Facebook GPT Chatbot with Messenger Webview...")
-    
-    # Khởi động worker Facebook CAPI
+    # Khởi động worker cho Facebook CAPI
     start_facebook_worker()
     
     # Khởi động thread lưu context định kỳ
     threading.Thread(target=periodic_context_save, daemon=True).start()
     
-    # Load products ngay khi khởi động
-    load_products(force=True)
+    # Load context từ Google Sheets khi khởi động
+    load_user_context_from_sheets()
     
-    # Load context từ Google Sheets nếu có
-    if GOOGLE_SHEET_ID and GOOGLE_SHEETS_CREDENTIALS_JSON:
-        load_user_context_from_sheets()
-    
-    # Khởi chạy Flask app
     port = int(os.environ.get("PORT", 8000))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host="0.0.0.0", port=port)
