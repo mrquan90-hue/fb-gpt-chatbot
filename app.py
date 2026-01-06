@@ -4035,6 +4035,7 @@ def get_google_sheets_service():
         return None
 
 def write_order_to_google_sheet_api(order_data: dict):
+    """Ghi đơn hàng vào Google Sheets với thông tin giá chính xác"""
     service = get_google_sheets_service()
     if service is None:
         return False
@@ -4045,23 +4046,72 @@ def write_order_to_google_sheet_api(order_data: dict):
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         order_id = f"ORD{int(time.time())}_{order_data.get('uid', '')[-4:]}"
         
+        # LẤY GIÁ CHÍNH XÁC TỪ ORDER_DATA
+        unit_price = order_data.get("unit_price", 0)
+        total_price = order_data.get("total_price", 0)
+        quantity = order_data.get("quantity", 1)
+        
+        # Debug log
+        print(f"[GOOGLE SHEET DEBUG] Đang ghi đơn hàng:")
+        print(f"  - MS: {order_data.get('ms')}")
+        print(f"  - Unit Price: {unit_price}")
+        print(f"  - Quantity: {quantity}")
+        print(f"  - Total Price: {total_price}")
+        
+        # Đảm bảo có giá trị số hợp lệ
+        try:
+            unit_price_float = float(unit_price)
+            total_price_float = float(total_price)
+            quantity_int = int(quantity)
+        except (ValueError, TypeError):
+            print(f"[GOOGLE SHEET WARNING] Giá trị số không hợp lệ: unit_price={unit_price}, total_price={total_price}, quantity={quantity}")
+            # Fallback: thử lấy giá từ sản phẩm
+            ms = order_data.get("ms", "")
+            if ms and ms in PRODUCTS:
+                product = PRODUCTS[ms]
+                unit_price_float = extract_price_int(product.get("Gia", "")) or 0
+                quantity_int = int(quantity) if quantity else 1
+                total_price_float = unit_price_float * quantity_int
+                print(f"[GOOGLE SHEET FALLBACK] Dùng giá fallback: {unit_price_float} x {quantity_int} = {total_price_float}")
+            else:
+                unit_price_float = 0
+                total_price_float = 0
+                quantity_int = 1
+        
+        # Chuẩn bị dòng dữ liệu (22 cột để phù hợp với Google Sheet)
         new_row = [
-            timestamp, order_id, "Mới",
-            order_data.get("ms", ""), order_data.get("product_name", ""),
-            order_data.get("color", ""), order_data.get("size", ""),
-            order_data.get("quantity", 1), order_data.get("unit_price", 0),
-            order_data.get("total_price", 0), order_data.get("customer_name", ""),
-            order_data.get("phone", ""), order_data.get("address", ""),
-            order_data.get("province", ""), order_data.get("district", ""),
-            order_data.get("ward", ""), order_data.get("address_detail", ""),
-            "COD", "ViettelPost",
-            f"Đơn từ Facebook Bot ({order_data.get('referral_source', 'direct')})",
-            order_data.get("uid", ""), order_data.get("referral_source", "direct")
+            timestamp,                          # 1. Thời gian
+            order_id,                           # 2. Mã đơn hàng
+            "Mới",                              # 3. Trạng thái
+            order_data.get("ms", ""),           # 4. Mã sản phẩm
+            order_data.get("product_name", ""), # 5. Tên sản phẩm
+            order_data.get("color", ""),        # 6. Màu sắc
+            order_data.get("size", ""),         # 7. Size
+            quantity_int,                       # 8. Số lượng (ĐÃ SỬA)
+            unit_price_float,                   # 9. Đơn giá (ĐÃ SỬA)
+            total_price_float,                  # 10. Thành tiền (ĐÃ SỬA)
+            order_data.get("customer_name", ""),# 11. Tên khách hàng
+            order_data.get("phone", ""),        # 12. Số điện thoại
+            order_data.get("address", ""),      # 13. Địa chỉ đầy đủ
+            order_data.get("province", ""),     # 14. Tỉnh/Thành phố
+            order_data.get("district", ""),     # 15. Quận/Huyện
+            order_data.get("ward", ""),         # 16. Phường/Xã
+            order_data.get("address_detail", ""), # 17. Địa chỉ chi tiết
+            "COD",                              # 18. Phương thức thanh toán
+            "ViettelPost",                      # 19. Đơn vị vận chuyển
+            f"Đơn từ Facebook Bot ({order_data.get('referral_source', 'direct')})", # 20. Ghi chú
+            order_data.get("uid", ""),          # 21. Facebook User ID
+            order_data.get("referral_source", "direct") # 22. Nguồn đơn hàng
         ]
         
+        # Debug dòng dữ liệu
+        print(f"[GOOGLE SHEET ROW DATA] Số cột: {len(new_row)}")
+        print(f"  Dữ liệu: {new_row}")
+        
+        # Ghi vào Google Sheets
         request = service.spreadsheets().values().append(
             spreadsheetId=GOOGLE_SHEET_ID,
-            range=f"{sheet_name}!A:V",
+            range=f"{sheet_name}!A:V",  # 22 cột (A-V)
             valueInputOption="USER_ENTERED",
             insertDataOption="INSERT_ROWS",
             body={"values": [new_row]}
@@ -4069,10 +4119,18 @@ def write_order_to_google_sheet_api(order_data: dict):
         
         response = request.execute()
         print(f"✅ ĐÃ GHI ĐƠN HÀNG VÀO GOOGLE SHEET THÀNH CÔNG!")
+        print(f"   - Mã đơn: {order_id}")
+        print(f"   - Sản phẩm: {order_data.get('product_name', '')}")
+        print(f"   - Số lượng: {quantity_int}")
+        print(f"   - Đơn giá: {unit_price_float:,.0f} đ")
+        print(f"   - Thành tiền: {total_price_float:,.0f} đ")
+        
         return True
         
     except Exception as e:
         print(f"❌ Lỗi Google Sheets API: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 def save_order_to_local_csv(order_data: dict):
@@ -5288,48 +5346,6 @@ def api_submit_order():
         # Tạo địa chỉ đầy đủ
         full_address = f"{data.get('addressDetail', '')}, {data.get('ward', '')}, {data.get('district', '')}, {data.get('province', '')}"
         
-        # Chuẩn bị dữ liệu đơn hàng
-        order_data = {
-            "uid": uid,
-            "ms": ms,
-            "product_name": product_name,
-            "color": data.get("color", "Mặc định"),
-            "size": data.get("size", "Mặc định"),
-            "quantity": int(data.get("quantity", 1)),
-            "customer_name": data.get("customerName", ""),
-            "phone": data.get("phone", ""),
-            "province": data.get("province", ""),
-            "district": data.get("district", ""),
-            "ward": data.get("ward", ""),
-            "address_detail": data.get("addressDetail", ""),
-            "address": full_address,
-            "referral_source": USER_CONTEXT.get(uid, {}).get("referral_source", "direct")
-        }
-        
-        # Lưu vào Google Sheets (nếu có)
-        sheet_success = False
-        if GOOGLE_SHEET_ID and GOOGLE_SHEETS_CREDENTIALS_JSON:
-            sheet_success = write_order_to_google_sheet_api(order_data)
-        
-        # Lưu vào file local backup
-        save_order_to_local_csv(order_data)
-        
-        # Cập nhật context với MS mới từ đơn hàng
-        if uid:
-            update_context_with_new_ms(uid, ms, "order_form")
-            
-            # Lưu thông tin khách hàng vào context
-            if uid in USER_CONTEXT:
-                USER_CONTEXT[uid]["order_data"] = {
-                    "phone": data.get("phone", ""),
-                    "customer_name": data.get("customerName", ""),
-                    "address": full_address,
-                    "last_order_time": time.time()
-                }
-        
-        # Tạo order ID
-        order_id = f"ORD{int(time.time())}_{uid[-4:] if uid else '0000'}"
-        
         # ============================================
         # SỬA LỖI: LẤY ĐÚNG GIÁ THEO PHÂN LOẠI HÀNG
         # ============================================
@@ -5352,13 +5368,13 @@ def api_submit_order():
             
             # So sánh màu
             if color == "Mặc định":
-                color_match = (variant_color == "" or variant_color is None)
+                color_match = (variant_color == "" or variant_color is None or variant_color == "Mặc định")
             else:
                 color_match = (variant_color.lower() == color.lower())
             
             # So sánh size
             if size == "Mặc định":
-                size_match = (variant_size == "" or variant_size is None)
+                size_match = (variant_size == "" or variant_size is None or variant_size == "Mặc định")
             else:
                 size_match = (variant_size.lower() == size.lower())
             
@@ -5377,7 +5393,7 @@ def api_submit_order():
                 variant_color = variant.get("mau", "").strip()
                 
                 if color == "Mặc định":
-                    color_match = (variant_color == "" or variant_color is None)
+                    color_match = (variant_color == "" or variant_color is None or variant_color == "Mặc định")
                 else:
                     color_match = (variant_color.lower() == color.lower())
                 
@@ -5393,7 +5409,7 @@ def api_submit_order():
                     variant_size = variant.get("size", "").strip()
                     
                     if size == "Mặc định":
-                        size_match = (variant_size == "" or variant_size is None)
+                        size_match = (variant_size == "" or variant_size is None or variant_size == "Mặc định")
                     else:
                         size_match = (variant_size.lower() == size.lower())
                     
@@ -5420,11 +5436,41 @@ def api_submit_order():
         
         print(f"[PRICE FINAL] Giá đơn vị: {unit_price}, Số lượng: {quantity}, Tổng: {total_price}")
         
-        # CẬP NHẬT LẠI order_data với giá chính xác
-        order_data.update({
+        # Chuẩn bị dữ liệu đơn hàng
+        order_data = {
+            "uid": uid,
+            "ms": ms,
+            "product_name": product_name,
+            "color": data.get("color", "Mặc định"),
+            "size": data.get("size", "Mặc định"),
+            "quantity": quantity,
+            "customer_name": data.get("customerName", ""),
+            "phone": data.get("phone", ""),
+            "province": data.get("province", ""),
+            "district": data.get("district", ""),
+            "ward": data.get("ward", ""),
+            "address_detail": data.get("addressDetail", ""),
+            "address": full_address,
             "unit_price": unit_price,
-            "total_price": total_price
-        })
+            "total_price": total_price,
+            "referral_source": USER_CONTEXT.get(uid, {}).get("referral_source", "direct")
+        }
+        
+        # Cập nhật context với MS mới từ đơn hàng
+        if uid:
+            update_context_with_new_ms(uid, ms, "order_form")
+            
+            # Lưu thông tin khách hàng vào context
+            if uid in USER_CONTEXT:
+                USER_CONTEXT[uid]["order_data"] = {
+                    "phone": data.get("phone", ""),
+                    "customer_name": data.get("customerName", ""),
+                    "address": full_address,
+                    "last_order_time": time.time()
+                }
+        
+        # Tạo order ID
+        order_id = f"ORD{int(time.time())}_{uid[-4:] if uid else '0000'}"
         
         # ============================================
         # GỬI TIN NHẮN CẢM ƠN SAU KHI ĐẶT HÀNG THÀNH CÔNG
@@ -5442,8 +5488,8 @@ def api_submit_order():
 🆔 Mã đơn: {order_id}
 📦 Sản phẩm: {product_name}
 📌 Mã SP: {ms}
-🎨 Màu: {color}
-📏 Size: {size}
+🎨 Màu: {order_data['color']}
+📏 Size: {order_data['size']}
 🔢 Số lượng: {quantity}
 💰 Đơn giá: {unit_price:,.0f} đ
 💰 Tổng tiền: **{total_price:,.0f} đ**
@@ -5497,19 +5543,32 @@ Cảm ơn anh/chị đã tin tưởng {get_fanpage_name_from_api()}!"""
                         uid=uid,
                         ms=ms,
                         product_name=product_name,
-                        order_data=order_data
+                        order_data={
+                            "phone": data.get("phone", ""),
+                            "total_price": total_price,
+                            "quantity": quantity,
+                            "order_id": order_id
+                        }
                     )
-                    print(f"[FACEBOOK CAPI] Đã gửi Purchase event cho đơn hàng {order_id}, giá {total_price}")
+                    print(f"[FACEBOOK CAPI] Đã gửi Purchase event cho đơn hàng {order_id}, giá {total_price}, số lượng {quantity}")
                 except Exception as capi_error:
                     print(f"[FACEBOOK CAPI ERROR] Lỗi gửi Purchase event: {capi_error}")
                 
-                print(f"[ORDER THANK YOU] Đã gửi tin nhắn cảm ơn cho user {uid}, đơn hàng {order_id}, tổng {total_price:,.0f} đ")
+                print(f"[ORDER THANK YOU] Đã gửi tin nhắn cảm ơn cho user {uid}, đơn hàng {order_id}, tổng {total_price:,.0f} đ, số lượng {quantity}")
                 
             except Exception as msg_error:
                 print(f"[ORDER THANK YOU ERROR] Lỗi khi gửi tin nhắn cảm ơn: {msg_error}")
                 # KHÔNG ảnh hưởng đến response của API, vẫn trả về thành công
                 # Chỉ ghi log lỗi và tiếp tục
 
+        # Lưu vào Google Sheets (nếu có) - SỬA: GỌI SAU KHI ĐÃ CÓ THÔNG TIN GIÁ CHÍNH XÁC
+        sheet_success = False
+        if GOOGLE_SHEET_ID and GOOGLE_SHEETS_CREDENTIALS_JSON:
+            sheet_success = write_order_to_google_sheet_api(order_data)
+        
+        # Lưu vào file local backup
+        save_order_to_local_csv(order_data)
+        
         return jsonify({
             "status": "success",
             "message": "Đã nhận đơn hàng thành công!",
