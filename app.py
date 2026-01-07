@@ -43,7 +43,7 @@ POSCAKE_WEBHOOK_SECRET = os.getenv("POSCAKE_WEBHOOK_SECRET", "").strip()
 POSCAKE_STORE_ID = os.getenv("POSCAKE_STORE_ID", "").strip()
 
 # Page ID để xác định comment từ page
-PAGE_ID = os.getenv("PAGE_ID", "516937221685203").strip()
+PAGE_ID = os.getenv("PAGE_ID", "").strip()
 
 # Facebook Conversion API Configuration
 FACEBOOK_PIXEL_ID = os.getenv("FACEBOOK_PIXEL_ID", "").strip()
