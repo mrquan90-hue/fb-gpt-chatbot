@@ -2877,7 +2877,7 @@ Khi khách hỏi về bất kỳ thông tin chi tiết nào của sản phẩm, 
    - Trích xuất thông tin chính xác từ "Mô tả"
    - Diễn đạt lại theo cách tự nhiên, dễ hiểu, thân thiện
    - Giữ nguyên ý nghĩa nhưng làm cho câu trả lời gần gũi với khách hàng
-   - Ví dụ: "Dạ, theo thông tin sản phẩm thì [trích dẫn/paraphrase thông tin từ mô tả] ạ!"
+   - Ví dụ: "Dạ, [trích dẫn/paraphrase thông tin từ mô tả] ạ!"
 
 5. NẾU KHÔNG TÌM THẤY thông tin trong "Mô tả":
    - Trả lời: "Dạ, phần này trong hệ thống chưa có thông tin chi tiết ạ. Anh/chị vui lòng liên hệ shop để được hỗ trợ ạ!"
@@ -3844,7 +3844,7 @@ Hãy liệt kê 5 ưu điểm nổi bật nhất của sản phẩm này theo đ
     
     elif payload == "GET_STARTED":
         welcome_msg = f"""Chào anh/chị! 👋 
-Em là trợ lý AI của {get_fanpage_name_from_api()}.
+Em là nhân viên tư vấn của {get_fanpage_name_from_api()}.
 
 Vui lòng gửi mã sản phẩm (ví dụ: MS123456) hoặc mô tả sản phẩm."""
         send_message(uid, welcome_msg)
@@ -5919,7 +5919,7 @@ def webhook():
                         update_context_with_new_ms(sender_id, ms_from_ad, "ADS")
                         
                         welcome_msg = f"""Chào anh/chị! 👋 
-Em là trợ lý AI của {get_fanpage_name_from_api()}.
+Em là nhân viên tư vấn của {get_fanpage_name_from_api()}.
 
 Em thấy anh/chị quan tâm đến sản phẩm **[{ms_from_ad}]** từ quảng cáo.
 Để xem thông tin chi tiết, anh/chị vui lòng gửi tin nhắn bất kỳ ạ!"""
@@ -5936,7 +5936,7 @@ Em thấy anh/chị quan tâm đến sản phẩm **[{ms_from_ad}]** từ quản
                             update_context_with_new_ms(sender_id, detected_ms, "ADS")
                             
                             welcome_msg = f"""Chào anh/chị! 👋 
-Em là trợ lý AI của {get_fanpage_name_from_api()}.
+Em là nhân viên tư vấn của {get_fanpage_name_from_api()}.
 
 Em thấy anh/chị quan tâm đến sản phẩm **[{detected_ms}]**.
 Để xem thông tin chi tiết, anh/chị vui lòng gửi tin nhắn bất kỳ ạ!"""
@@ -5961,7 +5961,7 @@ Em thấy anh/chị quan tâm đến sản phẩm **[{detected_ms}]**.
                         update_context_with_new_ms(sender_id, detected_ms, "referral")
                         
                         welcome_msg = f"""Chào anh/chị! 👋 
-Em là trợ lý AI của {FANPAGE_NAME}.
+Em là nhân viên tư vấn của {FANPAGE_NAME}.
 
 Em thấy anh/chị quan tâm đến sản phẩm mã [{detected_ms}].
 Để xem thông tin chi tiết, anh/chị vui lòng gửi tin nhắn bất kỳ ạ!"""
@@ -5970,7 +5970,7 @@ Em thấy anh/chị quan tâm đến sản phẩm mã [{detected_ms}].
                     else:
                         ctx["has_sent_first_carousel"] = False
                         welcome_msg = f"""Chào anh/chị! 👋 
-Em là trợ lý AI của {FANPAGE_NAME}.
+Em là nhân viên tư vấn của {FANPAGE_NAME}.
 
 Để em tư vấn chính xác, anh/chị vui lòng:
 1. Gửi mã sản phẩm (ví dụ: [MS123456])
