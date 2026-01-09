@@ -2115,7 +2115,10 @@ def handle_feed_comment(change_data: dict):
         if ENABLE_COMMENT_REPLY and detected_ms:
             try:
                 # Lấy comment_id từ change_data
-                comment_id = change_data.get("id")
+                comment_id = change_data.get("comment_id")
+
+                # Thêm log để kiểm tra cho chắc chắn
+                print(f"[DEBUG] Khởi tạo reply cho comment_id: {comment_id}")
                 
                 if comment_id:
                     # Tạo nội dung trả lời bằng GPT
