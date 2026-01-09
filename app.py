@@ -33,7 +33,7 @@ VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "").strip()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 GOOGLE_SHEET_CSV_URL = os.getenv("SHEET_CSV_URL", "").strip()
 DOMAIN = os.getenv("DOMAIN", "").strip() or "fb-gpt-chatbot.onrender.com"
-FANPAGE_NAME = os.getenv("FANPAGE_NAME", "Shop thời trang")
+FANPAGE_NAME = os.getenv("FANPAGE_NAME", "shop")
 FCHAT_WEBHOOK_URL = os.getenv("FCHAT_WEBHOOK_URL", "").strip()
 FCHAT_TOKEN = os.getenv("FCHAT_TOKEN", "").strip()
 
