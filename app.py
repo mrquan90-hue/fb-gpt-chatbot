@@ -50,6 +50,10 @@ FACEBOOK_PIXEL_ID = os.getenv("FACEBOOK_PIXEL_ID", "").strip()
 FACEBOOK_ACCESS_TOKEN = os.getenv("FACEBOOK_ACCESS_TOKEN", "").strip()
 FACEBOOK_API_VERSION = os.getenv("FACEBOOK_API_VERSION", "v18.0").strip()
 
+# Thêm biến cho tính năng trả lời bình luận
+ENABLE_COMMENT_REPLY = os.getenv("ENABLE_COMMENT_REPLY", "true").lower() == "true"
+WEBSITE_URL = os.getenv("WEBSITE_URL", "").strip()  # Link website từ Google Sheet
+
 # ============================================
 # GOOGLE SHEETS API CONFIGURATION
 # ============================================
@@ -961,6 +965,119 @@ Hãy tạo lời chào mời thân thiện, tập trung vào ưu điểm sản p
         print(f"[GPT MARKETING ERROR] Lỗi khi tạo tin nhắn tiếp thị: {e}")
         # Fallback
         return f"Chào {user_name}! 👋\n\nEm thấy ac đã bình luận trên bài viết của shop và quan tâm đến sản phẩm:\n\n📦 **{product_name}**\n📌 Mã sản phẩm: {ms}\n\nĐây là sản phẩm rất được yêu thích tại shop với nhiều ưu điểm nổi bật! ac có thể hỏi em bất kỳ thông tin gì về sản phẩm này ạ!"
+
+def generate_comment_reply_by_gpt(comment_text: str, user_name: str, product_name: str = None, ms: str = None) -> str:
+    """
+    Tạo nội dung trả lời bình luận bằng GPT
+    Dựa trên WEBSITE_URL từ Google Sheet để quyết định nội dung
+    """
+    # Lấy thông tin website từ Google Sheet
+    website = WEBSITE_URL or get_website_info_from_sheets()
+    
+    if not client:
+        # Fallback nếu không có GPT
+        if website and website.startswith(('http://', 'https://')):
+            return f"Cảm ơn {user_name} đã quan tâm! Bạn có thể xem chi tiết sản phẩm và đặt hàng tại: {website}"
+        else:
+            return f"Cảm ơn {user_name} đã quan tâm! Vui lòng nhắn tin trực tiếp cho page để được tư vấn chi tiết ạ!"
+    
+    try:
+        fanpage_name = get_fanpage_name_from_api()
+        
+        # Xác định hướng trả lời dựa trên website
+        if website and website.startswith(('http://', 'https://')):
+            direction = f"Hãy hướng dẫn khách truy cập website: {website} để xem chi tiết sản phẩm và đặt hàng."
+            context = "Có website để khách hàng truy cập"
+        else:
+            direction = "Hãy mời khách hàng nhắn tin trực tiếp (inbox) cho page để được tư vấn chi tiết, đo đạc size và đặt hàng."
+            context = "Không có website, cần hướng dẫn khách vào inbox"
+        
+        system_prompt = f"""Bạn là nhân viên bán hàng của {fanpage_name}.
+Hãy trả lời bình luận của khách hàng một cách thân thiện, chuyên nghiệp.
+
+QUY TẮC QUAN TRỌNG:
+1. {direction}
+2. Ngắn gọn, không quá 3 dòng
+3. Thân thiện, nhiệt tình
+4. KHÔNG được đề cập đến mã sản phẩm (MS) trong câu trả lời
+5. KHÔNG được hướng dẫn cách đặt hàng phức tạp
+6. KHÔNG được yêu cầu khách cung cấp thông tin cá nhân
+7. Chỉ tập trung vào việc hướng dẫn truy cập website hoặc vào inbox
+
+Ngữ cảnh: {context}
+Khách hàng: {user_name}
+Bình luận: "{comment_text}"
+"""
+        
+        user_prompt = f"""Hãy tạo câu trả lời cho bình luận của khách hàng {user_name}:
+"{comment_text}"
+
+Yêu cầu: {direction}"""
+
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.7,
+            max_tokens=200
+        )
+        
+        reply = response.choices[0].message.content.strip()
+        
+        # Đảm bảo reply không rỗng
+        if not reply:
+            if website and website.startswith(('http://', 'https://')):
+                reply = f"Cảm ơn {user_name} đã quan tâm! Bạn có thể xem chi tiết sản phẩm và đặt hàng tại: {website}"
+            else:
+                reply = f"Cảm ơn {user_name} đã quan tâm! Vui lòng nhắn tin trực tiếp cho page để được tư vấn chi tiết ạ!"
+        
+        return reply
+    
+    except Exception as e:
+        print(f"[GPT COMMENT REPLY ERROR] Lỗi khi tạo trả lời bình luận: {e}")
+        # Fallback
+        if website and website.startswith(('http://', 'https://')):
+            return f"Cảm ơn {user_name} đã quan tâm! Bạn có thể xem chi tiết sản phẩm và đặt hàng tại: {website}"
+        else:
+            return f"Cảm ơn {user_name} đã quan tâm! Vui lòng nhắn tin trực tiếp cho page để được tư vấn chi tiết ạ!"
+
+def reply_to_facebook_comment(comment_id: str, message: str):
+    """
+    Gửi trả lời bình luận lên Facebook Graph API
+    """
+    if not PAGE_ACCESS_TOKEN:
+        print(f"[REPLY COMMENT ERROR] Thiếu PAGE_ACCESS_TOKEN")
+        return False
+    
+    if not comment_id:
+        print(f"[REPLY COMMENT ERROR] Thiếu comment_id")
+        return False
+    
+    try:
+        # Graph API endpoint để trả lời comment
+        url = f"https://graph.facebook.com/v18.0/{comment_id}/comments"
+        
+        params = {
+            'access_token': PAGE_ACCESS_TOKEN,
+            'message': message
+        }
+        
+        print(f"[REPLY COMMENT] Đang gửi trả lời bình luận {comment_id}: {message[:100]}...")
+        
+        response = requests.post(url, params=params, timeout=10)
+        
+        if response.status_code == 200:
+            print(f"[REPLY COMMENT SUCCESS] Đã gửi trả lời bình luận {comment_id}")
+            return True
+        else:
+            print(f"[REPLY COMMENT ERROR] Lỗi {response.status_code}: {response.text[:200]}")
+            return False
+            
+    except Exception as e:
+        print(f"[REPLY COMMENT EXCEPTION] Lỗi khi gửi trả lời bình luận: {e}")
+        return False
 
 # ============================================
 # HÀM CẬP NHẬT CONTEXT VỚI MS MỚI VÀ RESET COUNTER
@@ -1991,7 +2108,43 @@ def handle_feed_comment(change_data: dict):
                 print(f"[FEED COMMENT AUTO REPLY ERROR] Lỗi gửi tin nhắn: {e}")
         else:
             print(f"[FEED COMMENT SKIP AUTO REPLY] User {user_id} đã có real_message_count = {ctx.get('real_message_count')}, bỏ qua auto reply")
-        
+
+        # ============================================
+        # 8. TRẢ LỜI BÌNH LUẬN TRÊN FACEBOOK BẰNG GPT (TÍNH NĂNG MỚI)
+        # ============================================
+        if ENABLE_COMMENT_REPLY and detected_ms:
+            try:
+                # Lấy comment_id từ change_data
+                comment_id = change_data.get("id")
+                
+                if comment_id:
+                    # Tạo nội dung trả lời bằng GPT
+                    comment_reply = generate_comment_reply_by_gpt(
+                        comment_text=message_text,
+                        user_name=user_name,
+                        product_name=product.get('Ten', '') if detected_ms in PRODUCTS else None,
+                        ms=detected_ms
+                    )
+                    
+                    # Gửi trả lời lên Facebook
+                    if comment_reply:
+                        reply_success = reply_to_facebook_comment(comment_id, comment_reply)
+                        
+                        if reply_success:
+                            print(f"[COMMENT REPLY] Đã trả lời bình luận {comment_id} cho user {user_id}")
+                        else:
+                            print(f"[COMMENT REPLY ERROR] Không thể gửi trả lời bình luận {comment_id}")
+                    else:
+                        print(f"[COMMENT REPLY ERROR] Không tạo được nội dung trả lời")
+                else:
+                    print(f"[COMMENT REPLY ERROR] Không có comment_id")
+                    
+            except Exception as e:
+                print(f"[COMMENT REPLY EXCEPTION] Lỗi khi trả lời bình luận: {e}")
+                import traceback
+                traceback.print_exc()
+        # ============================================
+                
         return detected_ms
         
     except Exception as e:
@@ -2371,6 +2524,86 @@ def load_products(force=False):
                 
     except Exception as e:
         print("❌ load_products ERROR:", e)
+
+def get_website_info_from_sheets() -> Optional[str]:
+    """Lấy thông tin website từ Google Sheet (cột Website)"""
+    if not GOOGLE_SHEET_ID or not GOOGLE_SHEETS_CREDENTIALS_JSON:
+        print("[WEBSITE INFO] Chưa cấu hình Google Sheets")
+        return None
+    
+    try:
+        service = get_google_sheets_service()
+        if not service:
+            return None
+        
+        # Thử lấy từ sheet đầu tiên (thường là sheet chính)
+        sheet_names = ["Website", "Settings", "Config", "Thông tin", "Info"]
+        
+        for sheet_name in sheet_names:
+            try:
+                result = service.spreadsheets().values().get(
+                    spreadsheetId=GOOGLE_SHEET_ID,
+                    range=f"{sheet_name}!A:Z"
+                ).execute()
+                
+                values = result.get('values', [])
+                if not values:
+                    continue
+                
+                # Tìm cột "Website" trong header
+                headers = values[0]
+                website_col_index = -1
+                
+                for i, header in enumerate(headers):
+                    if header and header.lower().strip() == "website":
+                        website_col_index = i
+                        break
+                
+                if website_col_index >= 0 and len(values) > 1:
+                    # Lấy giá trị website từ dòng đầu tiên có dữ liệu
+                    for row in values[1:]:
+                        if len(row) > website_col_index and row[website_col_index]:
+                            website = row[website_col_index].strip()
+                            if website.startswith(('http://', 'https://')):
+                                print(f"[WEBSITE INFO] Đã lấy website từ sheet {sheet_name}: {website}")
+                                return website
+            except Exception as e:
+                print(f"[WEBSITE INFO ERROR] Lỗi khi đọc sheet {sheet_name}: {e}")
+                continue
+        
+        # Nếu không tìm thấy trong các sheet trên, thử tìm trong sheet sản phẩm
+        try:
+            result = service.spreadsheets().values().get(
+                spreadsheetId=GOOGLE_SHEET_ID,
+                range="Products!A:Z"
+            ).execute()
+            
+            values = result.get('values', [])
+            if values and len(values) > 0:
+                headers = values[0]
+                website_col_index = -1
+                
+                for i, header in enumerate(headers):
+                    if header and header.lower().strip() == "website":
+                        website_col_index = i
+                        break
+                
+                if website_col_index >= 0 and len(values) > 1:
+                    # Lấy website từ dòng đầu tiên
+                    if len(values[1]) > website_col_index and values[1][website_col_index]:
+                        website = values[1][website_col_index].strip()
+                        if website.startswith(('http://', 'https://')):
+                            print(f"[WEBSITE INFO] Đã lấy website từ sheet Products: {website}")
+                            return website
+        except Exception as e:
+            print(f"[WEBSITE INFO PRODUCTS ERROR] Lỗi khi đọc sheet Products: {e}")
+        
+        print("[WEBSITE INFO] Không tìm thấy thông tin website trong Google Sheets")
+        return None
+        
+    except Exception as e:
+        print(f"[WEBSITE INFO ERROR] Lỗi khi lấy thông tin website: {e}")
+        return None
 
 def get_variant_image(ms: str, color: str, size: str) -> str:
     if ms not in PRODUCTS:
