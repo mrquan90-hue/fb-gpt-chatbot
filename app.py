@@ -2076,6 +2076,17 @@ def handle_feed_comment(change_data: dict):
         # Gọi hàm cập nhật context mới (reset counter)
         update_context_with_new_ms(user_id, detected_ms, "feed_comment")
         
+        # Lấy thông tin sản phẩm NGAY tại đây để đảm bảo biến product luôn được định nghĩa
+        if detected_ms in PRODUCTS:
+            product = PRODUCTS[detected_ms]
+            product_name = product.get('Ten', '')
+            if f"[{detected_ms}]" in product_name or detected_ms in product_name:
+                product_name = product_name.replace(f"[{detected_ms}]", "").replace(detected_ms, "").strip()
+        else:
+            # Fallback nếu không tìm thấy sản phẩm
+            product = None
+            product_name = ""
+        
         # Lưu thêm thông tin về bài viết vào context
         ctx = USER_CONTEXT[user_id]
         ctx["source_post_id"] = post_id
@@ -2093,13 +2104,11 @@ def handle_feed_comment(change_data: dict):
                     print(f"[FEED COMMENT AUTO REPLY] Đã gửi tin nhắn tiếp thị bằng GPT cho user {user_id}")
                 else:
                     # Fallback nếu không tạo được tin nhắn
-                    # Lấy tên sản phẩm (loại bỏ mã nếu có trong tên)
-                    product = PRODUCTS[detected_ms]
-                    product_name = product.get('Ten', '')
-                    if f"[{detected_ms}]" in product_name or detected_ms in product_name:
-                        product_name = product_name.replace(f"[{detected_ms}]", "").replace(detected_ms, "").strip()
-                    
-                    send_message(user_id, f"Chào {user_name}! 👋\n\nCảm ơn ac đã bình luận. Sản phẩm ac quan tâm là {product_name}. ac có thể hỏi em bất kỳ thông tin gì về sản phẩm này ạ!")
+                    # Sử dụng biến product_name đã được định nghĩa trước đó
+                    if product_name:
+                        send_message(user_id, f"Chào {user_name}! 👋\n\nCảm ơn ac đã bình luận. Sản phẩm ac quan tâm là {product_name}. ac có thể hỏi em bất kỳ thông tin gì về sản phẩm này ạ!")
+                    else:
+                        send_message(user_id, f"Chào {user_name}! 👋\n\nCảm ơn ac đã bình luận trên bài viết của shop ạ! Ac có thể hỏi em bất kỳ thông tin gì về sản phẩm ạ!")
                 
                 # Tăng counter để không gửi lại lần nữa
                 ctx["real_message_count"] = 1
@@ -2125,7 +2134,7 @@ def handle_feed_comment(change_data: dict):
                     comment_reply = generate_comment_reply_by_gpt(
                         comment_text=message_text,
                         user_name=user_name,
-                        product_name=product.get('Ten', '') if detected_ms in PRODUCTS else None,
+                        product_name=product_name,  # Sử dụng biến product_name đã được định nghĩa
                         ms=detected_ms
                     )
                     
