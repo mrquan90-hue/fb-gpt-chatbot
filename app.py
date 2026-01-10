@@ -4702,6 +4702,35 @@ def handle_catalog_referral(uid: str, referral_data: dict):
     
     return None
 
+def handle_catalog_template(uid: str, template_payload: dict):
+    """
+    Xử lý template từ catalog Facebook (có retailer_id) để cập nhật sản phẩm hiện tại.
+    Trả về mã sản phẩm nếu thành công, ngược lại None.
+    """
+    try:
+        if template_payload.get('template_type') != 'generic':
+            return None
+
+        elements = template_payload.get('elements', [])
+        for element in elements:
+            retailer_id = element.get('retailer_id')
+            if retailer_id:
+                detected_ms = extract_ms_from_retailer_id(retailer_id)
+                if detected_ms and detected_ms in PRODUCTS:
+                    print(f"[CATALOG TEMPLATE] Phát hiện {detected_ms} từ catalog template")
+                    
+                    # Cập nhật context với MS mới
+                    update_context_with_new_ms(uid, detected_ms, "catalog_template")
+                    
+                    # Gửi carousel
+                    send_single_product_carousel(uid, detected_ms)
+                    return detected_ms
+
+        return None
+    except Exception as e:
+        print(f"[CATALOG TEMPLATE ERROR] {e}")
+        return None
+
 # ============================================
 # GOOGLE SHEETS API FUNCTIONS
 # ============================================
@@ -6455,7 +6484,7 @@ def webhook():
                                 handle_text(sender_id, text, referral_data)
                             
                             # ============================================
-                            # 2.3 XỬ LÝ TIN NHẮN HÌNH ẢNH
+                            # 2.3 XỬ LÝ ATTACHMENTS (ẢNH, VIDEO, TEMPLATE)
                             # ============================================
                             elif messaging_event.get("message") and messaging_event["message"].get("attachments"):
                                 attachments = messaging_event["message"]["attachments"]
@@ -6465,22 +6494,34 @@ def webhook():
                                 
                                 # Xử lý từng attachment
                                 for att in attachments:
-                                    if att.get("type") == "image":
+                                    att_type = att.get("type")
+                                    
+                                    if att_type == "image":
                                         image_url = att["payload"].get("url")
                                         if image_url:
-                                            print(f"[IMAGE] {sender_id}: {image_url[:100]}...")
+                                            print(f"[IMAGE ATTACHMENT] {sender_id}: {image_url[:100]}...")
                                             handle_image(sender_id, image_url)
                                     
                                     # Xử lý video nếu có
-                                    elif att.get("type") == "video":
+                                    elif att_type == "video":
                                         video_url = att["payload"].get("url")
                                         if video_url:
-                                            print(f"[VIDEO] {sender_id}: {video_url[:100]}...")
+                                            print(f"[VIDEO ATTACHMENT] {sender_id}: {video_url[:100]}...")
                                             # Có thể thêm xử lý video sau
+                                    
+                                    # QUAN TRỌNG: Xử lý template từ catalog (có retailer_id)
+                                    elif att_type == "template":
+                                        template_payload = att.get("payload", {})
+                                        print(f"[TEMPLATE ATTACHMENT] {sender_id}: template from catalog")
+                                        
+                                        # Gọi hàm xử lý template catalog
+                                        detected_ms = handle_catalog_template(sender_id, template_payload)
+                                        if detected_ms:
+                                            print(f"[TEMPLATE PROCESSED] Đã cập nhật sản phẩm {detected_ms} từ catalog template")
                                 
                                 # Nếu có referral_data nhưng không có ảnh hợp lệ, vẫn xử lý referral
                                 if referral_data:
-                                    print(f"[IMAGE REFERRAL] Processing catalog referral from image message: {referral_data}")
+                                    print(f"[ATTACHMENT REFERRAL] Processing catalog referral: {referral_data}")
                                     handle_catalog_referral(sender_id, referral_data)
                             
                             # ============================================
