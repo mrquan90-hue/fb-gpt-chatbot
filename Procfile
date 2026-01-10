@@ -1,1 +1,2 @@
-web: gunicorn --timeout 120 --workers 1 --threads 4 app:app
+# Procfile mới (tối ưu nhất)
+web: gunicorn --timeout 30 --workers 2 --threads 2 --worker-class gevent app:app
