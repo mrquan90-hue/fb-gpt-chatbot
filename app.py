@@ -4024,9 +4024,9 @@ Vui lòng gửi mã sản phẩm (ví dụ: MS123456) hoặc mô tả sản ph�
 # HANDLE TEXT MESSAGES - ĐÃ SỬA ĐỔI LOGIC CAROUSEL
 # ============================================
 
-def handle_text(uid: str, text: str):
+def handle_text(uid: str, text: str, referral_data: dict = None):
     """Xử lý tin nhắn văn bản với logic mới: 
-       LUÔN ưu tiên MS mới nhất từ mọi nguồn trước khi trả lời"""
+       ƯU TIÊN XỬ LÝ REFERRAL TỪ CATALOG TRƯỚC KHI XỬ LÝ TEXT"""
     if not text or len(text.strip()) == 0:
         return
     
@@ -4055,7 +4055,59 @@ def handle_text(uid: str, text: str):
         
         load_products()
         
+        # ============================================
+        # QUAN TRỌNG: ƯU TIÊN XỬ LÝ REFERRAL TỪ CATALOG TRƯỚC
+        # ============================================
+        if referral_data:
+            print(f"[CATALOG REFERRAL DETECTED] Xử lý referral cho user {uid}: {referral_data}")
+            
+            # Lấy MS từ referral (ad_id hoặc ref)
+            ad_id = referral_data.get("ad_id", "")
+            ref = referral_data.get("ref", "")
+            
+            detected_ms = None
+            
+            # Ưu tiên 1: Trích xuất từ ad_id
+            if ad_id:
+                detected_ms = extract_ms_from_retailer_id(ad_id)
+                if detected_ms:
+                    print(f"[CATALOG REFERRAL] Tìm thấy MS từ ad_id {ad_id}: {detected_ms}")
+            
+            # Ưu tiên 2: Trích xuất từ ref
+            if not detected_ms and ref:
+                detected_ms = extract_ms_from_ad_title(ref)
+                if detected_ms:
+                    print(f"[CATALOG REFERRAL] Tìm thấy MS từ ref {ref}: {detected_ms}")
+            
+            # Nếu tìm thấy MS từ catalog
+            if detected_ms and detected_ms in PRODUCTS:
+                # Cập nhật context với MS mới từ catalog (RESET COUNTER)
+                update_context_with_new_ms(uid, detected_ms, "catalog_referral")
+                
+                # Gửi carousel ngay lập tức
+                print(f"[CATALOG REFERRAL] Gửi carousel cho {detected_ms} từ catalog")
+                send_single_product_carousel(uid, detected_ms)
+                
+                # Nếu text là câu hỏi về giá, dùng GPT trả lời
+                text_lower = text.lower()
+                if any(keyword in text_lower for keyword in ["giá", "bao nhiêu", "price", "cost"]):
+                    print(f"[CATALOG REFERRAL + PRICE QUERY] Dùng GPT trả lời về giá")
+                    handle_text_with_function_calling(uid, text)
+                else:
+                    # Gửi tin nhắn chào mừng
+                    product = PRODUCTS[detected_ms]
+                    product_name = product.get('Ten', '')
+                    if f"[{detected_ms}]" in product_name or detected_ms in product_name:
+                        product_name = product_name.replace(f"[{detected_ms}]", "").replace(detected_ms, "").strip()
+                    
+                    send_message(uid, f"Chào anh/chị! 👋\n\nCảm ơn đã quan tâm đến sản phẩm **{product_name}** từ catalog. Em đã gửi thông tin chi tiết bên trên ạ!")
+                
+                ctx["processing_lock"] = False
+                return
+        
+        # ============================================
         # THÊM: Khôi phục context nếu cần (khi Koyeb wake up)
+        # ============================================
         if not ctx.get("last_ms") or ctx.get("last_ms") not in PRODUCTS:
             restored = restore_user_context_on_wakeup(uid)
             if restored:
@@ -4141,7 +4193,7 @@ def handle_text(uid: str, text: str):
             pass
     finally:
         ctx["processing_lock"] = False
-
+        
 # ============================================
 # HANDLE IMAGE - CẢI TIẾN VỚI CAROUSEL GỢI Ý
 # ============================================
@@ -4216,6 +4268,54 @@ def handle_image(uid: str, image_url: str):
                     send_message(uid, f"📦 {product_name}")
         
         send_message(uid, "Vui lòng gửi mã sản phẩm chính xác (ví dụ: MS000004) để em tư vấn chi tiết ạ!")
+
+def handle_catalog_referral(uid: str, referral_data: dict):
+    """
+    Xử lý referral từ catalog Facebook
+    """
+    try:
+        print(f"[CATALOG REFERRAL HANDLER] Xử lý referral cho user {uid}: {referral_data}")
+        
+        ad_id = referral_data.get("ad_id", "")
+        ref = referral_data.get("ref", "")
+        source = referral_data.get("source", "CATALOG")
+        
+        detected_ms = None
+        
+        # Ưu tiên 1: Trích xuất từ ad_id
+        if ad_id:
+            detected_ms = extract_ms_from_retailer_id(ad_id)
+            if detected_ms:
+                print(f"[CATALOG REFERRAL] Tìm thấy MS từ ad_id {ad_id}: {detected_ms}")
+        
+        # Ưu tiên 2: Trích xuất từ ref
+        if not detected_ms and ref:
+            detected_ms = extract_ms_from_ad_title(ref)
+            if detected_ms:
+                print(f"[CATALOG REFERRAL] Tìm thấy MS từ ref {ref}: {detected_ms}")
+        
+        if detected_ms:
+            # Kiểm tra sản phẩm có tồn tại không
+            load_products()
+            
+            if detected_ms in PRODUCTS:
+                # Cập nhật context với MS mới từ catalog (RESET COUNTER)
+                update_context_with_new_ms(uid, detected_ms, f"catalog_{source}")
+                
+                # Gửi carousel ngay lập tức
+                print(f"[CATALOG REFERRAL] Gửi carousel cho {detected_ms} từ catalog")
+                send_single_product_carousel(uid, detected_ms)
+                
+                return detected_ms
+            else:
+                print(f"[CATALOG REFERRAL] MS {detected_ms} không tồn tại trong database")
+        else:
+            print(f"[CATALOG REFERRAL] Không thể trích xuất MS từ referral")
+            
+    except Exception as e:
+        print(f"[CATALOG REFERRAL ERROR] Lỗi xử lý referral: {e}")
+    
+    return None
 
 # ============================================
 # GOOGLE SHEETS API FUNCTIONS
@@ -5889,199 +5989,153 @@ def clear_user_context(user_id):
 def home():
     return "OK", 200
 
+# ============================================
+# WEBHOOK HANDLER - ĐÃ CẬP NHẬT ĐỂ XỬ LÝ REFERRAL
+# ============================================
+
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
     if request.method == "GET":
-        mode = request.args.get("hub.mode")
-        token = request.args.get("hub.verify_token")
-        challenge = request.args.get("hub.challenge")
+        # Xác minh webhook
+        token_sent = request.args.get("hub.verify_token")
+        if token_sent == VERIFY_TOKEN:
+            return request.args.get("hub.challenge")
+        return "Invalid verification token"
+    else:
+        # Xử lý sự kiện từ Facebook
+        print("[WEBHOOK RAW] Received:", json.dumps(request.get_json(), ensure_ascii=False)[:500])
+        data = request.get_json()
         
-        if mode == "subscribe" and token == VERIFY_TOKEN:
-            print("[WEBHOOK] Verified successfully!")
-            return challenge
-        else:
-            return "Verification failed", 403
-    
-    # POST request - handle incoming messages
-    data = request.get_json()
-    if not data:
-        return "OK", 200
-    
-    print(f"[WEBHOOK RAW] Received: {json.dumps(data, indent=2)[:500]}")
-    
-    # Handle different webhook events
-    if data.get("object") == "page":
-        for entry in data.get("entry", []):
-            # Handle page events (feed comments)
-            if "changes" in entry:
-                for change in entry.get("changes", []):
-                    if change.get("field") == "feed":
-                        change_data = change.get("value", {})
+        if data.get("object") == "page":
+            for entry in data.get("entry", []):
+                # ============================================
+                # 1. XỬ LÝ CHANGES (FEED COMMENT, POST, v.v.)
+                # ============================================
+                if "changes" in entry:
+                    for change in entry["changes"]:
+                        change_value = change.get("value", {})
+                        change_field = change.get("field", "")
                         
-                        # Check if this is a comment
-                        if change_data.get("item") == "comment" and change_data.get("verb") == "add":
-                            print(f"[FEED COMMENT DETECTED] Processing comment...")
-                            # Call function to handle feed comment
-                            threading.Thread(
-                                target=handle_feed_comment,
-                                args=(change_data,)
-                            ).start()
-                        elif change_data.get("item") == "post" and change_data.get("verb") == "add":
-                            # New post created - could log for tracking
-                            print(f"[NEW POST DETECTED] Post ID: {change_data.get('post_id')}")
-            
-            # Handle messaging events
-            for messaging_event in entry.get("messaging", []):
-                # Extract sender ID
-                sender_id = messaging_event.get("sender", {}).get("id")
-                if not sender_id:
-                    continue
+                        # Xử lý comment trên feed
+                        if change_field == "feed":
+                            # Kiểm tra xem có phải là comment không
+                            if "item" in change_value and change_value["item"] == "comment":
+                                # Chỉ xử lý nếu là comment mới (verb=add) và có post_id
+                                if change_value.get("verb") == "add" and "post_id" in change_value:
+                                    print(f"[FEED COMMENT DETECTED] Processing comment...")
+                                    handle_feed_comment(change_value)
                 
-                # Check if this is an app-generated echo
-                if "message" in messaging_event:
-                    message = messaging_event["message"]
-                    
-                    # Check for echo (bot's own messages)
-                    if "is_echo" in message and message["is_echo"]:
-                        echo_text = message.get("text", "")
-                        app_id = message.get("app_id", "")
-                        attachments = message.get("attachments", [])
-                        
-                        if is_bot_generated_echo(echo_text, app_id, attachments):
-                            print(f"[ECHO] Skipping bot echo from app {app_id}: {echo_text[:100]}")
-                            continue
-                
-                # Handle postback
-                if messaging_event.get("postback"):
-                    postback = messaging_event["postback"]
-                    payload = postback.get("payload", "")
-                    postback_id = postback.get("mid")
-                    
-                    print(f"[POSTBACK] {sender_id} clicked: {payload}")
-                    
-                    # Use lock to prevent duplicate processing
-                    with get_postback_lock(sender_id, payload):
-                        # Debounce check
-                        ctx = USER_CONTEXT.get(sender_id, {})
-                        last_postback = ctx.get("last_postback", {})
-                        last_time = last_postback.get("time", 0)
-                        last_payload = last_postback.get("payload", "")
-                        
-                        now = time.time()
-                        if (payload == last_payload and (now - last_time) < 2):
-                            print(f"[POSTBACK DEBOUNCE] Skipping duplicate postback: {payload}")
-                            continue
-                        
-                        # Update last postback
-                        ctx["last_postback"] = {"payload": payload, "time": now}
-                        
-                        # Process postback
-                        threading.Thread(
-                            target=handle_postback_with_recovery,
-                            args=(sender_id, payload, postback_id)
-                        ).start()
-                    
-                    continue
-                
-                # Handle referral from ads or other sources
-                if messaging_event.get("referral"):
-                    referral = messaging_event["referral"]
-                    ref_source = referral.get("source", "")
-                    ref_type = referral.get("type", "")
-                    ref_ad_id = referral.get("ad_id", "")
-                    ref_data = json.dumps(referral)
-                    
-                    print(f"[REFERRAL] {sender_id} from {ref_source} (type: {ref_type})")
-                    
-                    # Store referral info in context
-                    ctx = USER_CONTEXT[sender_id]
-                    ctx["referral_source"] = ref_source
-                    ctx["referral_payload"] = ref_data
-                    ctx["referral_ad_id"] = ref_ad_id
-                    
-                    # Try to extract MS from referral if it's from catalog
-                    if ref_source == "ADS" and ref_type == "OPEN_THREAD":
-                        # Check if there's retailer_id in referral
-                        product_ref = referral.get("product", {})
-                        retailer_id = product_ref.get("retailer_id")
-                        
-                        if retailer_id:
-                            detected_ms = extract_ms_from_retailer_id(retailer_id)
-                            if detected_ms:
-                                print(f"[REFERRAL CATALOG] Detected MS from catalog: {detected_ms}")
-                                update_context_with_new_ms(sender_id, detected_ms, "catalog_referral")
-                                send_single_product_carousel(sender_id, detected_ms)
-                    
-                    continue
-                
-                # Handle message
-                if "message" in messaging_event:
-                    message = messaging_event["message"]
-                    
-                    # ============================================
-                    # QUAN TRỌNG: XỬ LÝ REFERRAL TỪ CATALOG TRONG MESSAGE
-                    # ============================================
-                    if "referral" in message:
-                        print(f"[MESSAGE REFERRAL] Processing catalog referral from message")
-                        product_ref = message["referral"].get("product", {})
-                        retailer_id = product_ref.get("retailer_id")
-                        detected_ms = extract_ms_from_retailer_id(retailer_id)
-                        if detected_ms:
-                            print(f"[CATALOG REFERRAL] Detected MS from catalog referral: {detected_ms}")
-                            update_context_with_new_ms(sender_id, detected_ms, "message_referral")
-                            send_single_product_carousel(sender_id, detected_ms)
-                    
-                    # Debounce check for rapid messages
-                    ctx = USER_CONTEXT.get(sender_id, {})
-                    if ctx.get("processing_lock"):
-                        print(f"[DEBOUNCE] {sender_id} is already being processed, skipping")
-                        continue
-                    
-                    # Check for message text
-                    if "text" in message:
-                        text = message["text"]
-                        mid = message.get("mid", "")
-                        
-                        # Skip if we've already processed this message ID
-                        processed_mids = ctx.get("processed_message_mids", {})
-                        if mid and mid in processed_mids:
-                            print(f"[DUPLICATE MESSAGE] Already processed MID: {mid}")
-                            continue
-                        
-                        # Record processed message ID (keep last 20)
-                        processed_mids[mid] = time.time()
-                        if len(processed_mids) > 20:
-                            # Remove oldest
-                            oldest = sorted(processed_mids.items(), key=lambda x: x[1])[0][0]
-                            del processed_mids[oldest]
-                        
-                        ctx["processed_message_mids"] = processed_mids
-                        
-                        print(f"[MESSAGE] {sender_id}: {text}")
-                        
-                        # Process text in a separate thread
-                        threading.Thread(
-                            target=handle_text,
-                            args=(sender_id, text)
-                        ).start()
-                    
-                    # Check for attachments (images)
-                    elif "attachments" in message:
-                        attachments = message["attachments"]
-                        
-                        for attachment in attachments:
-                            if attachment.get("type") == "image":
-                                image_url = attachment.get("payload", {}).get("url")
-                                if image_url:
-                                    print(f"[IMAGE] {sender_id} sent image")
-                                    # Process image in a separate thread
-                                    threading.Thread(
-                                        target=handle_image,
-                                        args=(sender_id, image_url)
-                                    ).start()
-                                break
-    
-    return "OK", 200
+                # ============================================
+                # 2. XỬ LÝ MESSAGING (TIN NHẮN TRỰC TIẾP)
+                # ============================================
+                if "messaging" in entry:
+                    for messaging_event in entry["messaging"]:
+                        try:
+                            # Xác định sender_id
+                            sender_id = messaging_event["sender"]["id"]
+                            
+                            # ============================================
+                            # 2.1 XỬ LÝ POSTBACK (NÚT BẤM)
+                            # ============================================
+                            if messaging_event.get("postback"):
+                                payload = messaging_event["postback"].get("payload", "")
+                                postback_id = messaging_event["postback"].get("mid")
+                                
+                                print(f"[POSTBACK] {sender_id}: {payload}")
+                                handle_postback_with_recovery(sender_id, payload, postback_id)
+                            
+                            # ============================================
+                            # 2.2 XỬ LÝ TIN NHẮN VĂN BẢN
+                            # ============================================
+                            elif messaging_event.get("message") and messaging_event["message"].get("text"):
+                                text = messaging_event["message"]["text"]
+                                print(f"[MESSAGE] {sender_id}: {text}")
+                                
+                                # Kiểm tra xem có phải echo message không
+                                if messaging_event["message"].get("is_echo"):
+                                    app_id = messaging_event["message"].get("app_id", "")
+                                    if is_bot_generated_echo(text, app_id):
+                                        print(f"[ECHO] Skipping bot echo from app {app_id}: {text[:100]}...")
+                                        continue
+                                
+                                # Lấy referral data nếu có (từ catalog)
+                                referral_data = messaging_event.get("referral")
+                                
+                                if referral_data:
+                                    print(f"[MESSAGE REFERRAL] Processing catalog referral from message: {referral_data}")
+                                    # Xử lý referral từ catalog TRƯỚC khi xử lý text
+                                    handle_catalog_referral(sender_id, referral_data)
+                                
+                                # Gọi hàm handle_text VỚI referral_data
+                                handle_text(sender_id, text, referral_data)
+                            
+                            # ============================================
+                            # 2.3 XỬ LÝ TIN NHẮN HÌNH ẢNH
+                            # ============================================
+                            elif messaging_event.get("message") and messaging_event["message"].get("attachments"):
+                                attachments = messaging_event["message"]["attachments"]
+                                
+                                # Lấy referral data nếu có (từ catalog)
+                                referral_data = messaging_event.get("referral")
+                                
+                                # Xử lý từng attachment
+                                for att in attachments:
+                                    if att.get("type") == "image":
+                                        image_url = att["payload"].get("url")
+                                        if image_url:
+                                            print(f"[IMAGE] {sender_id}: {image_url[:100]}...")
+                                            handle_image(sender_id, image_url)
+                                    
+                                    # Xử lý video nếu có
+                                    elif att.get("type") == "video":
+                                        video_url = att["payload"].get("url")
+                                        if video_url:
+                                            print(f"[VIDEO] {sender_id}: {video_url[:100]}...")
+                                            # Có thể thêm xử lý video sau
+                                
+                                # Nếu có referral_data nhưng không có ảnh hợp lệ, vẫn xử lý referral
+                                if referral_data:
+                                    print(f"[IMAGE REFERRAL] Processing catalog referral from image message: {referral_data}")
+                                    handle_catalog_referral(sender_id, referral_data)
+                            
+                            # ============================================
+                            # 2.4 XỬ LÝ REFERRAL RIÊNG (KHÔNG CÓ MESSAGE)
+                            # ============================================
+                            elif messaging_event.get("referral"):
+                                referral_data = messaging_event["referral"]
+                                print(f"[REFERRAL ONLY] Processing referral without message: {referral_data}")
+                                handle_catalog_referral(sender_id, referral_data)
+                            
+                            # ============================================
+                            # 2.5 XỬ LÝ ECHO MESSAGE (TIN NHẮN TỪ BOT)
+                            # ============================================
+                            elif messaging_event.get("message") and messaging_event["message"].get("is_echo"):
+                                # Bỏ qua tin nhắn echo từ bot
+                                text = messaging_event["message"].get("text", "")
+                                app_id = messaging_event["message"].get("app_id", "")
+                                if is_bot_generated_echo(text, app_id):
+                                    print(f"[ECHO] Skipping bot echo from app {app_id}: {text[:100]}...")
+                                    continue
+                            
+                            # ============================================
+                            # 2.6 XỬ LÝ TIN NHẮN ĐÃ ĐỌC VÀ ĐÃ GỬI (BỎ QUA)
+                            # ============================================
+                            elif messaging_event.get("delivery") or messaging_event.get("read"):
+                                # Ghi log nếu cần
+                                pass
+                            
+                            # ============================================
+                            # 2.7 XỬ LÝ TIN NHẮN KHÔNG XÁC ĐỊNH
+                            # ============================================
+                            else:
+                                print(f"[UNKNOWN MESSAGE TYPE] {sender_id}: {messaging_event.keys()}")
+                                
+                        except Exception as e:
+                            print(f"[MESSAGING PROCESSING ERROR] {e}")
+                            import traceback
+                            traceback.print_exc()
+        
+        return "ok", 200
     
 if __name__ == "__main__":
     # Khởi động worker cho Facebook CAPI
