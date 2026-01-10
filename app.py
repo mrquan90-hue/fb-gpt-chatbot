@@ -5897,10 +5897,9 @@ def webhook():
         challenge = request.args.get("hub.challenge")
         
         if mode == "subscribe" and token == VERIFY_TOKEN:
-            print("✅ Webhook verified successfully!")
+            print("[WEBHOOK] Verified successfully!")
             return challenge
         else:
-            print("❌ Webhook verification failed!")
             return "Verification failed", 403
     
     # POST request - handle incoming messages
@@ -5908,183 +5907,182 @@ def webhook():
     if not data:
         return "OK", 200
     
-    print(f"[WEBHOOK] Received data: {json.dumps(data, ensure_ascii=False)[:500]}")
+    print(f"[WEBHOOK RAW] Received: {json.dumps(data, indent=2)[:500]}")
     
+    # Handle different webhook events
     if data.get("object") == "page":
         for entry in data.get("entry", []):
-            # ============================================
-            # QUAN TRỌNG: XỬ LÝ MESSAGING EVENTS (giữ nguyên)
-            # ============================================
+            # Handle page events (feed comments)
+            if "changes" in entry:
+                for change in entry.get("changes", []):
+                    if change.get("field") == "feed":
+                        change_data = change.get("value", {})
+                        
+                        # Check if this is a comment
+                        if change_data.get("item") == "comment" and change_data.get("verb") == "add":
+                            print(f"[FEED COMMENT DETECTED] Processing comment...")
+                            # Call function to handle feed comment
+                            threading.Thread(
+                                target=handle_feed_comment,
+                                args=(change_data,)
+                            ).start()
+                        elif change_data.get("item") == "post" and change_data.get("verb") == "add":
+                            # New post created - could log for tracking
+                            print(f"[NEW POST DETECTED] Post ID: {change_data.get('post_id')}")
+            
+            # Handle messaging events
             for messaging_event in entry.get("messaging", []):
-                try:
-                    # Kiểm tra echo message trước
-                    if messaging_event.get("message", {}).get("is_echo"):
-                        echo_text = messaging_event["message"].get("text", "")
-                        app_id = str(messaging_event.get("message", {}).get("app_id", ""))
-                        attachments = messaging_event.get("message", {}).get("attachments", [])
+                # Extract sender ID
+                sender_id = messaging_event.get("sender", {}).get("id")
+                if not sender_id:
+                    continue
+                
+                # Check if this is an app-generated echo
+                if "message" in messaging_event:
+                    message = messaging_event["message"]
+                    
+                    # Check for echo (bot's own messages)
+                    if "is_echo" in message and message["is_echo"]:
+                        echo_text = message.get("text", "")
+                        app_id = message.get("app_id", "")
+                        attachments = message.get("attachments", [])
                         
                         if is_bot_generated_echo(echo_text, app_id, attachments):
-                            print(f"[ECHO SKIP] Bỏ qua echo từ bot")
+                            print(f"[ECHO] Skipping bot echo from app {app_id}: {echo_text[:100]}")
                             continue
+                
+                # Handle postback
+                if messaging_event.get("postback"):
+                    postback = messaging_event["postback"]
+                    payload = postback.get("payload", "")
+                    postback_id = postback.get("mid")
                     
-                    sender_id = messaging_event["sender"]["id"]
-                    recipient_id = messaging_event["recipient"]["id"]
+                    print(f"[POSTBACK] {sender_id} clicked: {payload}")
                     
-                    # Xử lý referral (giữ nguyên)
-                    if "referral" in messaging_event:
-                        ref = messaging_event["referral"]
-                        ref_source = ref.get("source", "unknown")
-                        ref_type = ref.get("type", "unknown")
-                        ref_payload = ref.get("ref", "")
-                        ad_id = ref.get("ad_id", "")
+                    # Use lock to prevent duplicate processing
+                    with get_postback_lock(sender_id, payload):
+                        # Debounce check
+                        ctx = USER_CONTEXT.get(sender_id, {})
+                        last_postback = ctx.get("last_postback", {})
+                        last_time = last_postback.get("time", 0)
+                        last_payload = last_postback.get("payload", "")
                         
-                        print(f"[REFERRAL] từ {sender_id}, nguồn: {ref_source}, loại: {ref_type}, payload: {ref_payload}")
+                        now = time.time()
+                        if (payload == last_payload and (now - last_time) < 2):
+                            print(f"[POSTBACK DEBOUNCE] Skipping duplicate postback: {payload}")
+                            continue
                         
-                        ctx = USER_CONTEXT[sender_id]
-                        ctx["referral_source"] = ref_source
-                        ctx["referral_payload"] = ref_payload
+                        # Update last postback
+                        ctx["last_postback"] = {"payload": payload, "time": now}
                         
-                        if ref_source == "ADS":
-                            retailer_id = ref.get("ref", "")
+                        # Process postback
+                        threading.Thread(
+                            target=handle_postback_with_recovery,
+                            args=(sender_id, payload, postback_id)
+                        ).start()
+                    
+                    continue
+                
+                # Handle referral from ads or other sources
+                if messaging_event.get("referral"):
+                    referral = messaging_event["referral"]
+                    ref_source = referral.get("source", "")
+                    ref_type = referral.get("type", "")
+                    ref_ad_id = referral.get("ad_id", "")
+                    ref_data = json.dumps(referral)
+                    
+                    print(f"[REFERRAL] {sender_id} from {ref_source} (type: {ref_type})")
+                    
+                    # Store referral info in context
+                    ctx = USER_CONTEXT[sender_id]
+                    ctx["referral_source"] = ref_source
+                    ctx["referral_payload"] = ref_data
+                    ctx["referral_ad_id"] = ref_ad_id
+                    
+                    # Try to extract MS from referral if it's from catalog
+                    if ref_source == "ADS" and ref_type == "OPEN_THREAD":
+                        # Check if there's retailer_id in referral
+                        product_ref = referral.get("product", {})
+                        retailer_id = product_ref.get("retailer_id")
+                        
+                        if retailer_id:
                             detected_ms = extract_ms_from_retailer_id(retailer_id)
                             if detected_ms:
-                                print(f"[REFERRAL ADS] Phát hiện MS: {detected_ms}")
-                                update_context_with_new_ms(sender_id, detected_ms, "referral_ads")
+                                print(f"[REFERRAL CATALOG] Detected MS from catalog: {detected_ms}")
+                                update_context_with_new_ms(sender_id, detected_ms, "catalog_referral")
                                 send_single_product_carousel(sender_id, detected_ms)
-                                continue
-                        
-                        elif ref_source == "SHORTLINK" and ref_payload:
-                            if ref_payload.upper().startswith("MS"):
-                                detected_ms = ref_payload.upper()
-                                update_context_with_new_ms(sender_id, detected_ms, "referral_shortlink")
-                                send_single_product_carousel(sender_id, detected_ms)
-                                continue
                     
-                    # Xử lý postback (giữ nguyên)
-                    if "postback" in messaging_event:
-                        payload = messaging_event["postback"].get("payload", "")
-                        postback_id = messaging_event["postback"].get("mid")
-                        print(f"[POSTBACK] {sender_id}: {payload}")
-                        
-                        # Xử lý trong thread riêng để tránh timeout
-                        def process_postback_async():
-                            try:
-                                handle_postback_with_recovery(sender_id, payload, postback_id)
-                            except Exception as e:
-                                print(f"[POSTBACK ASYNC ERROR] {e}")
-                        
-                        thread = threading.Thread(target=process_postback_async)
-                        thread.daemon = True
-                        thread.start()
+                    continue
+                
+                # Handle message
+                if "message" in messaging_event:
+                    message = messaging_event["message"]
+                    
+                    # ============================================
+                    # QUAN TRỌNG: XỬ LÝ REFERRAL TỪ CATALOG TRONG MESSAGE
+                    # ============================================
+                    if "referral" in message:
+                        print(f"[MESSAGE REFERRAL] Processing catalog referral from message")
+                        product_ref = message["referral"].get("product", {})
+                        retailer_id = product_ref.get("retailer_id")
+                        detected_ms = extract_ms_from_retailer_id(retailer_id)
+                        if detected_ms:
+                            print(f"[CATALOG REFERRAL] Detected MS from catalog referral: {detected_ms}")
+                            update_context_with_new_ms(sender_id, detected_ms, "message_referral")
+                            send_single_product_carousel(sender_id, detected_ms)
+                    
+                    # Debounce check for rapid messages
+                    ctx = USER_CONTEXT.get(sender_id, {})
+                    if ctx.get("processing_lock"):
+                        print(f"[DEBOUNCE] {sender_id} is already being processed, skipping")
                         continue
                     
-                    # Xử lý tin nhắn văn bản (giữ nguyên)
-                    if "message" in messaging_event:
-                        message = messaging_event["message"]
+                    # Check for message text
+                    if "text" in message:
+                        text = message["text"]
+                        mid = message.get("mid", "")
                         
-                        # Kiểm tra quick reply (giữ nguyên)
-                        if "quick_reply" in message:
-                            payload = message["quick_reply"].get("payload", "")
-                            if payload.startswith("ORDER_NOW_"):
-                                ms = payload.replace("ORDER_NOW_", "")
-                                # Gửi template đặt hàng trong thread riêng
-                                def send_order_async():
-                                    try:
-                                        send_order_button_template(sender_id, ms)
-                                    except Exception as e:
-                                        print(f"[ORDER ASYNC ERROR] {e}")
-                                
-                                thread = threading.Thread(target=send_order_async)
-                                thread.daemon = True
-                                thread.start()
-                                continue
-                        
-                        # Xử lý text (giữ nguyên nhưng trong thread)
-                        if "text" in message:
-                            text = message["text"]
-                            print(f"[TEXT] {sender_id}: {text}")
-                            
-                            def process_text_async():
-                                try:
-                                    handle_text(sender_id, text)
-                                except Exception as e:
-                                    print(f"[TEXT ASYNC ERROR] {e}")
-                            
-                            thread = threading.Thread(target=process_text_async)
-                            thread.daemon = True
-                            thread.start()
+                        # Skip if we've already processed this message ID
+                        processed_mids = ctx.get("processed_message_mids", {})
+                        if mid and mid in processed_mids:
+                            print(f"[DUPLICATE MESSAGE] Already processed MID: {mid}")
                             continue
                         
-                        # Xử lý ảnh (giữ nguyên nhưng trong thread)
-                        if "attachments" in message:
-                            attachments = message["attachments"]
-                            for attachment in attachments:
-                                if attachment.get("type") == "image":
-                                    image_url = attachment.get("payload", {}).get("url", "")
-                                    print(f"[IMAGE] {sender_id}: {image_url[:100]}")
-                                    
-                                    def process_image_async():
-                                        try:
-                                            handle_image(sender_id, image_url)
-                                        except Exception as e:
-                                            print(f"[IMAGE ASYNC ERROR] {e}")
-                                    
-                                    thread = threading.Thread(target=process_image_async)
-                                    thread.daemon = True
-                                    thread.start()
-                                    break
-                    
-                except Exception as e:
-                    print(f"[WEBHOOK ERROR] Lỗi xử lý messaging event: {e}")
-                    import traceback
-                    traceback.print_exc()
-            
-            # ============================================
-            # XỬ LÝ FEED COMMENTS (THÊM THREADING Ở ĐÂY)
-            # ============================================
-            if "changes" in entry:
-                changes = entry.get("changes", [])
-                for change in changes:
-                    field = change.get("field")
-                    
-                    if field == "feed":
-                        # TÁCH XỬ LÝ FEED COMMENT RA THREAD RIÊNG
-                        def process_feed_comment_async():
-                            try:
-                                value = change.get("value", {})
-                                if value.get("item") == "comment" and value.get("verb") == "add":
-                                    print(f"[FEED COMMENT ASYNC] Processing comment asynchronously")
-                                    handle_feed_comment(value)
-                                else:
-                                    print(f"[FEED COMMENT ASYNC] Not a comment add event: {value.get('item')} {value.get('verb')}")
-                            except Exception as e:
-                                print(f"[FEED COMMENT ASYNC ERROR] {e}")
-                                import traceback
-                                traceback.print_exc()
+                        # Record processed message ID (keep last 20)
+                        processed_mids[mid] = time.time()
+                        if len(processed_mids) > 20:
+                            # Remove oldest
+                            oldest = sorted(processed_mids.items(), key=lambda x: x[1])[0][0]
+                            del processed_mids[oldest]
                         
-                        # KHỞI CHẠY THREAD XỬ LÝ FEED COMMENT
-                        thread = threading.Thread(target=process_feed_comment_async)
-                        thread.daemon = True  # Đảm bảo thread sẽ dừng khi app dừng
-                        thread.start()
-                        print(f"[FEED COMMENT] Đã khởi động thread xử lý comment feed")
+                        ctx["processed_message_mids"] = processed_mids
+                        
+                        print(f"[MESSAGE] {sender_id}: {text}")
+                        
+                        # Process text in a separate thread
+                        threading.Thread(
+                            target=handle_text,
+                            args=(sender_id, text)
+                        ).start()
                     
-                    # ============================================
-                    # GIỮ NGUYÊN CÁC XỬ LÝ CHANGES KHÁC
-                    # ============================================
-                    elif field == "ratings":
-                        # Xử lý rating nếu có (giữ nguyên)
-                        value = change.get("value", {})
-                        print(f"[RATING] Received rating: {json.dumps(value, ensure_ascii=False)}")
-                        # ... xử lý rating logic hiện có ...
-                    
-                    elif field == "mention":
-                        # Xử lý mention nếu có (giữ nguyên)
-                        value = change.get("value", {})
-                        print(f"[MENTION] Received mention: {json.dumps(value, ensure_ascii=False)}")
-                        # ... xử lý mention logic hiện có ...
+                    # Check for attachments (images)
+                    elif "attachments" in message:
+                        attachments = message["attachments"]
+                        
+                        for attachment in attachments:
+                            if attachment.get("type") == "image":
+                                image_url = attachment.get("payload", {}).get("url")
+                                if image_url:
+                                    print(f"[IMAGE] {sender_id} sent image")
+                                    # Process image in a separate thread
+                                    threading.Thread(
+                                        target=handle_image,
+                                        args=(sender_id, image_url)
+                                    ).start()
+                                break
     
     return "OK", 200
-
+    
 if __name__ == "__main__":
     # Khởi động worker cho Facebook CAPI
     start_facebook_worker()
