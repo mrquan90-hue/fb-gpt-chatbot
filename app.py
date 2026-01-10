@@ -400,6 +400,287 @@ def save_user_context_to_sheets():
         import traceback
         traceback.print_exc()
 
+def cleanup_inactive_users():
+    """Dọn dẹp users không hoạt động để giảm RAM"""
+    now = time.time()
+    inactive_threshold = 86400  # 24 giờ
+    max_users = 1000  # Giới hạn số users trong RAM
+    
+    users_to_remove = []
+    
+    for user_id, context in USER_CONTEXT.items():
+        last_updated = context.get("last_updated", 0)
+        if now - last_updated > inactive_threshold:
+            # Lưu context trước khi xóa nếu dirty
+            if context.get("dirty", False):
+                try:
+                    # Lưu riêng user này
+                    save_single_user_to_sheets(user_id, context)
+                except Exception as e:
+                    print(f"[CLEANUP SAVE ERROR] Lỗi khi lưu user {user_id}: {e}")
+            users_to_remove.append(user_id)
+    
+    # Xóa users không hoạt động
+    for user_id in users_to_remove:
+        del USER_CONTEXT[user_id]
+    
+    # Giới hạn số lượng users trong RAM
+    if len(USER_CONTEXT) > max_users:
+        # Lấy danh sách users cũ nhất
+        sorted_users = sorted(
+            USER_CONTEXT.items(),
+            key=lambda x: x[1].get("last_updated", 0)
+        )
+        
+        # Xóa users cũ nhất vượt quá giới hạn
+        for i in range(len(USER_CONTEXT) - max_users):
+            user_id, context = sorted_users[i]
+            if context.get("dirty", False):
+                try:
+                    save_single_user_to_sheets(user_id, context)
+                except Exception as e:
+                    print(f"[LIMIT CLEANUP ERROR] Lỗi khi lưu user {user_id}: {e}")
+            del USER_CONTEXT[user_id]
+    
+    if users_to_remove:
+        print(f"[CLEANUP] Đã xóa {len(users_to_remove)} users không hoạt động")
+
+def save_single_user_to_sheets(user_id: str, context: dict):
+    """Lưu riêng 1 user vào Google Sheets"""
+    if not GOOGLE_SHEET_ID or not GOOGLE_SHEETS_CREDENTIALS_JSON:
+        return
+    
+    try:
+        service = get_google_sheets_service()
+        if not service:
+            return
+        
+        # Lấy dữ liệu từ cache
+        user_row_map, existing_values = get_sheet_data_cached()
+        
+        # Chuẩn bị dữ liệu
+        product_history = json.dumps(context.get("product_history", []), ensure_ascii=False)
+        order_data = json.dumps(context.get("order_data", {}), ensure_ascii=False)
+        conversation_history = json.dumps(context.get("conversation_history", []), ensure_ascii=False)
+        
+        phone = ""
+        customer_name = ""
+        if context.get("order_data"):
+            phone = context["order_data"].get("phone", "")
+            customer_name = context["order_data"].get("customer_name", "")
+        
+        row_data = [
+            user_id,
+            context.get("last_ms", ""),
+            product_history,
+            order_data,
+            conversation_history,
+            str(context.get("real_message_count", 0)),
+            context.get("referral_source", ""),
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            phone,
+            customer_name,
+            str(context.get("last_msg_time", 0)),
+            str(context.get("has_sent_first_carousel", False))
+        ]
+        
+        # Kiểm tra xem user đã có trong sheet chưa
+        if user_id in user_row_map:
+            range_name = f"{USER_CONTEXT_SHEET_NAME}!A{user_row_map[user_id]}:L{user_row_map[user_id]}"
+            
+            service.spreadsheets().values().update(
+                spreadsheetId=GOOGLE_SHEET_ID,
+                range=range_name,
+                valueInputOption="USER_ENTERED",
+                body={'values': [row_data]}
+            ).execute()
+        else:
+            # Thêm dòng mới
+            start_row = len(existing_values) + 2
+            range_name = f"{USER_CONTEXT_SHEET_NAME}!A{start_row}"
+            
+            service.spreadsheets().values().append(
+                spreadsheetId=GOOGLE_SHEET_ID,
+                range=range_name,
+                valueInputOption="USER_ENTERED",
+                insertDataOption="INSERT_ROWS",
+                body={'values': [row_data]}
+            ).execute()
+            
+            # Reset cache
+            SHEETS_CACHE['last_read'] = 0
+        
+        print(f"[SINGLE SAVE] Đã lưu user {user_id} vào Google Sheets")
+        
+    except Exception as e:
+        print(f"[SINGLE SAVE ERROR] Lỗi khi lưu user {user_id}: {e}")
+        
+def save_user_context_to_sheets_optimized(force_all: bool = False):
+    """
+    Lưu USER_CONTEXT vào Google Sheets - CHỈ lưu users có dirty = True
+    hoặc lâu chưa lưu (> 30 giây)
+    """
+    if not GOOGLE_SHEET_ID or not GOOGLE_SHEETS_CREDENTIALS_JSON:
+        print("[SAVE CONTEXT] Chưa cấu hình Google Sheets")
+        return
+    
+    try:
+        service = get_google_sheets_service()
+        if not service:
+            print("[SAVE CONTEXT] Không thể khởi tạo Google Sheets service")
+            return
+        
+        # Lấy dữ liệu từ cache
+        user_row_map, existing_values = get_sheet_data_cached()
+        
+        # Chuẩn bị dữ liệu để lưu
+        update_requests = []
+        new_rows = []
+        
+        now = time.time()
+        save_threshold = 30  # Chỉ lưu nếu chưa lưu trong 30 giây
+        
+        for user_id, context in USER_CONTEXT.items():
+            # Kiểm tra user_id hợp lệ
+            if not user_id or len(user_id.strip()) < 5:
+                continue
+            
+            # Kiểm tra điều kiện lưu:
+            # 1. Nếu force_all = True (lưu tất cả)
+            # 2. Hoặc dirty = True và chưa lưu trong 30 giây
+            # 3. Hoặc chưa lưu lần nào (last_saved = 0) và active trong 30 ngày
+            last_saved = context.get("last_saved", 0)
+            last_updated = context.get("last_updated", 0)
+            
+            should_save = False
+            
+            if force_all:
+                should_save = True
+            elif context.get("dirty", False) and (now - last_saved > save_threshold):
+                should_save = True
+            elif last_saved == 0 and (now - last_updated < 86400 * 30):  # 30 ngày
+                should_save = True
+            
+            if not should_save:
+                continue
+            
+            print(f"[CONTEXT SAVE] Đang lưu user {user_id} (dirty={context.get('dirty')})")
+            
+            # Chuẩn bị dữ liệu
+            product_history = json.dumps(context.get("product_history", []), ensure_ascii=False)
+            order_data = json.dumps(context.get("order_data", {}), ensure_ascii=False)
+            conversation_history = json.dumps(context.get("conversation_history", []), ensure_ascii=False)
+            
+            # Lấy số điện thoại và tên từ order_data
+            phone = ""
+            customer_name = ""
+            if context.get("order_data"):
+                phone = context["order_data"].get("phone", "")
+                customer_name = context["order_data"].get("customer_name", "")
+            
+            # Lấy các trường khác
+            last_ms = context.get("last_ms", "")
+            last_msg_time = context.get("last_msg_time", 0)
+            real_message_count = context.get("real_message_count", 0)
+            referral_source = context.get("referral_source", "")
+            has_sent_first_carousel = context.get("has_sent_first_carousel", False)
+            
+            # Chuẩn bị row data (12 cột)
+            row_data = [
+                user_id,  # Cột A: user_id
+                last_ms,  # Cột B: last_ms
+                product_history,  # Cột C: product_history
+                order_data,  # Cột D: order_data
+                conversation_history,  # Cột E: conversation_history
+                str(real_message_count),  # Cột F: real_message_count
+                referral_source,  # Cột G: referral_source
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),  # Cột H: last_updated
+                phone,  # Cột I: phone
+                customer_name,  # Cột J: customer_name
+                str(last_msg_time),  # Cột K: last_msg_time
+                str(has_sent_first_carousel)  # Cột L: has_sent_first_carousel
+            ]
+            
+            # Kiểm tra xem user đã có trong sheet chưa
+            if user_id in user_row_map:
+                # Cập nhật dòng hiện có
+                range_name = f"{USER_CONTEXT_SHEET_NAME}!A{user_row_map[user_id]}:L{user_row_map[user_id]}"
+                update_requests.append({
+                    'range': range_name,
+                    'values': [row_data]
+                })
+            else:
+                # Thêm dòng mới
+                new_rows.append(row_data)
+            
+            # Đánh dấu đã lưu và reset dirty flag
+            context["dirty"] = False
+            context["last_saved"] = now
+        
+        # Thực hiện cập nhật nếu có dữ liệu
+        if update_requests or new_rows:
+            print(f"[CONTEXT SAVE OPTIMIZED] Đang lưu {len(update_requests)} updates và {len(new_rows)} new rows...")
+            
+            # Batch update cho các dòng hiện có
+            if update_requests:
+                try:
+                    batch_data = []
+                    for req in update_requests:
+                        batch_data.append({
+                            'range': req['range'],
+                            'values': req['values']
+                        })
+                    
+                    body = {
+                        'valueInputOption': 'USER_ENTERED',
+                        'data': batch_data
+                    }
+                    
+                    service.spreadsheets().values().batchUpdate(
+                        spreadsheetId=GOOGLE_SHEET_ID,
+                        body=body
+                    ).execute()
+                    
+                    print(f"[CONTEXT SAVE] Đã batch update {len(update_requests)} users")
+                except Exception as e:
+                    print(f"[CONTEXT UPDATE ERROR] Lỗi batch update: {e}")
+            
+            # Append các dòng mới
+            if new_rows:
+                try:
+                    start_row = len(existing_values) + 2
+                    range_name = f"{USER_CONTEXT_SHEET_NAME}!A{start_row}"
+                    
+                    service.spreadsheets().values().append(
+                        spreadsheetId=GOOGLE_SHEET_ID,
+                        range=range_name,
+                        valueInputOption="USER_ENTERED",
+                        insertDataOption="INSERT_ROWS",
+                        body={'values': new_rows}
+                    ).execute()
+                    
+                    print(f"[CONTEXT SAVE] Đã thêm {len(new_rows)} users mới")
+                    
+                    # Cập nhật cache sau khi thêm mới
+                    SHEETS_CACHE['last_read'] = 0  # Reset cache để load lại
+                    
+                except Exception as e:
+                    print(f"[CONTEXT APPEND ERROR] Lỗi khi thêm users mới: {e}")
+            
+            print(f"[CONTEXT SAVED] Hoàn thành lưu context vào Google Sheets")
+        else:
+            print(f"[CONTEXT SAVE] Không có dữ liệu dirty để lưu")
+        
+    except Exception as e:
+        print(f"[CONTEXT SAVE ERROR] Lỗi khi lưu context: {e}")
+        import traceback
+        traceback.print_exc()
+
+# Thay thế hàm cũ bằng hàm tối ưu
+def save_user_context_to_sheets():
+    """Alias cho hàm tối ưu - để không phải sửa code cũ"""
+    save_user_context_to_sheets_optimized()
+
 def load_user_context_from_sheets():
     """Load USER_CONTEXT từ Google Sheets - CHỈ LOAD DÒNG CÓ user_id KHÁC RỖNG"""
     if not GOOGLE_SHEET_ID or not GOOGLE_SHEETS_CREDENTIALS_JSON:
@@ -676,8 +957,56 @@ def delete_user_context_from_sheets(user_id: str):
         print(f"[CONTEXT DELETE ERROR] Lỗi khi xóa context: {e}")
         return False
 
-def periodic_context_save():
-    """Lưu context định kỳ vào Google Sheets - CÓ KIỂM TRA TRÙNG LẶP"""
+def get_sheet_data_cached():
+    """Lấy dữ liệu từ Google Sheets với cache"""
+    global SHEETS_CACHE
+    
+    now = time.time()
+    
+    # Nếu cache còn hiệu lực, trả về cache
+    if (SHEETS_CACHE['last_read'] > 0 and 
+        (now - SHEETS_CACHE['last_read']) < SHEETS_CACHE['cache_ttl'] and
+        SHEETS_CACHE['user_row_map']):
+        return SHEETS_CACHE['user_row_map'], SHEETS_CACHE['existing_values']
+    
+    # Nếu không có cấu hình Google Sheets
+    if not GOOGLE_SHEET_ID or not GOOGLE_SHEETS_CREDENTIALS_JSON:
+        return {}, []
+    
+    try:
+        service = get_google_sheets_service()
+        if not service:
+            return {}, []
+        
+        # Lấy dữ liệu từ sheet
+        result = service.spreadsheets().values().get(
+            spreadsheetId=GOOGLE_SHEET_ID,
+            range=f"{USER_CONTEXT_SHEET_NAME}!A2:L"
+        ).execute()
+        
+        existing_values = result.get('values', [])
+        
+        # Tạo mapping user_id -> row index
+        user_row_map = {}
+        for i, row in enumerate(existing_values):
+            if len(row) > 0 and row[0]:  # Có user_id
+                user_row_map[row[0]] = i + 2  # +2 vì bắt đầu từ row 2
+        
+        # Cập nhật cache
+        SHEETS_CACHE['user_row_map'] = user_row_map
+        SHEETS_CACHE['existing_values'] = existing_values
+        SHEETS_CACHE['last_read'] = now
+        
+        print(f"[SHEETS CACHE] Đã load {len(user_row_map)} users từ Google Sheets")
+        
+        return user_row_map, existing_values
+        
+    except Exception as e:
+        print(f"[SHEETS CACHE ERROR] Lỗi khi load sheet: {e}")
+        return {}, []
+
+def periodic_context_save_optimized():
+    """Lưu context định kỳ vào Google Sheets - CHỈ lưu users dirty"""
     print(f"[PERIODIC SAVE THREAD] Thread lưu context đã bắt đầu")
     
     # Đợi app khởi động xong
@@ -690,29 +1019,58 @@ def periodic_context_save():
         except Exception as e:
             print(f"[PERIODIC SAVE INIT ERROR] Lỗi khi khởi tạo sheet: {e}")
     
+    last_full_save = 0
+    full_save_interval = 3600  # 1 giờ lưu full 1 lần
+    
     while True:
         try:
-            # Kiểm tra xem có user nào trong memory không
+            # Đếm số users dirty
+            dirty_count = 0
             active_users = 0
+            now = time.time()
+            
             for uid, ctx in USER_CONTEXT.items():
-                if ctx.get("last_updated", 0) > time.time() - 86400:  # 24h
+                if ctx.get("dirty", False):
+                    dirty_count += 1
+                if ctx.get("last_updated", 0) > now - 86400:  # 24h
                     active_users += 1
             
-            print(f"[PERIODIC SAVE] Đang lưu context cho {active_users} active users vào Google Sheets...")
+            # Kiểm tra có nên lưu full không
+            save_full = (now - last_full_save) > full_save_interval
             
-            if active_users > 0:
-                save_user_context_to_sheets()
-                print(f"[PERIODIC SAVE] Hoàn thành, đợi 5 phút...")
+            if dirty_count > 0 or save_full:
+                print(f"[PERIODIC SAVE] Đang lưu {dirty_count} dirty users và {active_users} active users...")
+                
+                if save_full:
+                    print(f"[PERIODIC SAVE FULL] Lưu toàn bộ active users")
+                    save_user_context_to_sheets_optimized(force_all=True)
+                    last_full_save = now
+                else:
+                    save_user_context_to_sheets_optimized(force_all=False)
+                
+                print(f"[PERIODIC SAVE] Hoàn thành, đợi 1 phút...")
             else:
-                print(f"[PERIODIC SAVE] Không có active users, bỏ qua lưu")
+                if active_users > 0:
+                    print(f"[PERIODIC SAVE] Không có dirty users, bỏ qua lưu (Active: {active_users})")
+                else:
+                    print(f"[PERIODIC SAVE] Không có active users, đợi 5 phút...")
                 
         except Exception as e:
             print(f"[PERIODIC SAVE ERROR] Lỗi khi lưu context: {e}")
             import traceback
             traceback.print_exc()
         
-        time.sleep(300)  # 5 phút
+        # Sleep ngắn hơn khi có dirty users, dài hơn khi không có
+        if dirty_count > 0:
+            time.sleep(60)  # 1 phút
+        else:
+            time.sleep(300)  # 5 phút
 
+# Thay thế hàm cũ
+def periodic_context_save():
+    """Alias cho hàm tối ưu"""
+    periodic_context_save_optimized()
+    
 def get_user_order_history_from_sheets(user_id: str, phone: str = None) -> List[Dict]:
     """Tra cứu lịch sử đơn hàng từ Google Sheets"""
     if not GOOGLE_SHEET_ID or not GOOGLE_SHEETS_CREDENTIALS_JSON:
@@ -803,9 +1161,21 @@ def default_user_context():
         "processed_message_mids": {},
         "last_processed_text": "",
         "poscake_orders": [],
-        "last_updated": time.time()
+        "last_updated": time.time(),
+        "dirty": False,      # ← THÊM DÒNG NÀY
+        "last_saved": 0      # ← THÊM DÒNG NÀY
     }
 
+# ============================================
+# DIRTY FLAG HELPER FUNCTIONS
+# ============================================
+
+def mark_user_dirty(uid: str):
+    """Đánh dấu user cần được lưu vào Google Sheets"""
+    if uid in USER_CONTEXT:
+        USER_CONTEXT[uid]["dirty"] = True
+        USER_CONTEXT[uid]["last_updated"] = time.time()
+        
 # ============================================
 # MAP TIẾNG VIỆT KHÔNG DẤU
 # ============================================
@@ -854,6 +1224,18 @@ PRODUCTS = {}
 PRODUCTS_BY_NUMBER = {}
 LAST_LOAD = 0
 LOAD_TTL = 300
+
+# ============================================
+# GOOGLE SHEETS CACHE
+# ============================================
+
+# Cache để giảm số lần gọi Google Sheets API
+SHEETS_CACHE = {
+    'last_read': 0,
+    'cache_ttl': 30,  # Cache 30 giây
+    'user_row_map': {},
+    'existing_values': []
+}
 
 # ============================================
 # ADDRESS API CACHE
@@ -1128,14 +1510,9 @@ def update_context_with_new_ms(uid: str, new_ms: str, source: str = "unknown"):
     
     # Cập nhật thời gian
     ctx["last_updated"] = time.time()
+    ctx["dirty"] = True  # ← THÊM DÒNG NÀY
     
     print(f"[CONTEXT UPDATE COMPLETE] Đã cập nhật MS {new_ms} cho user {uid} (nguồn: {source}, real_message_count: {ctx['real_message_count']}, has_sent_first_carousel: {ctx['has_sent_first_carousel']})")
-    
-    # Lưu ngay lập tức vào Google Sheets để đảm bảo không mất dữ liệu
-    try:
-        save_user_context_to_sheets()
-    except Exception as e:
-        print(f"[CONTEXT IMMEDIATE SAVE ERROR] Lỗi khi lưu ngay context: {e}")
     
     return True
 
@@ -2908,8 +3285,11 @@ def update_product_context(uid: str, ms: str):
     if len(ctx["product_history"]) > 5:
         ctx["product_history"] = ctx["product_history"][:5]
     
+    ctx["dirty"] = True  # ← THÊM DÒNG NÀY
+    ctx["last_updated"] = time.time()
+    
     print(f"[CONTEXT UPDATE] User {uid}: last_ms={ms}, history={ctx['product_history']}")
-
+    
 def detect_ms_from_text(text: str) -> Optional[str]:
     """Phát hiện mã sản phẩm từ nhiều dạng text khác nhau - CHỈ khi có tiền tố"""
     if not text: 
@@ -3779,8 +4159,9 @@ def handle_order_form_step(uid: str, text: str) -> bool:
         data["customerName"] = text.strip()
         ctx["order_state"] = "ask_phone"
         send_message(uid, "Dạ em cảm ơn anh/chị. Anh/chị cho em xin số điện thoại ạ?")
+        ctx["dirty"] = True  # ← THÊM DÒNG NÀY
         return True
-
+        
     if state == "ask_phone":
         phone = re.sub(r"[^\d+]", "", text)
         if len(phone) < 9:
@@ -3789,12 +4170,14 @@ def handle_order_form_step(uid: str, text: str) -> bool:
         data["phone"] = phone
         ctx["order_state"] = "ask_address"
         send_message(uid, "Dạ vâng. Anh/chị cho em xin địa chỉ nhận hàng ạ?")
+        ctx["dirty"] = True
         return True
 
     if state == "ask_address":
         data["address"] = text.strip()
         ctx["order_state"] = None
         ctx["order_data"] = data
+        ctx["dirty"] = True
 
         summary = (
             "Dạ em tóm tắt lại đơn hàng của anh/chị:\n"
@@ -3854,6 +4237,7 @@ def handle_postback_with_recovery(uid: str, payload: str, postback_id: str = Non
         ms = payload.replace("PRODUCT_HIGHLIGHTS_", "")
         if ms in PRODUCTS:
             ctx["last_ms"] = ms
+            ctx["dirty"] = True
             # Gọi hàm update_product_context cũ
             if "product_history" not in ctx:
                 ctx["product_history"] = []
@@ -3949,6 +4333,7 @@ Hãy liệt kê 5 ưu điểm nổi bật nhất của sản phẩm này theo đ
         ms = payload.replace("VIEW_IMAGES_", "")
         if ms in PRODUCTS:
             ctx["last_ms"] = ms
+            ctx["dirty"] = True
             # Gọi hàm update_product_context cũ
             if "product_history" not in ctx:
                 ctx["product_history"] = []
@@ -6136,6 +6521,28 @@ def webhook():
                             traceback.print_exc()
         
         return "ok", 200
+
+# ============================================
+# START CLEANUP THREAD
+# ============================================
+
+def start_cleanup_thread():
+    """Khởi động thread dọn dẹp định kỳ"""
+    def cleanup_worker():
+        print(f"[CLEANUP THREAD] Thread dọn dẹp đã khởi động")
+        while True:
+            try:
+                cleanup_inactive_users()
+            except Exception as e:
+                print(f"[CLEANUP ERROR] Lỗi khi dọn dẹp: {e}")
+            time.sleep(1800)  # 30 phút
+    
+    thread = threading.Thread(target=cleanup_worker, daemon=True)
+    thread.start()
+    return thread
+
+# Khởi động cleanup thread
+start_cleanup_thread()
     
 if __name__ == "__main__":
     # Khởi động worker cho Facebook CAPI
