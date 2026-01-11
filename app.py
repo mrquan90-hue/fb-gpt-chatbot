@@ -843,17 +843,23 @@ def get_user_context_from_sheets(user_id: str) -> Optional[Dict]:
         for row in values:
             if len(row) > 0 and row[0] == user_id:
                 # Tìm thấy user
+                print(f"[GET CONTEXT DEBUG] Tìm thấy user {user_id} trong Google Sheets")
+                print(f"[GET CONTEXT DEBUG] Row data length: {len(row)}")
+                
                 context = default_user_context()
                 
                 # Cập nhật từ dữ liệu
                 if len(row) > 1 and row[1]:
                     context["last_ms"] = row[1]
+                    print(f"[GET CONTEXT DEBUG] last_ms từ cột B: {row[1]}")
                 
                 if len(row) > 2 and row[2]:
                     try:
                         context["product_history"] = json.loads(row[2])
+                        print(f"[GET CONTEXT DEBUG] product_history: {context['product_history'][:3] if context['product_history'] else '[]'}")
                     except:
                         context["product_history"] = []
+                        print(f"[GET CONTEXT DEBUG] Lỗi parse product_history: {row[2][:100]}...")
                 
                 if len(row) > 3 and row[3]:
                     try:
@@ -905,6 +911,7 @@ def get_user_context_from_sheets(user_id: str) -> Optional[Dict]:
                         context["has_sent_first_carousel"] = False
                 
                 print(f"[GET CONTEXT] Đã load context cho user {user_id} từ Google Sheets")
+                print(f"[GET CONTEXT SUMMARY] last_ms: {context.get('last_ms')}, product_history count: {len(context.get('product_history', []))}")
                 return context
         
         print(f"[GET CONTEXT] Không tìm thấy context cho user {user_id} trong Google Sheets")
@@ -2184,18 +2191,21 @@ def extract_ms_from_ad_title(ad_title: str) -> Optional[str]:
 # ============================================
 
 def is_bot_generated_echo(echo_text: str, app_id: str = "", attachments: list = None) -> bool:
-    # ƯU TIÊN: Nếu có #MS trong tin nhắn => KHÔNG PHẢI BOT (là comment từ Fchat)
-    if echo_text and "#MS" in echo_text.upper():
-        return False
-    
-    if app_id in BOT_APP_IDS:
+    """
+    Kiểm tra xem tin nhắn có phải là echo từ bot không
+    Cải tiến để phát hiện chính xác hơn
+    """
+    # 1. Kiểm tra app_id (ưu tiên cao nhất)
+    if app_id and app_id in BOT_APP_IDS:
+        print(f"[ECHO CHECK] Phát hiện bot app_id: {app_id}")
         return True
     
+    # 2. Kiểm tra các pattern đặc trưng của bot trong text
     if echo_text:
         echo_text_lower = echo_text.lower()
         
-        # Các dấu hiệu bot RÕ RÀNG (chỉ những mẫu rất đặc trưng)
-        clear_bot_phrases = [
+        # Các mẫu câu đặc trưng của bot (thêm các mẫu mới)
+        bot_patterns = [
             "🌟 **5 ưu điểm nổi bật**",
             "🛒 đơn hàng mới",
             "🎉 shop đã nhận được đơn hàng",
@@ -2206,9 +2216,12 @@ def is_bot_generated_echo(echo_text: str, app_id: str = "", attachments: list = 
             "📌 [ms",
             "🛒 đơn hàng mới",
             "🎉 shop đã nhận được đơn hàng",
+            "dạ em chưa biết anh/chị đang hỏi về sản phẩm nào",  # THÊM MẪU MỚI
+            "vui lòng cho em biết mã sản phẩm",  # THÊM MẪU MỚI
+            "anh/chị cần em tư vấn thêm gì không ạ",  # THÊM MẪU MỚI
         ]
         
-        for phrase in clear_bot_phrases:
+        for phrase in bot_patterns:
             if phrase in echo_text_lower:
                 print(f"[ECHO BOT PHRASE] Phát hiện cụm bot: {phrase}")
                 return True
@@ -2218,8 +2231,8 @@ def is_bot_generated_echo(echo_text: str, app_id: str = "", attachments: list = 
             print(f"[ECHO BOT FORMAT] Phát hiện format bot")
             return True
         
-        # Tin nhắn quá dài (>300) và có cấu trúc bot
-        if len(echo_text) > 300 and ("dạ," in echo_text_lower or "ạ!" in echo_text_lower):
+        # Tin nhắn quá dài (>200) và có cấu trúc bot (giảm ngưỡng từ 300 xuống 200)
+        if len(echo_text) > 200 and ("dạ," in echo_text_lower or "ạ!" in echo_text_lower):
             print(f"[ECHO LONG BOT] Tin nhắn dài có cấu trúc bot: {len(echo_text)} chars")
             return True
         
@@ -2234,8 +2247,13 @@ def is_bot_generated_echo(echo_text: str, app_id: str = "", attachments: list = 
                 print(f"[ECHO BOT PATTERN] Phát hiện pattern: {pattern}")
                 return True
     
+    # 3. Kiểm tra nếu là tin nhắn từ khách hàng (có #MS từ Fchat)
+    if echo_text and "#MS" in echo_text.upper():
+        print(f"[ECHO CHECK] Tin nhắn có #MS => KHÔNG PHẢI BOT (từ Fchat)")
+        return False
+    
     return False
-
+    
 # ============================================
 # HÀM LẤY NỘI DUNG BÀI VIẾT TỪ FACEBOOK GRAPH API
 # ============================================
@@ -4551,6 +4569,53 @@ def handle_text(uid: str, text: str, referral_data: dict = None):
             if restored:
                 print(f"[TEXT HANDLER] Đã khôi phục context cho user {uid}")
         
+        # ============================================
+        # QUAN TRỌNG: TRUY XUẤT MS TỪ CONTEXT ĐÃ LOAD
+        # ============================================
+        
+        # THỬ 1: Kiểm tra xem context đã có last_ms chưa
+        current_ms = ctx.get("last_ms")
+        
+        # THỬ 2: Nếu chưa có, thử load từ Google Sheets NGAY LẬP TỨC
+        if not current_ms or current_ms not in PRODUCTS:
+            print(f"[CONTEXT MISSING] Không tìm thấy MS trong context, đang load từ Google Sheets...")
+            
+            # Load context từ Google Sheets (trực tiếp, không qua cache)
+            context_from_sheets = get_user_context_from_sheets(uid)
+            if context_from_sheets:
+                # Cập nhật vào USER_CONTEXT (chỉ update các trường cần thiết)
+                for key, value in context_from_sheets.items():
+                    if key not in ctx or (key == "last_ms" and value):
+                        ctx[key] = value
+                
+                current_ms = ctx.get("last_ms")
+                print(f"[CONTEXT RELOAD] Đã load lại context từ Sheets, last_ms: {current_ms}")
+                
+                # Nếu vẫn không có last_ms, thử lấy từ product_history
+                if not current_ms and ctx.get("product_history"):
+                    current_ms = ctx["product_history"][0] if ctx["product_history"] else None
+                    if current_ms:
+                        ctx["last_ms"] = current_ms
+                        print(f"[CONTEXT FALLBACK] Lấy MS từ product_history: {current_ms}")
+        
+        # THỬ 3: Nếu vẫn không có, thử tra cứu từ Orders sheet
+        if not current_ms or current_ms not in PRODUCTS:
+            print(f"[CONTEXT SEARCH] Đang tìm MS từ lịch sử đơn hàng...")
+            orders = get_user_order_history_from_sheets(uid)
+            if orders:
+                current_ms = orders[0].get("ms")
+                if current_ms and current_ms in PRODUCTS:
+                    ctx["last_ms"] = current_ms
+                    print(f"[CONTEXT FROM ORDERS] Tìm thấy MS từ đơn hàng: {current_ms}")
+        
+        # ============================================
+        # LOG ĐỂ DEBUG
+        # ============================================
+        print(f"[CONTEXT DEBUG] User {uid}:")
+        print(f"  - last_ms: {current_ms}")
+        print(f"  - product_history: {ctx.get('product_history', [])[:3]}")
+        print(f"  - real_message_count: {ctx.get('real_message_count', 0)}")
+        
         # Tăng counter cho tin nhắn
         if "real_message_count" not in ctx:
             ctx["real_message_count"] = 0
@@ -4558,8 +4623,6 @@ def handle_text(uid: str, text: str, referral_data: dict = None):
         message_count = ctx["real_message_count"]
         
         print(f"[MESSAGE COUNT] User {uid}: tin nhắn thứ {message_count}")
-        print(f"[DEBUG] Current last_ms in context: {ctx.get('last_ms')}")
-        print(f"[DEBUG] has_sent_first_carousel: {ctx.get('has_sent_first_carousel')}")
         
         # Xử lý order state nếu có
         if handle_order_form_step(uid, text):
@@ -4567,61 +4630,39 @@ def handle_text(uid: str, text: str, referral_data: dict = None):
             return
         
         # ============================================
-        # QUAN TRỌNG: LUÔN ƯU TIÊN MS MỚI NHẤT TRƯỚC KHI TRẢ LỜI
+        # NẾU KHÔNG TÌM THẤY MS TỪ BẤT KỲ NGUỒN NÀO
         # ============================================
-        
-        # BƯỚC 1: Tìm MS từ text (nếu có tiền tố) - ƯU TIÊN CAO NHẤT
-        detected_ms = detect_ms_from_text(text)
-        if detected_ms and detected_ms in PRODUCTS:
-            print(f"[MS DETECTED FROM TEXT] Phát hiện MS từ tin nhắn: {detected_ms}")
-            # Cập nhật context với MS mới NGAY LẬP TỨC
-            update_context_with_new_ms(uid, detected_ms, "text_detection")
-        
-        # BƯỚC 2: Tìm số trong tin nhắn với tiền tố
-        if not detected_ms:
+        if not current_ms or current_ms not in PRODUCTS:
+            print(f"[NO MS FOUND] Không tìm thấy MS cho user {uid} từ bất kỳ nguồn nào")
+            
+            # Kiểm tra nếu tin nhắn là câu hỏi chung (không có MS)
+            general_questions = ['giá', 'bao nhiêu', 'màu gì', 'size nào', 'còn hàng', 'đặt hàng', 'mua', 'tư vấn', 'cách dùng', 'sử dụng']
             text_norm = normalize_vietnamese(text.lower())
-            numbers = re.findall(r'\b(?:ms|mã|sp|ma|san pham)\s*(\d{1,6})\b', text_norm, re.IGNORECASE)
-            for num in numbers:
-                clean_num = num.lstrip('0')
-                if clean_num and clean_num in PRODUCTS_BY_NUMBER:
-                    detected_ms = PRODUCTS_BY_NUMBER[clean_num]
-                    print(f"[MS FALLBACK] Tìm thấy MS từ tiền tố + số: {detected_ms}")
-                    # Cập nhật context với MS mới NGAY LẬP TỨC
-                    update_context_with_new_ms(uid, detected_ms, "text_detection")
-                    break
-        
-        # Xác định MS hiện tại (sau khi đã cập nhật từ text)
-        current_ms = ctx.get("last_ms")
-        print(f"[DEBUG] After MS detection, current_ms: {current_ms}")
-        
-        # BƯỚC 3: Kiểm tra xem đã có MS từ trước chưa
-        if current_ms and current_ms in PRODUCTS:
-            print(f"[HAS MS FROM CONTEXT] User {uid} đã có MS từ context: {current_ms}")
+            if any(keyword in text_norm for keyword in general_questions):
+                # Yêu cầu khách gửi MS cụ thể
+                send_message(uid, "Dạ, để em tư vấn chính xác cho anh/chị, vui lòng cho em biết mã sản phẩm hoặc gửi ảnh sản phẩm ạ! 🤗")
+            else:
+                # Gợi ý khách gửi MS hoặc ảnh
+                send_message(uid, "Dạ em chưa biết anh/chị đang hỏi về sản phẩm nào. Vui lòng cho em biết mã sản phẩm hoặc gửi ảnh sản phẩm ạ! 🤗")
             
-            # Gửi carousel nếu: chưa gửi carousel cho sản phẩm này VÀ tin nhắn trong 3 tin đầu tiên
-            if not ctx.get("has_sent_first_carousel") and message_count <= 3:
-                print(f"🚨 [FIRST CAROUSEL FOR PRODUCT] Gửi carousel cho sản phẩm {current_ms} (tin nhắn thứ {message_count})")
-                send_single_product_carousel(uid, current_ms)
-                ctx["has_sent_first_carousel"] = True
-            
-            # Dùng GPT để trả lời theo MS HIỆN TẠI (đã được cập nhật nếu có từ text)
-            print(f"✅ [GPT REQUIRED] User {uid} đã có MS {current_ms}, dùng GPT trả lời")
-            handle_text_with_function_calling(uid, text)
             ctx["processing_lock"] = False
             return
         
-        # Nếu không tìm thấy MS từ bất kỳ nguồn nào
-        print(f"[NO MS DETECTED] Không tìm thấy MS từ tin nhắn: {text}")
+        # ============================================
+        # TIẾP TỤC XỬ LÝ VỚI MS ĐÃ CÓ
+        # ============================================
         
-        # Kiểm tra nếu tin nhắn là câu hỏi chung (không có MS)
-        general_questions = ['giá', 'bao nhiêu', 'màu gì', 'size nào', 'còn hàng', 'đặt hàng', 'mua', 'tư vấn']
-        text_norm = normalize_vietnamese(text.lower())
-        if any(keyword in text_norm for keyword in general_questions):
-            # Yêu cầu khách gửi MS cụ thể
-            send_message(uid, "Dạ, để em tư vấn chính xác cho anh/chị, vui lòng cho em biết mã sản phẩm hoặc gửi ảnh sản phẩm ạ! 🤗")
-        else:
-            # Gợi ý khách gửi MS hoặc ảnh
-            send_message(uid, "Dạ em chưa biết anh/chị đang hỏi về sản phẩm nào. Vui lòng cho em biết mã sản phẩm hoặc gửi ảnh sản phẩm ạ! 🤗")
+        print(f"[HAS MS FROM CONTEXT] User {uid} đã có MS từ context: {current_ms}")
+        
+        # Gửi carousel nếu: chưa gửi carousel cho sản phẩm này VÀ tin nhắn trong 3 tin đầu tiên
+        if not ctx.get("has_sent_first_carousel") and message_count <= 3:
+            print(f"🚨 [FIRST CAROUSEL FOR PRODUCT] Gửi carousel cho sản phẩm {current_ms} (tin nhắn thứ {message_count})")
+            send_single_product_carousel(uid, current_ms)
+            ctx["has_sent_first_carousel"] = True
+        
+        # Dùng GPT để trả lời theo MS HIỆN TẠI
+        print(f"✅ [GPT REQUIRED] User {uid} đã có MS {current_ms}, dùng GPT trả lời")
+        handle_text_with_function_calling(uid, text)
 
     except Exception as e:
         print(f"Error in handle_text for {uid}: {e}")
@@ -6502,6 +6543,25 @@ def webhook():
                             sender_id = messaging_event["sender"]["id"]
                             
                             # ============================================
+                            # QUAN TRỌNG: KIỂM TRA VÀ BỎ QUA TIN NHẮN TỪ FANPAGE
+                            # ============================================
+                            
+                            # 2.0 KIỂM TRA TIN NHẮN ECHO/READ/DELIVERY TỪ FANPAGE
+                            # Kiểm tra nếu sender_id là PAGE_ID (Fanpage gửi tin nhắn echo)
+                            if PAGE_ID and sender_id == PAGE_ID:
+                                print(f"[PAGE SKIP] Bỏ qua tin nhắn từ chính page {sender_id}")
+                                continue
+                            
+                            # Kiểm tra tin nhắn echo (bot reply)
+                            message_data = messaging_event.get("message", {})
+                            if message_data.get("is_echo"):
+                                text = message_data.get("text", "")
+                                app_id = message_data.get("app_id", "")
+                                if is_bot_generated_echo(text, app_id):
+                                    print(f"[ECHO SKIP] Bỏ qua tin nhắn echo từ bot: {text[:100]}...")
+                                    continue
+                            
+                            # ============================================
                             # 2.1 XỬ LÝ POSTBACK (NÚT BẤM)
                             # ============================================
                             if messaging_event.get("postback"):
@@ -6615,7 +6675,7 @@ def webhook():
                             traceback.print_exc()
         
         return "ok", 200
-
+        
 # ============================================
 # START CLEANUP THREAD
 # ============================================
