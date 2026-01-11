@@ -1403,6 +1403,42 @@ def process_facebook_message(data: dict, client_ip: str, user_agent: str):
         entries = data['entry']
         
         for entry in entries:
+            # ============================================
+            # XỬ LÝ SỰ KIỆN CHANGES (COMMENT TỪ FEED)
+            # ============================================
+            if 'changes' in entry:
+                print(f"[PROCESS CHANGES] Phát hiện changes trong entry")
+                changes = entry['changes']
+                
+                for change in changes:
+                    field = change.get('field')
+                    value = change.get('value', {})
+                    
+                    if field == 'feed':
+                        print(f"[PROCESS FEED CHANGE] Xử lý feed change")
+                        
+                        # Kiểm tra xem có phải comment mới không
+                        verb = value.get('verb', '')
+                        if verb == 'add':
+                            # Đây là comment mới trên post
+                            print(f"[FEED COMMENT VIA CHANGES] Phát hiện comment mới từ feed")
+                            
+                            # Gọi hàm xử lý comment từ feed
+                            try:
+                                handle_feed_comment(value)
+                            except Exception as e:
+                                print(f"[FEED COMMENT PROCESS ERROR] Lỗi xử lý comment: {e}")
+                        else:
+                            print(f"[FEED CHANGE IGNORE] Bỏ qua change với verb: {verb}")
+                    else:
+                        print(f"[CHANGE IGNORE] Bỏ qua change field: {field}")
+                
+                # Đã xử lý changes, tiếp tục vòng lặp
+                continue
+            
+            # ============================================
+            # XỬ LÝ SỰ KIỆN MESSAGING (TIN NHẮN, POSTBACK)
+            # ============================================
             if 'messaging' not in entry:
                 continue
             
@@ -1503,11 +1539,12 @@ def process_facebook_message(data: dict, client_ip: str, user_agent: str):
                                         handle_image(sender_id, image_url)
                                     break
                         
-                        # Xử lý tin nhắn từ bài viết (feed comment)
+                        # Xử lý tin nhắn từ bài viết (feed comment) - cách cũ
                         elif 'referral' in message_data:
                             referral_data = message_data['referral']
                             if referral_data.get('source') == 'ADS_POST':
                                 # Đây là comment từ bài viết
+                                print(f"[FEED COMMENT VIA MESSAGE] Phát hiện comment từ bài viết")
                                 handle_feed_comment(referral_data)
                         
                     except Exception as e:
@@ -1531,7 +1568,7 @@ def process_facebook_message(data: dict, client_ip: str, user_agent: str):
         print(f"[PROCESS MESSAGE ERROR] Lỗi tổng thể: {e}")
         import traceback
         traceback.print_exc()
-
+        
 # ============================================
 # GOOGLE SHEETS CACHE
 # ============================================
@@ -1764,12 +1801,32 @@ def reply_to_facebook_comment(comment_id: str, message: str):
             return True
         else:
             print(f"[REPLY COMMENT ERROR] Lỗi {response.status_code}: {response.text[:200]}")
+            
+            # Log chi tiết lỗi để debug
+            try:
+                error_data = response.json().get('error', {})
+                error_message = error_data.get('message', '')
+                error_code = error_data.get('code', 0)
+                print(f"[REPLY COMMENT DETAIL] Lỗi Facebook API: {error_message} (code: {error_code})")
+                
+                # Kiểm tra các lỗi phổ biến
+                if "access token" in error_message.lower():
+                    print(f"[REPLY COMMENT DETAIL] CÓ THỂ PAGE_ACCESS_TOKEN ĐÃ HẾT HẠN HOẶC KHÔNG ĐỦ QUYỀN!")
+                elif "permission" in error_message.lower():
+                    print(f"[REPLY COMMENT DETAIL] THIẾU QUYỀN TRUY CẬP! Cần quyền 'pages_read_engagement' và 'pages_manage_engagement'")
+                elif "comment" in error_message.lower() and "does not exist" in error_message.lower():
+                    print(f"[REPLY COMMENT DETAIL] Comment không tồn tại hoặc đã bị xóa")
+            except:
+                pass
+                
             return False
             
     except Exception as e:
         print(f"[REPLY COMMENT EXCEPTION] Lỗi khi gửi trả lời bình luận: {e}")
+        import traceback
+        traceback.print_exc()
         return False
-
+        
 # ============================================
 # HÀM CẬP NHẬT CONTEXT VỚI MS MỚI VÀ RESET COUNTER
 # ============================================
@@ -2738,19 +2795,25 @@ def handle_feed_comment(change_data: dict):
         user_name = from_user.get("name", "")
         message_text = change_data.get("message", "")
         post_id = change_data.get("post_id", "")
+        comment_id = change_data.get("comment_id", "")
         
         if not user_id or not post_id:
             print(f"[FEED COMMENT] Thiếu user_id hoặc post_id")
             return None
         
-        print(f"[FEED COMMENT] User {user_id} ({user_name}) comment: '{message_text}' trên post {post_id}")
+        print(f"[FEED COMMENT] User {user_id} ({user_name}) comment: '{message_text}' trên post {post_id}, comment_id: {comment_id}")
         
         # 2. Kiểm tra xem có phải comment từ page không (bỏ qua)
         if PAGE_ID and user_id == PAGE_ID:
             print(f"[FEED COMMENT] Bỏ qua comment từ chính page")
             return None
         
-        # 3. Lấy nội dung bài viết gốc từ Facebook Graph API
+        # 3. Kiểm tra xem có phải comment từ bot không (bỏ qua)
+        if str(user_id) in BOT_APP_IDS:
+            print(f"[FEED COMMENT] Bỏ qua comment từ bot")
+            return None
+        
+        # 4. Lấy nội dung bài viết gốc từ Facebook Graph API
         post_data = get_post_content_from_facebook(post_id)
         
         if not post_data:
@@ -2762,14 +2825,37 @@ def handle_feed_comment(change_data: dict):
         print(f"[FEED COMMENT DEBUG] Nội dung bài viết ({len(post_message)} ký tự):")
         print(f"[FEED COMMENT DEBUG] {post_message[:500]}")
         
-        # 4. Trích xuất MS từ caption bài viết (CHỈ DÙNG REGEX - KHÔNG KIỂM TRA PRODUCTS)
+        # 5. Trích xuất MS từ caption bài viết (CHỈ DÙNG REGEX - KHÔNG KIỂM TRA PRODUCTS)
         detected_ms = extract_ms_from_post_content(post_data)
         
         if not detected_ms:
             print(f"[FEED COMMENT] Không tìm thấy MS trong bài viết {post_id}")
+            
+            # Vẫn thử trả lời bình luận nếu không tìm thấy MS
+            if ENABLE_COMMENT_REPLY and comment_id:
+                try:
+                    # Tạo nội dung trả lời bằng GPT
+                    comment_reply = generate_comment_reply_by_gpt(
+                        comment_text=message_text,
+                        user_name=user_name,
+                        product_name="",
+                        ms=""
+                    )
+                    
+                    # Gửi trả lời lên Facebook
+                    if comment_reply:
+                        reply_success = reply_to_facebook_comment(comment_id, comment_reply)
+                        
+                        if reply_success:
+                            print(f"[COMMENT REPLY] Đã trả lời bình luận {comment_id} cho user {user_id} (không có MS)")
+                        else:
+                            print(f"[COMMENT REPLY ERROR] Không thể gửi trả lời bình luận {comment_id}")
+                except Exception as e:
+                    print(f"[COMMENT REPLY EXCEPTION] Lỗi khi trả lời bình luận: {e}")
+            
             return None
         
-        # 5. Load products và kiểm tra MS có tồn tại trong database
+        # 6. Load products và kiểm tra MS có tồn tại trong database
         load_products(force=True)  # Load với force=True để đảm bảo có dữ liệu mới nhất
         
         # Kiểm tra nếu MS trực tiếp tồn tại
@@ -2782,9 +2868,30 @@ def handle_feed_comment(change_data: dict):
                 print(f"[FEED COMMENT] Đã map sang {detected_ms}")
             else:
                 print(f"[FEED COMMENT] MS {detected_ms} không tồn tại trong database")
+                
+                # Vẫn thử trả lời bình luận nếu không tìm thấy sản phẩm
+                if ENABLE_COMMENT_REPLY and comment_id:
+                    try:
+                        # Tạo nội dung trả lời bằng GPT
+                        comment_reply = generate_comment_reply_by_gpt(
+                            comment_text=message_text,
+                            user_name=user_name,
+                            product_name="",
+                            ms=""
+                        )
+                        
+                        # Gửi trả lời lên Facebook
+                        if comment_reply:
+                            reply_success = reply_to_facebook_comment(comment_id, comment_reply)
+                            
+                            if reply_success:
+                                print(f"[COMMENT REPLY] Đã trả lời bình luận {comment_id} cho user {user_id} (MS không tồn tại)")
+                    except Exception as e:
+                        print(f"[COMMENT REPLY EXCEPTION] Lỗi khi trả lời bình luận: {e}")
+                
                 return None
         
-        # 6. Cập nhật context cho user (RESET COUNTER để áp dụng first message rule)
+        # 7. Cập nhật context cho user (RESET COUNTER để áp dụng first message rule)
         print(f"[FEED COMMENT MS] Phát hiện MS {detected_ms} từ post {post_id} cho user {user_id}")
         
         # Gọi hàm cập nhật context mới (reset counter)
@@ -2807,7 +2914,7 @@ def handle_feed_comment(change_data: dict):
         ctx["source_post_content"] = post_data.get('message', '')[:300]
         ctx["source_post_url"] = post_data.get('permalink_url', '')
         
-        # 7. GỬI TIN NHẮN TỰ ĐỘNG TIẾP THỊ SẢN PHẨM BẰNG GPT
+        # 8. GỬI TIN NHẮN TỰ ĐỘNG TIẾP THỊ SẢN PHẨM BẰNG GPT
         # Chỉ gửi nếu user chưa nhắn tin trước đó hoặc real_message_count = 0
         if ctx.get("real_message_count", 0) == 0:
             try:
@@ -2829,41 +2936,34 @@ def handle_feed_comment(change_data: dict):
                 
             except Exception as e:
                 print(f"[FEED COMMENT AUTO REPLY ERROR] Lỗi gửi tin nhắn: {e}")
+                # Fallback nếu lỗi
+                send_message(user_id, f"Chào {user_name}! 👋\n\nCảm ơn đã bình luận trên bài viết của shop ạ! Ac có thể hỏi em bất kỳ thông tin gì về sản phẩm ạ!")
         else:
             print(f"[FEED COMMENT SKIP AUTO REPLY] User {user_id} đã có real_message_count = {ctx.get('real_message_count')}, bỏ qua auto reply")
 
         # ============================================
-        # 8. TRẢ LỜI BÌNH LUẬN TRÊN FACEBOOK BẰNG GPT (TÍNH NĂNG MỚI)
+        # 9. TRẢ LỜI BÌNH LUẬN TRÊN FACEBOOK BẰNG GPT (TÍNH NĂNG MỚI)
         # ============================================
-        if ENABLE_COMMENT_REPLY and detected_ms:
+        if ENABLE_COMMENT_REPLY and detected_ms and comment_id:
             try:
-                # Lấy comment_id từ change_data
-                comment_id = change_data.get("comment_id")
-
-                # Thêm log để kiểm tra cho chắc chắn
-                print(f"[DEBUG] Khởi tạo reply cho comment_id: {comment_id}")
+                # Tạo nội dung trả lời bằng GPT
+                comment_reply = generate_comment_reply_by_gpt(
+                    comment_text=message_text,
+                    user_name=user_name,
+                    product_name=product_name,  # Sử dụng biến product_name đã được định nghĩa
+                    ms=detected_ms
+                )
                 
-                if comment_id:
-                    # Tạo nội dung trả lời bằng GPT
-                    comment_reply = generate_comment_reply_by_gpt(
-                        comment_text=message_text,
-                        user_name=user_name,
-                        product_name=product_name,  # Sử dụng biến product_name đã được định nghĩa
-                        ms=detected_ms
-                    )
+                # Gửi trả lời lên Facebook
+                if comment_reply:
+                    reply_success = reply_to_facebook_comment(comment_id, comment_reply)
                     
-                    # Gửi trả lời lên Facebook
-                    if comment_reply:
-                        reply_success = reply_to_facebook_comment(comment_id, comment_reply)
-                        
-                        if reply_success:
-                            print(f"[COMMENT REPLY] Đã trả lời bình luận {comment_id} cho user {user_id}")
-                        else:
-                            print(f"[COMMENT REPLY ERROR] Không thể gửi trả lời bình luận {comment_id}")
+                    if reply_success:
+                        print(f"[COMMENT REPLY] Đã trả lời bình luận {comment_id} cho user {user_id}")
                     else:
-                        print(f"[COMMENT REPLY ERROR] Không tạo được nội dung trả lời")
+                        print(f"[COMMENT REPLY ERROR] Không thể gửi trả lời bình luận {comment_id}")
                 else:
-                    print(f"[COMMENT REPLY ERROR] Không có comment_id")
+                    print(f"[COMMENT REPLY ERROR] Không tạo được nội dung trả lời")
                     
             except Exception as e:
                 print(f"[COMMENT REPLY EXCEPTION] Lỗi khi trả lời bình luận: {e}")
@@ -2878,7 +2978,7 @@ def handle_feed_comment(change_data: dict):
         import traceback
         traceback.print_exc()
         return None
-
+        
 # ============================================
 # HELPER: SEND MESSAGE
 # ============================================
