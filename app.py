@@ -445,14 +445,23 @@ def cleanup_inactive_users():
     if users_to_remove:
         print(f"[CLEANUP] Đã xóa {len(users_to_remove)} users không hoạt động")
 
-def save_single_user_to_sheets(user_id: str, context: dict):
-    """Lưu riêng 1 user vào Google Sheets"""
+def save_single_user_to_sheets(user_id: str, context: dict = None):
+    """Lưu riêng 1 user vào Google Sheets NGAY LẬP TỨC"""
     if not GOOGLE_SHEET_ID or not GOOGLE_SHEETS_CREDENTIALS_JSON:
+        print("[IMMEDIATE SAVE] Chưa cấu hình Google Sheets, bỏ qua")
         return
     
     try:
+        # Nếu không truyền context, lấy từ USER_CONTEXT
+        if context is None:
+            if user_id not in USER_CONTEXT:
+                print(f"[IMMEDIATE SAVE] User {user_id} không tồn tại trong USER_CONTEXT")
+                return
+            context = USER_CONTEXT[user_id]
+        
         service = get_google_sheets_service()
         if not service:
+            print("[IMMEDIATE SAVE] Không thể khởi tạo Google Sheets service")
             return
         
         # Lấy dữ liệu từ cache
@@ -494,6 +503,8 @@ def save_single_user_to_sheets(user_id: str, context: dict):
                 valueInputOption="USER_ENTERED",
                 body={'values': [row_data]}
             ).execute()
+            
+            print(f"[IMMEDIATE SAVE] Đã cập nhật user {user_id} với MS {context.get('last_ms')}")
         else:
             # Thêm dòng mới
             start_row = len(existing_values) + 2
@@ -509,11 +520,16 @@ def save_single_user_to_sheets(user_id: str, context: dict):
             
             # Reset cache
             SHEETS_CACHE['last_read'] = 0
+            
+            print(f"[IMMEDIATE SAVE] Đã thêm mới user {user_id} với MS {context.get('last_ms')}")
         
-        print(f"[SINGLE SAVE] Đã lưu user {user_id} vào Google Sheets")
+        # Reset dirty flag và cập nhật thời gian lưu
+        if user_id in USER_CONTEXT:
+            USER_CONTEXT[user_id]["dirty"] = False
+            USER_CONTEXT[user_id]["last_saved"] = time.time()
         
     except Exception as e:
-        print(f"[SINGLE SAVE ERROR] Lỗi khi lưu user {user_id}: {e}")
+        print(f"[IMMEDIATE SAVE ERROR] Lỗi khi lưu user {user_id}: {e}")
         
 def save_user_context_to_sheets_optimized(force_all: bool = False):
     """
@@ -1471,6 +1487,7 @@ def update_context_with_new_ms(uid: str, new_ms: str, source: str = "unknown"):
     """
     Cập nhật context với MS mới và reset counter để đảm bảo bot gửi carousel
     cho sản phẩm mới khi user gửi tin nhắn đầu tiên
+    LƯU NGAY VÀO GOOGLE SHEETS khi MS thay đổi
     """
     if not new_ms:
         return False
@@ -1512,10 +1529,26 @@ def update_context_with_new_ms(uid: str, new_ms: str, source: str = "unknown"):
     ctx["last_updated"] = time.time()
     ctx["dirty"] = True  # ← THÊM DÒNG NÀY
     
+    # ============================================
+    # QUAN TRỌNG: LƯU NGAY VÀO GOOGLE SHEETS KHI MS THAY ĐỔI
+    # ============================================
+    def save_immediately():
+        try:
+            print(f"[IMMEDIATE SAVE] Đang lưu ngay context cho user {uid} với MS {new_ms}...")
+            # Gọi hàm save_single_user_to_sheets trực tiếp
+            save_single_user_to_sheets(uid, ctx)
+            print(f"[IMMEDIATE SAVE COMPLETE] Đã lưu xong user {uid} vào Google Sheets")
+        except Exception as e:
+            print(f"[IMMEDIATE SAVE ERROR] Lỗi khi lưu ngay user {uid}: {e}")
+    
+    # Chạy trong thread riêng để không block bot
+    threading.Thread(target=save_immediately, daemon=True).start()
+    # ============================================
+    
     print(f"[CONTEXT UPDATE COMPLETE] Đã cập nhật MS {new_ms} cho user {uid} (nguồn: {source}, real_message_count: {ctx['real_message_count']}, has_sent_first_carousel: {ctx['has_sent_first_carousel']})")
     
     return True
-
+    
 def restore_user_context_on_wakeup(uid: str):
     """Khôi phục context cho user khi app wake up từ sleep - ƯU TIÊN LOAD TỪ SHEETS"""
     # 1. Thử load từ USER_CONTEXT trong RAM (nếu còn)
@@ -3363,17 +3396,19 @@ def handle_text_with_function_calling(uid: str, text: str):
         if restored:
             print(f"[GPT FUNCTION] Đã khôi phục context cho user {uid}")
     
-    # ƯU TIÊN 1: Nếu phát hiện MS từ text (có tiền tố) thì cập nhật NGAY
+    # ============================================
+    # QUAN TRỌNG: ƯU TIÊN CẬP NHẬT MS TỪ TEXT VÀ LƯU NGAY
+    # ============================================
     detected_ms = detect_ms_from_text(text)
     if detected_ms and detected_ms in PRODUCTS:
-        # Cập nhật MS mới NGAY LẬP TỨC
+        # Cập nhật MS mới NGAY LẬP TỨC và lưu vào Sheets
         update_context_with_new_ms(uid, detected_ms, "text_detection")
         print(f"[MS DETECTED IN GPT] Phát hiện và cập nhật MS mới: {detected_ms}")
     
-    # ƯU TIÊN 2: Lấy MS từ context (sau khi đã cập nhật từ text nếu có)
+    # ƯU TIÊN: Lấy MS từ context (sau khi đã cập nhật từ text nếu có)
     current_ms = ctx.get("last_ms")
     
-    # ƯU TIÊN 3: Nếu vẫn không có, kiểm tra xem tin nhắn có chứa số không
+    # ƯU TIÊN: Nếu vẫn không có, kiểm tra xem tin nhắn có chứa số không
     if not current_ms or current_ms not in PRODUCTS:
         # Tìm bất kỳ số nào trong tin nhắn (1-6 chữ số) với TIỀN TỐ
         text_norm = normalize_vietnamese(text.lower())
@@ -3382,16 +3417,19 @@ def handle_text_with_function_calling(uid: str, text: str):
             clean_num = num.lstrip('0')
             if clean_num and clean_num in PRODUCTS_BY_NUMBER:
                 current_ms = PRODUCTS_BY_NUMBER[clean_num]
-                # Cập nhật context với MS mới
+                # Cập nhật context với MS mới VÀ LƯU NGAY
                 update_context_with_new_ms(uid, current_ms, "text_detection")
                 print(f"[MS FALLBACK IN GPT] Tìm thấy MS từ tiền tố + số: {current_ms}")
                 break
     
-    # ƯU TIÊN 4: Nếu vẫn không có, hỏi lại khách
+    # ƯU TIÊN: Nếu vẫn không có, hỏi lại khách
     if not current_ms or current_ms not in PRODUCTS:
         send_message(uid, "Dạ em chưa biết anh/chị đang hỏi về sản phẩm nào. Vui lòng cho em biết mã sản phẩm (ví dụ: MS000012) ạ!")
         return
     
+    # ============================================
+    # TIẾP TỤC XỬ LÝ GPT VỚI MS HIỆN TẠI
+    # ============================================
     fanpage_name = get_fanpage_name_from_api()
     
     system_prompt = f"""Bạn là nhân viên bán hàng của {fanpage_name}.
@@ -3523,56 +3561,6 @@ Khi khách hỏi về bất kỳ thông tin chi tiết nào của sản phẩm, 
 3. send_product_images - Cho câu hỏi "xem ảnh", "gửi ảnh", "cho xem hình"
 4. provide_order_link - Cho câu hỏi "đặt hàng", "mua hàng", "tôi muốn mua", "order"
 5. send_product_videos - Cho câu hỏi "xem video", "có video không"
-
-**VÍ DỤ XỬ LÝ CỤ THỂ:**
-
-Ví dụ 1: Khách hỏi "Có những màu nào?"
-- Bước 1: Gọi get_product_basic_info
-- Bước 2: Lấy danh sách màu từ 'all_colors' hoặc 'mau_sac'
-- Bước 3: Trả lời: "Dạ, sản phẩm có các màu: Đỏ, Xanh, Trắng, Đen ạ!"
-
-Ví dụ 2: Khách hỏi "Size nào có?"
-- Bước 1: Gọi get_product_basic_info
-- Bước 2: Lấy danh sách size từ 'all_sizes' hoặc 'size'
-- Bước 3: Trả lời: "Dạ, sản phẩm có các size: M, L, XL, XXL ạ!"
-
-Ví dụ 3: Khách hỏi "Đặt hàng"
-- Bước 1: Gọi provide_order_link
-- Bước 2: Tool sẽ tự động gửi nút đặt hàng
-- Bước 3: Trả lời: "Dạ, em đã gửi nút đặt hàng cho anh/chị. Anh/chị bấm vào nút để vào trang đặt hàng ạ!"
-
-Ví dụ 4: Khách hỏi "Công suất bao nhiêu?"
-- Bước 1: Gọi get_product_basic_info
-- Bước 2: Đọc kỹ cột "Mô tả", tìm từ "công suất"
-- Bước 3: Nếu thấy: "Công suất: 1500W" → trả lời: "Dạ, sản phẩm có công suất 1500W ạ!"
-- Bước 4: Nếu không thấy → trả lời: "Dạ, phần thông số công suất trong hệ thống chưa có thông tin chi tiết ạ. Anh/chị vui lòng liên hệ shop để được hỗ trợ ạ!"
-
-Ví dụ 5: Khách hỏi "Có miễn ship không?"
-- Bước 1: Gọi get_product_basic_info
-- Bước 2: Đọc kỹ cột "Mô tả", tìm từ "miễn phí vận chuyển", "freeship", "miễn ship"
-- Bước 3: Nếu thấy: "Miễn phí vận chuyển toàn quốc" → trả lời: "Dạ, shop có chính sách miễn phí vận chuyển toàn quốc cho sản phẩm này ạ!"
-- Bước 4: Nếu không thấy → trả lời: "Dạ, phần thông tin về phí vận chuyển trong hệ thống chưa có chi tiết ạ. Anh/chị vui lòng liên hệ shop để được hỗ trợ ạ!"
-
-Ví dụ 6: Khách hỏi "Lọc nước nhiễm đá vôi không?"
-- Bước 1: Gọi get_product_basic_info
-- Bước 2: Đọc kỹ cột "Mô tả", tìm từ "nhiễm đá vôi", "lọc đá vôi", "nước cứng"
-- Bước 3: Nếu thấy: "Có khả năng lọc nước nhiễm đá vôi hiệu quả" → trả lời: "Dạ, sản phẩm có khả năng lọc nước nhiễm đá vôi rất hiệu quả ạ!"
-- Bước 4: Nếu không thấy → trả lời: "Dạ, phần thông tin về khả năng lọc nước nhiễm đá vôi trong hệ thống chưa có chi tiết ạ. Anh/chị vui lòng liên hệ shop để được hỗ trợ ạ!"
-
-Ví dụ 7: Khách hỏi "Phù hợp cho gia đình hay công sở không?"
-- Bước 1: Gọi get_product_basic_info
-- Bước 2: Đọc kỹ cột "Mô tả", tìm từ "gia đình", "công sở", "văn phòng"
-- Bước 3: Nếu thấy: "Phù hợp cho cả gia đình và văn phòng" → trả lời: "Dạ, sản phẩm này phù hợp cho cả gia đình và công sở/văn phòng ạ!"
-- Bước 4: Nếu không thấy → trả lời: "Dạ, phần thông tin về đối tượng sử dụng trong hệ thống chưa có chi tiết ạ. Anh/chị vui lòng liên hệ shop để được hỗ trợ ạ!"
-
-**TÓM TẮT CÁCH XỬ LÝ CÁC LOẠI CÂU HỎI:**
-- Hỏi về GIÁ → get_product_price_details
-- Hỏi về MÀU SẮC → get_product_basic_info (liệt kê từ all_colors)
-- Hỏi về SIZE → get_product_basic_info (liệt kê từ all_sizes)
-- Hỏi về THÔNG TIN CHI TIẾT → get_product_basic_info (tìm trong mô tả)
-- Hỏi về ĐẶT HÀNG → provide_order_link
-- Hỏi về ẢNH → send_product_images
-- Hỏi về VIDEO → send_product_videos
 """
     
     try:
@@ -3626,6 +3614,7 @@ Ví dụ 7: Khách hỏi "Phù hợp cho gia đình hay công sở không?"
     except Exception as e:
         print(f"GPT Error: {e}")
         send_message(uid, "Dạ em đang gặp chút trục trặc, anh/chị vui lòng thử lại sau ạ.")
+        
 # ============================================
 # FACEBOOK CONVERSION API FUNCTIONS - ASYNC
 # ============================================
@@ -4204,6 +4193,7 @@ def handle_postback_with_recovery(uid: str, payload: str, postback_id: str = Non
     """
     Xử lý postback - FIX LỖI GỬI LẶP VÔ HẠN
     CHỈ XỬ LÝ 1 LẦN DUY NHẤT CHO MỖI POSTBACK_ID
+    THÊM LƯU NGAY VÀO GOOGLE SHEETS KHI CẬP NHẬT MS
     """
     now = time.time()
     
@@ -4238,6 +4228,22 @@ def handle_postback_with_recovery(uid: str, payload: str, postback_id: str = Non
         if ms in PRODUCTS:
             ctx["last_ms"] = ms
             ctx["dirty"] = True
+            
+            # ============================================
+            # QUAN TRỌNG: LƯU NGAY VÀO GOOGLE SHEETS KHI CLICK NÚT
+            # ============================================
+            def save_immediately_postback():
+                try:
+                    print(f"[POSTBACK IMMEDIATE SAVE] Đang lưu ngay MS {ms} cho user {uid}...")
+                    save_single_user_to_sheets(uid, ctx)
+                    print(f"[POSTBACK IMMEDIATE SAVE COMPLETE] Đã lưu xong user {uid} vào Google Sheets")
+                except Exception as e:
+                    print(f"[POSTBACK IMMEDIATE SAVE ERROR] Lỗi khi lưu user {uid}: {e}")
+            
+            # Chạy trong thread riêng để không block bot
+            threading.Thread(target=save_immediately_postback, daemon=True).start()
+            # ============================================
+            
             # Gọi hàm update_product_context cũ
             if "product_history" not in ctx:
                 ctx["product_history"] = []
@@ -4334,6 +4340,22 @@ Hãy liệt kê 5 ưu điểm nổi bật nhất của sản phẩm này theo đ
         if ms in PRODUCTS:
             ctx["last_ms"] = ms
             ctx["dirty"] = True
+            
+            # ============================================
+            # QUAN TRỌNG: LƯU NGAY VÀO GOOGLE SHEETS KHI CLICK NÚT
+            # ============================================
+            def save_immediately_postback():
+                try:
+                    print(f"[POSTBACK IMMEDIATE SAVE] Đang lưu ngay MS {ms} cho user {uid}...")
+                    save_single_user_to_sheets(uid, ctx)
+                    print(f"[POSTBACK IMMEDIATE SAVE COMPLETE] Đã lưu xong user {uid} vào Google Sheets")
+                except Exception as e:
+                    print(f"[POSTBACK IMMEDIATE SAVE ERROR] Lỗi khi lưu user {uid}: {e}")
+            
+            # Chạy trong thread riêng để không block bot
+            threading.Thread(target=save_immediately_postback, daemon=True).start()
+            # ============================================
+            
             # Gọi hàm update_product_context cũ
             if "product_history" not in ctx:
                 ctx["product_history"] = []
@@ -4353,6 +4375,37 @@ Hãy liệt kê 5 ưu điểm nổi bật nhất của sản phẩm này theo đ
     elif payload.startswith("ORDER_BUTTON_"):
         ms = payload.replace("ORDER_BUTTON_", "")
         if ms in PRODUCTS:
+            # CẬP NHẬT MS NGAY KHI CLICK NÚT ĐẶT HÀNG
+            ctx["last_ms"] = ms
+            ctx["dirty"] = True
+            
+            # ============================================
+            # QUAN TRỌNG: LƯU NGAY VÀO GOOGLE SHEETS KHI CLICK NÚT ĐẶT HÀNG
+            # ============================================
+            def save_immediately_postback():
+                try:
+                    print(f"[POSTBACK IMMEDIATE SAVE] Đang lưu ngay MS {ms} cho user {uid} (ORDER_BUTTON)...")
+                    save_single_user_to_sheets(uid, ctx)
+                    print(f"[POSTBACK IMMEDIATE SAVE COMPLETE] Đã lưu xong user {uid} vào Google Sheets")
+                except Exception as e:
+                    print(f"[POSTBACK IMMEDIATE SAVE ERROR] Lỗi khi lưu user {uid}: {e}")
+            
+            # Chạy trong thread riêng để không block bot
+            threading.Thread(target=save_immediately_postback, daemon=True).start()
+            # ============================================
+            
+            # Cập nhật product_history
+            if "product_history" not in ctx:
+                ctx["product_history"] = []
+            
+            if not ctx["product_history"] or ctx["product_history"][0] != ms:
+                if ms in ctx["product_history"]:
+                    ctx["product_history"].remove(ms)
+                ctx["product_history"].insert(0, ms)
+            
+            if len(ctx["product_history"]) > 5:
+                ctx["product_history"] = ctx["product_history"][:5]
+            
             # Gửi sự kiện AddToCart khi click nút đặt hàng
             try:
                 product = PRODUCTS[ms]
