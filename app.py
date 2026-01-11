@@ -25,6 +25,15 @@ from openai import OpenAI
 # ============================================
 app = Flask(__name__)
 
+# Middleware để đảm bảo workers được khởi động
+@app.before_request
+def ensure_workers_initialized():
+    """Đảm bảo workers được khởi động trước khi xử lý request đầu tiên"""
+    if not WORKERS_INITIALIZED:
+        print(f"[FIRST REQUEST] Khởi động workers từ before_request...")
+        initialize_workers_once()
+    return None
+
 # ============================================
 # ENV & CONFIG - THÊM POSCAKE, PAGE_ID VÀ FACEBOOK CAPI
 # ============================================
@@ -6855,9 +6864,16 @@ start_cleanup_thread()
 # KHỞI ĐỘNG WORKERS KHI APP START
 # ============================================
 
-@app.before_first_request
-def initialize_workers():
-    """Khởi động các worker khi app start"""
+# Biến flag để đảm bảo chỉ khởi động workers một lần
+WORKERS_INITIALIZED = False
+
+def initialize_workers_once():
+    """Khởi động các worker chỉ một lần duy nhất"""
+    global WORKERS_INITIALIZED
+    
+    if WORKERS_INITIALIZED:
+        return
+    
     print(f"[INIT] Đang khởi động các background workers...")
     
     # Khởi động worker xử lý tin nhắn
@@ -6878,17 +6894,16 @@ def initialize_workers():
         except Exception as e:
             print(f"[INIT ERROR] Lỗi khởi tạo sheet: {e}")
     
+    WORKERS_INITIALIZED = True
     print(f"[INIT] Tất cả workers đã được khởi động")
+
+# Khởi động workers ngay khi app start
+initialize_workers_once()
     
 if __name__ == "__main__":
-    # Khởi động worker cho Facebook CAPI
-    start_facebook_worker()
+    # Khởi động workers trước khi chạy app
+    initialize_workers_once()
     
-    # Khởi động thread lưu context định kỳ
-    threading.Thread(target=periodic_context_save, daemon=True).start()
-    
-    # Load context từ Google Sheets khi khởi động
-    load_user_context_from_sheets()
-    
-    port = int(os.environ.get("PORT", 8000))
-    app.run(host="0.0.0.0", port=port)
+    # Khởi động Flask app
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
