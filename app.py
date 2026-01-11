@@ -1551,14 +1551,19 @@ def update_context_with_new_ms(uid: str, new_ms: str, source: str = "unknown"):
     
 def restore_user_context_on_wakeup(uid: str):
     """Khôi phục context cho user khi app wake up từ sleep - ƯU TIÊN LOAD TỪ SHEETS"""
-    # 1. Thử load từ Google Sheets trước (ƯU TIÊN)
-    context_from_sheets = get_user_context_from_sheets(uid)
-    if context_from_sheets and context_from_sheets.get("last_ms"):
-        USER_CONTEXT[uid] = context_from_sheets
-        print(f"[RESTORE CONTEXT] Đã khôi phục context cho user {uid} từ Google Sheets: {context_from_sheets.get('last_ms')}")
+    # 1. Thử load từ USER_CONTEXT trong RAM (nếu còn)
+    if uid in USER_CONTEXT and USER_CONTEXT[uid].get("last_ms"):
+        print(f"[RESTORE CONTEXT] User {uid} đã có context trong RAM")
         return True
     
-    # 2. Nếu không có trong Sheets, thử tra cứu đơn hàng từ Google Sheets (Orders sheet)
+    # 2. Thử load từ Google Sheets (ƯU TIÊN MỚI)
+    context_from_sheets = get_user_context_from_sheets(uid)
+    if context_from_sheets:
+        USER_CONTEXT[uid] = context_from_sheets
+        print(f"[RESTORE CONTEXT] Đã khôi phục context cho user {uid} từ Google Sheets")
+        return True
+    
+    # 3. Thử tra cứu đơn hàng từ Google Sheets (Orders sheet)
     orders = get_user_order_history_from_sheets(uid)
     
     if orders:
@@ -1579,7 +1584,7 @@ def restore_user_context_on_wakeup(uid: str):
             print(f"[RESTORE CONTEXT] Đã khôi phục context cho user {uid} từ đơn hàng: {last_ms}")
             return True
     
-    # 3. Thử tìm bằng số điện thoại trong context của user khác
+    # 4. Thử tìm bằng số điện thoại trong context của user khác
     for other_uid, other_ctx in USER_CONTEXT.items():
         if other_uid != uid and other_ctx.get("order_data", {}).get("phone"):
             # Kiểm tra xem có đơn hàng nào với số điện thoại này không
@@ -1603,7 +1608,7 @@ def restore_user_context_on_wakeup(uid: str):
     
     print(f"[RESTORE CONTEXT] Không thể khôi phục context cho user {uid}")
     return False
-    
+
 # ============================================
 # HÀM PHÁT HIỆN EMOJI/STICKER
 # ============================================
@@ -3392,49 +3397,35 @@ def handle_text_with_function_calling(uid: str, text: str):
             print(f"[GPT FUNCTION] Đã khôi phục context cho user {uid}")
     
     # ============================================
-    # QUAN TRỌNG: ƯU TIÊN DÙNG MS TỪ CONTEXT TRƯỚC
+    # QUAN TRỌNG: ƯU TIÊN CẬP NHẬT MS TỪ TEXT VÀ LƯU NGAY
     # ============================================
+    detected_ms = detect_ms_from_text(text)
+    if detected_ms and detected_ms in PRODUCTS:
+        # Cập nhật MS mới NGAY LẬP TỨC và lưu vào Sheets
+        update_context_with_new_ms(uid, detected_ms, "text_detection")
+        print(f"[MS DETECTED IN GPT] Phát hiện và cập nhật MS mới: {detected_ms}")
+    
+    # ƯU TIÊN: Lấy MS từ context (sau khi đã cập nhật từ text nếu có)
     current_ms = ctx.get("last_ms")
     
-    # Kiểm tra xem MS từ context có hợp lệ không
-    if current_ms and current_ms in PRODUCTS:
-        print(f"[GPT FUNCTION] ƯU TIÊN: Dùng MS {current_ms} từ context")
-    else:
-        print(f"[GPT FUNCTION] Không có MS hợp lệ từ context, tìm trong text...")
-        
-        # ============================================
-        # FALLBACK 1: Tìm MS từ text (nếu có tiền tố)
-        # ============================================
-        detected_ms = detect_ms_from_text(text)
-        if detected_ms and detected_ms in PRODUCTS:
-            # Cập nhật MS mới NGAY LẬP TỨC và lưu vào Sheets
-            update_context_with_new_ms(uid, detected_ms, "text_detection")
-            current_ms = detected_ms
-            print(f"[MS DETECTED IN GPT] Phát hiện và cập nhật MS mới: {detected_ms}")
-        
-        # ============================================
-        # FALLBACK 2: Tìm số với tiền tố
-        # ============================================
-        if not current_ms:
-            # Tìm bất kỳ số nào trong tin nhắn (1-6 chữ số) với TIỀN TỐ
-            text_norm = normalize_vietnamese(text.lower())
-            numbers = re.findall(r'\b(?:ms|mã|sp|ma|san pham)\s*(\d{1,6})\b', text_norm, re.IGNORECASE)
-            for num in numbers:
-                clean_num = num.lstrip('0')
-                if clean_num and clean_num in PRODUCTS_BY_NUMBER:
-                    detected_ms = PRODUCTS_BY_NUMBER[clean_num]
-                    # Cập nhật context với MS mới VÀ LƯU NGAY
-                    update_context_with_new_ms(uid, detected_ms, "text_detection")
-                    current_ms = detected_ms
-                    print(f"[MS FALLBACK IN GPT] Tìm thấy MS từ tiền tố + số: {current_ms}")
-                    break
-        
-        # ============================================
-        # FALLBACK 3: Nếu vẫn không có, hỏi lại khách
-        # ============================================
-        if not current_ms or current_ms not in PRODUCTS:
-            send_message(uid, "Dạ em chưa biết anh/chị đang hỏi về sản phẩm nào. Vui lòng cho em biết mã sản phẩm (ví dụ: MS000012) ạ!")
-            return
+    # ƯU TIÊN: Nếu vẫn không có, kiểm tra xem tin nhắn có chứa số không
+    if not current_ms or current_ms not in PRODUCTS:
+        # Tìm bất kỳ số nào trong tin nhắn (1-6 chữ số) với TIỀN TỐ
+        text_norm = normalize_vietnamese(text.lower())
+        numbers = re.findall(r'\b(?:ms|mã|sp|ma|san pham)\s*(\d{1,6})\b', text_norm, re.IGNORECASE)
+        for num in numbers:
+            clean_num = num.lstrip('0')
+            if clean_num and clean_num in PRODUCTS_BY_NUMBER:
+                current_ms = PRODUCTS_BY_NUMBER[clean_num]
+                # Cập nhật context với MS mới VÀ LƯU NGAY
+                update_context_with_new_ms(uid, current_ms, "text_detection")
+                print(f"[MS FALLBACK IN GPT] Tìm thấy MS từ tiền tố + số: {current_ms}")
+                break
+    
+    # ƯU TIÊN: Nếu vẫn không có, hỏi lại khách
+    if not current_ms or current_ms not in PRODUCTS:
+        send_message(uid, "Dạ em chưa biết anh/chị đang hỏi về sản phẩm nào. Vui lòng cho em biết mã sản phẩm (ví dụ: MS000012) ạ!")
+        return
     
     # ============================================
     # TIẾP TỤC XỬ LÝ GPT VỚI MS HIỆN TẠI
@@ -3487,7 +3478,7 @@ Khi khách hỏi về bất kỳ thông tin chi tiết nào của sản phẩm, 
    - Giá duy nhất: Trả lời một giá duy nhất
 3. LUÔN hỏi khách cần tư vấn thêm gì không sau khi trả lời về giá.
 
-**QUY TẬC LIỆT KÊ MÀU SẮC VÀ SIZE (RẤT QUAN TRỌNG):**
+**QUY TẮC LIỆT KÊ MÀU SẮC VÀ SIZE (RẤT QUAN TRỌNG):**
 1. Khi khách hỏi "có những màu nào", "màu gì", "màu sắc gì" - LUÔN dùng tool 'get_product_basic_info'
 2. Sau khi có dữ liệu, liệt kê TẤT CẢ màu sắc có trong 'all_colors' hoặc 'mau_sac'
 3. Định dạng trả lời: "Dạ, sản phẩm có các màu: [màu 1], [màu 2], [màu 3] ạ!"
@@ -3510,7 +3501,7 @@ Khi khách hỏi về bất kỳ thông tin chi tiết nào của sản phẩm, 
    - "Trọng lượng bao nhiêu?" → tìm "trọng lượng", "kg", "gram" trong mô tả
    - "Chất liệu gì?" → tìm "chất liệu", "vật liệu", "làm bằng" trong mô tả
 
-2. Câu hỏi về HƯỚNG DẪN SỬ DỤG:
+2. Câu hỏi về HƯỚNG DẪN SỬ DỤNG:
    - "Hướng dẫn lắp đặt thế nào?" → tìm "lắp đặt", "hướng dẫn lắp", "thi công" trong mô tả
    - "Cách sử dụng ra sao?" → tìm "hướng dẫn sử dụng", "cách dùng", "vận hành" trong mô tả
    - "Bảo quản thế nào?" → tìm "bảo quản", "bảo dưỡng", "vệ sinh" trong mô tả
@@ -3622,8 +3613,6 @@ Khi khách hỏi về bất kỳ thông tin chi tiết nào của sản phẩm, 
             
     except Exception as e:
         print(f"GPT Error: {e}")
-        import traceback
-        traceback.print_exc()
         send_message(uid, "Dạ em đang gặp chút trục trặc, anh/chị vui lòng thử lại sau ạ.")
         
 # ============================================
@@ -4475,7 +4464,7 @@ Vui lòng gửi mã sản phẩm (ví dụ: MS123456) hoặc mô tả sản ph�
 
 def handle_text(uid: str, text: str, referral_data: dict = None):
     """Xử lý tin nhắn văn bản với logic mới: 
-       ƯU TIÊN DÙNG MS TỪ CONTEXT TRƯỚC KHI XỬ LÝ TEXT"""
+       ƯU TIÊN XỬ LÝ REFERRAL TỪ CATALOG TRƯỚC KHI XỬ LÝ TEXT"""
     if not text or len(text.strip()) == 0:
         return
     
@@ -4553,280 +4542,6 @@ def handle_text(uid: str, text: str, referral_data: dict = None):
                 
                 ctx["processing_lock"] = False
                 return
-        
-        # ============================================
-        # THÊM: Khôi phục context nếu cần (khi Koyeb wake up)
-        # ============================================
-        if not ctx.get("last_ms") or ctx.get("last_ms") not in PRODUCTS:
-            restored = restore_user_context_on_wakeup(uid)
-            if restored:
-                print(f"[TEXT HANDLER] Đã khôi phục context cho user {uid}")
-        
-        # Tăng counter cho tin nhắn
-        if "real_message_count" not in ctx:
-            ctx["real_message_count"] = 0
-        ctx["real_message_count"] += 1
-        message_count = ctx["real_message_count"]
-        
-        print(f"[MESSAGE COUNT] User {uid}: tin nhắn thứ {message_count}")
-        print(f"[DEBUG] Current last_ms in context: {ctx.get('last_ms')}")
-        print(f"[DEBUG] has_sent_first_carousel: {ctx.get('has_sent_first_carousel')}")
-        
-        # Xử lý order state nếu có
-        if handle_order_form_step(uid, text):
-            ctx["processing_lock"] = False
-            return
-        
-        # ============================================
-        # QUAN TRỌNG: ƯU TIÊN DÙNG MS TỪ CONTEXT TRƯỚC
-        # ============================================
-        current_ms = ctx.get("last_ms")
-        
-        # Kiểm tra xem MS từ context có hợp lệ không
-        if current_ms and current_ms in PRODUCTS:
-            print(f"[CONTEXT MS VALID] User {uid} đã có MS {current_ms} từ context")
-            
-            # Gửi carousel nếu chưa gửi và là tin nhắn đầu tiên
-            if not ctx.get("has_sent_first_carousel") and message_count <= 3:
-                print(f"[FIRST CAROUSEL FROM CONTEXT] Gửi carousel cho {current_ms} (tin nhắn thứ {message_count})")
-                send_single_product_carousel(uid, current_ms)
-                ctx["has_sent_first_carousel"] = True
-            
-            # Dùng GPT trả lời với MS từ context
-            print(f"✅ [GPT WITH CONTEXT MS] User {uid} đã có MS {current_ms}, dùng GPT trả lời")
-            handle_text_with_function_calling(uid, text)
-            ctx["processing_lock"] = False
-            return
-        
-        # ============================================
-        # NẾU KHÔNG CÓ MS TỪ CONTEXT, MỚI TÌM TRONG TEXT
-        # ============================================
-        
-        # BƯỚC 1: Tìm MS từ text (nếu có tiền tố) - ƯU TIÊN CAO NHẤT
-        detected_ms = detect_ms_from_text(text)
-        if detected_ms and detected_ms in PRODUCTS:
-            print(f"[MS DETECTED FROM TEXT] Phát hiện MS từ tin nhắn: {detected_ms}")
-            # Cập nhật context với MS mới NGAY LẬP TỨC
-            update_context_with_new_ms(uid, detected_ms, "text_detection")
-            current_ms = detected_ms
-        
-        # BƯỚC 2: Tìm số trong tin nhắn với tiền tố
-        if not current_ms:
-            text_norm = normalize_vietnamese(text.lower())
-            numbers = re.findall(r'\b(?:ms|mã|sp|ma|san pham)\s*(\d{1,6})\b', text_norm, re.IGNORECASE)
-            for num in numbers:
-                clean_num = num.lstrip('0')
-                if clean_num and clean_num in PRODUCTS_BY_NUMBER:
-                    detected_ms = PRODUCTS_BY_NUMBER[clean_num]
-                    print(f"[MS FALLBACK] Tìm thấy MS từ tiền tố + số: {detected_ms}")
-                    # Cập nhật context với MS mới NGAY LẬP TỨC
-                    update_context_with_new_ms(uid, detected_ms, "text_detection")
-                    current_ms = detected_ms
-                    break
-        
-        print(f"[DEBUG] After MS detection, current_ms: {current_ms}")
-        
-        # BƯỚC 3: Kiểm tra xem đã có MS chưa
-        if current_ms and current_ms in PRODUCTS:
-            print(f"[HAS MS FROM CONTEXT] User {uid} đã có MS từ context: {current_ms}")
-            
-            # Gửi carousel nếu: chưa gửi carousel cho sản phẩm này VÀ tin nhắn trong 3 tin đầu tiên
-            if not ctx.get("has_sent_first_carousel") and message_count <= 3:
-                print(f"🚨 [FIRST CAROUSEL FOR PRODUCT] Gửi carousel cho sản phẩm {current_ms} (tin nhắn thứ {message_count})")
-                send_single_product_carousel(uid, current_ms)
-                ctx["has_sent_first_carousel"] = True
-            
-            # Dùng GPT để trả lời theo MS HIỆN TẠI
-            print(f"✅ [GPT REQUIRED] User {uid} đã có MS {current_ms}, dùng GPT trả lời")
-            handle_text_with_function_calling(uid, text)
-            ctx["processing_lock"] = False
-            return
-        
-        # Nếu không tìm thấy MS từ bất kỳ nguồn nào
-        print(f"[NO MS DETECTED] Không tìm thấy MS từ tin nhắn: {text}")
-        
-        # Kiểm tra nếu tin nhắn là câu hỏi chung (không có MS)
-        general_questions = ['giá', 'bao nhiêu', 'màu gì', 'size nào', 'còn hàng', 'đặt hàng', 'mua', 'tư vấn']
-        text_norm = normalize_vietnamese(text.lower())
-        if any(keyword in text_norm for keyword in general_questions):
-            # Yêu cầu khách gửi MS cụ thể
-            send_message(uid, "Dạ, để em tư vấn chính xác cho anh/chị, vui lòng cho em biết mã sản phẩm hoặc gửi ảnh sản phẩm ạ! 🤗")
-        else:
-            # Gợi ý khách gửi MS hoặc ảnh
-            send_message(uid, "Dạ em chưa biết anh/chị đang hỏi về sản phẩm nào. Vui lòng cho em biết mã sản phẩm hoặc gửi ảnh sản phẩm ạ! 🤗")
-
-    except Exception as e:
-        print(f"Error in handle_text for {uid}: {e}")
-        import traceback
-        traceback.print_exc()
-        try:
-            send_message(uid, "Dạ em đang gặp chút trục trặc, anh/chị vui lòng thử lại sau ạ.")
-        except:
-            pass
-    finally:
-        ctx["processing_lock"] = False
-        
-        # ============================================
-        # QUAN TRỌNG: ƯU TIÊN XỬ LÝ REFERRAL TỪ CATALOG TRƯỚC
-        # ============================================
-        if referral_data:
-            print(f"[CATALOG REFERRAL DETECTED] Xử lý referral cho user {uid}: {referral_data}")
-            
-            # Lấy MS từ referral (ad_id hoặc ref)
-            ad_id = referral_data.get("ad_id", "")
-            ref = referral_data.get("ref", "")
-            
-            detected_ms = None
-            
-            # Ưu tiên 1: Trích xuất từ ad_id
-            if ad_id:
-                detected_ms = extract_ms_from_retailer_id(ad_id)
-                if detected_ms:
-                    print(f"[CATALOG REFERRAL] Tìm thấy MS từ ad_id {ad_id}: {detected_ms}")
-            
-            # Ưu tiên 2: Trích xuất từ ref
-            if not detected_ms and ref:
-                detected_ms = extract_ms_from_ad_title(ref)
-                if detected_ms:
-                    print(f"[CATALOG REFERRAL] Tìm thấy MS từ ref {ref}: {detected_ms}")
-            
-            # Nếu tìm thấy MS từ catalog
-            if detected_ms and detected_ms in PRODUCTS:
-                # Cập nhật context với MS mới từ catalog (RESET COUNTER)
-                update_context_with_new_ms(uid, detected_ms, "catalog_referral")
-                
-                # Gửi carousel ngay lập tức
-                print(f"[CATALOG REFERRAL] Gửi carousel cho {detected_ms} từ catalog")
-                send_single_product_carousel(uid, detected_ms)
-                
-                # Nếu text là câu hỏi về giá, dùng GPT trả lời
-                text_lower = text.lower()
-                if any(keyword in text_lower for keyword in ["giá", "bao nhiêu", "price", "cost"]):
-                    print(f"[CATALOG REFERRAL + PRICE QUERY] Dùng GPT trả lời về giá")
-                    handle_text_with_function_calling(uid, text)
-                else:
-                    # Gửi tin nhắn chào mừng
-                    product = PRODUCTS[detected_ms]
-                    product_name = product.get('Ten', '')
-                    if f"[{detected_ms}]" in product_name or detected_ms in product_name:
-                        product_name = product_name.replace(f"[{detected_ms}]", "").replace(detected_ms, "").strip()
-                    
-                    send_message(uid, f"Chào anh/chị! 👋\n\nCảm ơn đã quan tâm đến sản phẩm **{product_name}** từ catalog. Em đã gửi thông tin chi tiết bên trên ạ!")
-                
-                ctx["processing_lock"] = False
-                return
-        
-        # ============================================
-        # THÊM: Khôi phục context nếu cần (khi Koyeb wake up)
-        # ============================================
-        if not ctx.get("last_ms") or ctx.get("last_ms") not in PRODUCTS:
-            restored = restore_user_context_on_wakeup(uid)
-            if restored:
-                print(f"[TEXT HANDLER] Đã khôi phục context cho user {uid}")
-        
-        # Tăng counter cho tin nhắn
-        if "real_message_count" not in ctx:
-            ctx["real_message_count"] = 0
-        ctx["real_message_count"] += 1
-        message_count = ctx["real_message_count"]
-        
-        print(f"[MESSAGE COUNT] User {uid}: tin nhắn thứ {message_count}")
-        print(f"[DEBUG] Current last_ms in context: {ctx.get('last_ms')}")
-        print(f"[DEBUG] has_sent_first_carousel: {ctx.get('has_sent_first_carousel')}")
-        
-        # Xử lý order state nếu có
-        if handle_order_form_step(uid, text):
-            ctx["processing_lock"] = False
-            return
-        
-        # ============================================
-        # QUAN TRỌNG: ƯU TIÊN DÙNG MS TỪ CONTEXT TRƯỚC
-        # ============================================
-        current_ms = ctx.get("last_ms")
-        
-        # Kiểm tra xem MS từ context có hợp lệ không
-        if current_ms and current_ms in PRODUCTS:
-            print(f"[CONTEXT MS VALID] User {uid} đã có MS {current_ms} từ context")
-            
-            # Gửi carousel nếu chưa gửi và là tin nhắn đầu tiên
-            if not ctx.get("has_sent_first_carousel") and message_count <= 3:
-                print(f"[FIRST CAROUSEL FROM CONTEXT] Gửi carousel cho {current_ms} (tin nhắn thứ {message_count})")
-                send_single_product_carousel(uid, current_ms)
-                ctx["has_sent_first_carousel"] = True
-            
-            # Dùng GPT trả lời với MS từ context
-            print(f"✅ [GPT WITH CONTEXT MS] User {uid} đã có MS {current_ms}, dùng GPT trả lời")
-            handle_text_with_function_calling(uid, text)
-            ctx["processing_lock"] = False
-            return
-        
-        # ============================================
-        # NẾU KHÔNG CÓ MS TỪ CONTEXT, MỚI TÌM TRONG TEXT
-        # ============================================
-        
-        # BƯỚC 1: Tìm MS từ text (nếu có tiền tố) - ƯU TIÊN CAO NHẤT
-        detected_ms = detect_ms_from_text(text)
-        if detected_ms and detected_ms in PRODUCTS:
-            print(f"[MS DETECTED FROM TEXT] Phát hiện MS từ tin nhắn: {detected_ms}")
-            # Cập nhật context với MS mới NGAY LẬP TỨC
-            update_context_with_new_ms(uid, detected_ms, "text_detection")
-            current_ms = detected_ms
-        
-        # BƯỚC 2: Tìm số trong tin nhắn với tiền tố
-        if not current_ms:
-            text_norm = normalize_vietnamese(text.lower())
-            numbers = re.findall(r'\b(?:ms|mã|sp|ma|san pham)\s*(\d{1,6})\b', text_norm, re.IGNORECASE)
-            for num in numbers:
-                clean_num = num.lstrip('0')
-                if clean_num and clean_num in PRODUCTS_BY_NUMBER:
-                    detected_ms = PRODUCTS_BY_NUMBER[clean_num]
-                    print(f"[MS FALLBACK] Tìm thấy MS từ tiền tố + số: {detected_ms}")
-                    # Cập nhật context với MS mới NGAY LẬP TỨC
-                    update_context_with_new_ms(uid, detected_ms, "text_detection")
-                    current_ms = detected_ms
-                    break
-        
-        print(f"[DEBUG] After MS detection, current_ms: {current_ms}")
-        
-        # BƯỚC 3: Kiểm tra xem đã có MS chưa
-        if current_ms and current_ms in PRODUCTS:
-            print(f"[HAS MS FROM CONTEXT] User {uid} đã có MS từ context: {current_ms}")
-            
-            # Gửi carousel nếu: chưa gửi carousel cho sản phẩm này VÀ tin nhắn trong 3 tin đầu tiên
-            if not ctx.get("has_sent_first_carousel") and message_count <= 3:
-                print(f"🚨 [FIRST CAROUSEL FOR PRODUCT] Gửi carousel cho sản phẩm {current_ms} (tin nhắn thứ {message_count})")
-                send_single_product_carousel(uid, current_ms)
-                ctx["has_sent_first_carousel"] = True
-            
-            # Dùng GPT để trả lời theo MS HIỆN TẠI
-            print(f"✅ [GPT REQUIRED] User {uid} đã có MS {current_ms}, dùng GPT trả lời")
-            handle_text_with_function_calling(uid, text)
-            ctx["processing_lock"] = False
-            return
-        
-        # Nếu không tìm thấy MS từ bất kỳ nguồn nào
-        print(f"[NO MS DETECTED] Không tìm thấy MS từ tin nhắn: {text}")
-        
-        # Kiểm tra nếu tin nhắn là câu hỏi chung (không có MS)
-        general_questions = ['giá', 'bao nhiêu', 'màu gì', 'size nào', 'còn hàng', 'đặt hàng', 'mua', 'tư vấn']
-        text_norm = normalize_vietnamese(text.lower())
-        if any(keyword in text_norm for keyword in general_questions):
-            # Yêu cầu khách gửi MS cụ thể
-            send_message(uid, "Dạ, để em tư vấn chính xác cho anh/chị, vui lòng cho em biết mã sản phẩm hoặc gửi ảnh sản phẩm ạ! 🤗")
-        else:
-            # Gợi ý khách gửi MS hoặc ảnh
-            send_message(uid, "Dạ em chưa biết anh/chị đang hỏi về sản phẩm nào. Vui lòng cho em biết mã sản phẩm hoặc gửi ảnh sản phẩm ạ! 🤗")
-
-    except Exception as e:
-        print(f"Error in handle_text for {uid}: {e}")
-        import traceback
-        traceback.print_exc()
-        try:
-            send_message(uid, "Dạ em đang gặp chút trục trặc, anh/chị vui lòng thử lại sau ạ.")
-        except:
-            pass
-    finally:
-        ctx["processing_lock"] = False
         
         # ============================================
         # THÊM: Khôi phục context nếu cần (khi Koyeb wake up)
@@ -6783,30 +6498,11 @@ def webhook():
                 if "messaging" in entry:
                     for messaging_event in entry["messaging"]:
                         try:
-                            # ============================================
-                            # 2.0 BỎ QUA TIN NHẮN ECHO TỪ BOT (THÊM PHẦN NÀY)
-                            # ============================================
-                            if messaging_event.get("message") and messaging_event["message"].get("is_echo"):
-                                text = messaging_event["message"].get("text", "")
-                                app_id = messaging_event["message"].get("app_id", "")
-                                
-                                # Kiểm tra xem có phải tin nhắn từ bot không
-                                if is_bot_generated_echo(text, app_id):
-                                    print(f"[ECHO SKIP] Bỏ qua tin nhắn echo từ app {app_id}: {text[:100]}...")
-                                    continue
-                            
                             # Xác định sender_id
                             sender_id = messaging_event["sender"]["id"]
                             
                             # ============================================
-                            # 2.1 BỎ QUA TIN NHẮN TỪ CHÍNH PAGE (THÊM KIỂM TRA)
-                            # ============================================
-                            if PAGE_ID and sender_id == PAGE_ID:
-                                print(f"[PAGE MESSAGE SKIP] Bỏ qua tin nhắn từ chính page")
-                                continue
-                            
-                            # ============================================
-                            # 2.2 XỬ LÝ POSTBACK (NÚT BẤM)
+                            # 2.1 XỬ LÝ POSTBACK (NÚT BẤM)
                             # ============================================
                             if messaging_event.get("postback"):
                                 payload = messaging_event["postback"].get("payload", "")
@@ -6816,11 +6512,18 @@ def webhook():
                                 handle_postback_with_recovery(sender_id, payload, postback_id)
                             
                             # ============================================
-                            # 2.3 XỬ LÝ TIN NHẮN VĂN BẢN
+                            # 2.2 XỬ LÝ TIN NHẮN VĂN BẢN
                             # ============================================
                             elif messaging_event.get("message") and messaging_event["message"].get("text"):
                                 text = messaging_event["message"]["text"]
                                 print(f"[MESSAGE] {sender_id}: {text}")
+                                
+                                # Kiểm tra xem có phải echo message không
+                                if messaging_event["message"].get("is_echo"):
+                                    app_id = messaging_event["message"].get("app_id", "")
+                                    if is_bot_generated_echo(text, app_id):
+                                        print(f"[ECHO] Skipping bot echo from app {app_id}: {text[:100]}...")
+                                        continue
                                 
                                 # Lấy referral data nếu có (từ catalog)
                                 referral_data = messaging_event.get("referral")
@@ -6834,7 +6537,7 @@ def webhook():
                                 handle_text(sender_id, text, referral_data)
                             
                             # ============================================
-                            # 2.4 XỬ LÝ ATTACHMENTS (ẢNH, VIDEO, TEMPLATE)
+                            # 2.3 XỬ LÝ ATTACHMENTS (ẢNH, VIDEO, TEMPLATE)
                             # ============================================
                             elif messaging_event.get("message") and messaging_event["message"].get("attachments"):
                                 attachments = messaging_event["message"]["attachments"]
@@ -6875,12 +6578,23 @@ def webhook():
                                     handle_catalog_referral(sender_id, referral_data)
                             
                             # ============================================
-                            # 2.5 XỬ LÝ REFERRAL RIÊNG (KHÔNG CÓ MESSAGE)
+                            # 2.4 XỬ LÝ REFERRAL RIÊNG (KHÔNG CÓ MESSAGE)
                             # ============================================
                             elif messaging_event.get("referral"):
                                 referral_data = messaging_event["referral"]
                                 print(f"[REFERRAL ONLY] Processing referral without message: {referral_data}")
                                 handle_catalog_referral(sender_id, referral_data)
+                            
+                            # ============================================
+                            # 2.5 XỬ LÝ ECHO MESSAGE (TIN NHẮN TỪ BOT)
+                            # ============================================
+                            elif messaging_event.get("message") and messaging_event["message"].get("is_echo"):
+                                # Bỏ qua tin nhắn echo từ bot
+                                text = messaging_event["message"].get("text", "")
+                                app_id = messaging_event["message"].get("app_id", "")
+                                if is_bot_generated_echo(text, app_id):
+                                    print(f"[ECHO] Skipping bot echo from app {app_id}: {text[:100]}...")
+                                    continue
                             
                             # ============================================
                             # 2.6 XỬ LÝ TIN NHẮN ĐÃ ĐỌC VÀ ĐÃ GỬI (BỎ QUA)
@@ -6901,7 +6615,7 @@ def webhook():
                             traceback.print_exc()
         
         return "ok", 200
-        
+
 # ============================================
 # START CLEANUP THREAD
 # ============================================
