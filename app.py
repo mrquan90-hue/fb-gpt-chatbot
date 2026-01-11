@@ -2285,8 +2285,8 @@ def extract_ms_from_post_content(post_data: dict) -> Optional[str]:
     
     # PHƯƠNG PHÁP 1: Tìm MS trong dấu ngoặc vuông [MSxxxxxx] - ƯU TIÊN CAO NHẤT
     bracket_patterns = [
-        r"\[(MS\d{2,6})\]",  # [MS000034]
-        r"\[MS\s*(\d{2,6})\]",  # [MS 000034] với khoảng trắng
+        r"\[(MS\d{2,6})\]",  # [MS000102]
+        r"\[MS\s*(\d{2,6})\]",  # [MS 000102] với khoảng trắng
     ]
     
     for pattern in bracket_patterns:
@@ -4565,10 +4565,10 @@ def handle_text(uid: str, text: str, referral_data: dict = None):
         text_norm = normalize_vietnamese(text.lower())
         if any(keyword in text_norm for keyword in general_questions):
             # Yêu cầu khách gửi MS cụ thể
-            send_message(uid, "Dạ, để em tư vấn chính xác cho anh/chị, vui lòng cho em biết mã sản phẩm (ví dụ: MS000034) hoặc gửi ảnh sản phẩm ạ! 🤗")
+            send_message(uid, "Dạ, để em tư vấn chính xác cho anh/chị, vui lòng cho em biết mã sản phẩm hoặc gửi ảnh sản phẩm ạ! 🤗")
         else:
             # Gợi ý khách gửi MS hoặc ảnh
-            send_message(uid, "Dạ em chưa biết anh/chị đang hỏi về sản phẩm nào. Vui lòng cho em biết mã sản phẩm (ví dụ: MS000034) hoặc gửi ảnh sản phẩm ạ! 🤗")
+            send_message(uid, "Dạ em chưa biết anh/chị đang hỏi về sản phẩm nào. Vui lòng cho em biết mã sản phẩm hoặc gửi ảnh sản phẩm ạ! 🤗")
 
     except Exception as e:
         print(f"Error in handle_text for {uid}: {e}")
