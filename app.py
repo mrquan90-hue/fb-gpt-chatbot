@@ -3212,11 +3212,11 @@ def execute_tool(uid, name, args):
             
             1. Nếu price_pattern là 'color_based':
                - Liệt kê từng màu và giá
-               - Ví dụ: "Dạ, giá bán là:\nĐỏ: 250.000đ\nXanh: 290.000đ\nTrắng: 315.000đ\nÁp dụng cho tất cả các size ạ!"
+               - Ví dụ: "Dạ, giá bán là:\nĐỏ: 250.000đ\nXanh: 290.000đ\nTrắng: 315.000đ\nMiễn ship toàn quốc và được xem hàng khi giao nhận ạ!"
                
             2. Nếu price_pattern là 'size_based':
                - Liệt kê từng size và giá
-               - Ví dụ: "Dạ, giá bán là:\nM: 250.000đ\nL: 290.000đ\nXL: 315.000đ\nÁp dụng cho tất cả các màu ạ!"
+               - Ví dụ: "Dạ, giá bán là:\nM: 250.000đ\nL: 290.000đ\nXL: 315.000đ\nMiễn ship toàn quốc và được xem hàng khi giao nhận ạ!"
                
             3. Nếu price_pattern là 'complex_based':
                - Nhóm theo từng mức giá
@@ -3235,7 +3235,7 @@ def execute_tool(uid, name, args):
         return json.dumps({
             "status": "success",
             "data": product_data,
-            "instructions": "GPT HÃY DÙNG DỮ LIỆU NÀY ĐỂ TRẢ LỜI VỀ: tên, mô tả, chất liệu, màu sắc, size, thuộc tính, tồn kho (trừ giá). Nếu không có thông tin, nói: 'Dạ, phần này trong hệ thống chưa có thông tin ạ'"
+            "instructions": "GPT HÃY DÙNG DỮ LIỆU NÀY ĐỂ TRẢ LỜI VỀ: tên, mô tả, chất liệu, màu sắc, size, thuộc tính, tồn kho (trừ giá). Nếu không có thông tin, nói: 'Dạ, phần này em chưa có thông tin, ac LH sdt này 0869905991 để trao đổi trực tiếp giúp e nhé!'"
         }, ensure_ascii=False)
     
     elif name == "send_product_images":
