@@ -7,6 +7,8 @@ import hashlib
 import base64
 import threading
 import functools
+import schedule
+import atexit
 from collections import defaultdict
 from urllib.parse import quote, urlencode
 from datetime import datetime
@@ -28,12 +30,24 @@ app = Flask(__name__)
 # Middleware để đảm bảo workers được khởi động
 @app.before_request
 def ensure_workers_initialized():
-    """Đảm bảo workers được khởi động trước khi xử lý request đầu tiên"""
-    if not WORKERS_INITIALIZED:
-        print(f"[FIRST REQUEST] Khởi động workers từ before_request...")
-        initialize_workers_once()
+    """Đảm bảo workers được khởi động - TỐI ƯU CHO KOYEB"""
+    global WORKERS_INITIALIZED
+    
+    if WORKERS_INITIALIZED:
+        return None
+    
+    print(f"[FIRST REQUEST] Khởi động workers nhanh...")
+    
+    # Khởi động workers ngay lập tức
+    initialize_workers_once()
+    
+    # Load products nếu chưa có
+    if not PRODUCTS:
+        print(f"[FIRST REQUEST] Đang load products nhanh...")
+        threading.Thread(target=load_products, args=(True,), daemon=True).start()
+    
     return None
-
+    
 # ============================================
 # ENV & CONFIG - THÊM POSCAKE, PAGE_ID VÀ FACEBOOK CAPI
 # ============================================
@@ -88,6 +102,14 @@ from queue import Queue
 # Queue cho sự kiện Facebook CAPI
 FACEBOOK_EVENT_QUEUE = Queue()
 FACEBOOK_WORKER_RUNNING = False
+
+# ============================================
+# KOYEB FREE TIER SETTINGS - THÊM PHẦN NÀY
+# ============================================
+KOYEB_KEEP_ALIVE_ENABLED = os.getenv("KOYEB_KEEP_ALIVE", "true").lower() == "true"
+KOYEB_KEEP_ALIVE_INTERVAL = int(os.getenv("KOYEB_KEEP_ALIVE_INTERVAL", "10"))  # phút
+APP_URL = os.getenv("APP_URL", f"https://{DOMAIN}")
+KOYEB_AUTO_WARMUP = os.getenv("KOYEB_AUTO_WARMUP", "true").lower() == "true"
 
 def facebook_event_worker():
     """Worker xử lý sự kiện Facebook bất đồng bộ"""
@@ -1269,11 +1291,204 @@ MESSAGE_WORKER_RUNNING = False
 PROCESSING_MESSAGES = {}
 PROCESSING_MESSAGES_LOCK = threading.Lock()
 
+# KOYEB FREE TIER OPTIMIZATION
+PRODUCTS_LOADED_ON_STARTUP = False
+WORKERS_INITIALIZED = False  # Nếu chưa có thì thêm
+
+# Cache để tránh load lại sản phẩm quá nhiều
+APP_WARMED_UP = False
+
 PRODUCTS = {}
 PRODUCTS_BY_NUMBER = {}
 LAST_LOAD = 0
 LOAD_TTL = 300
 
+# ============================================
+# KOYEB FREE TIER KEEP-ALIVE FUNCTIONS
+# ============================================
+
+def keep_alive_ping():
+    """Tự động ping chính app để giữ Koyeb không sleep"""
+    if not KOYEB_KEEP_ALIVE_ENABLED:
+        return
+    
+    try:
+        # Ping endpoint /ping hoặc /health
+        ping_url = f"{APP_URL}/ping"
+        print(f"[KEEP-ALIVE] Đang ping {ping_url}")
+        
+        response = requests.get(ping_url, timeout=10)
+        if response.status_code == 200:
+            print(f"[KEEP-ALIVE] Thành công, app vẫn sống")
+        else:
+            print(f"[KEEP-ALIVE] Lỗi: {response.status_code}")
+    except Exception as e:
+        print(f"[KEEP-ALIVE ERROR] {e}")
+        # Thử ping lại sau 1 phút
+        time.sleep(60)
+        try:
+            requests.get(f"{APP_URL}/ping", timeout=5)
+        except:
+            pass
+
+def start_keep_alive_scheduler():
+    """Khởi động scheduler để giữ app không sleep"""
+    if not KOYEB_KEEP_ALIVE_ENABLED:
+        print(f"[KEEP-ALIVE] Tính năng keep-alive đã tắt")
+        return
+    
+    print(f"[KEEP-ALIVE] Bật tính năng keep-alive, ping mỗi {KOYEB_KEEP_ALIVE_INTERVAL} phút")
+    
+    # Lập lịch ping định kỳ
+    schedule.every(KOYEB_KEEP_ALIVE_INTERVAL).minutes.do(keep_alive_ping)
+    
+    # Chạy scheduler trong thread riêng
+    def run_scheduler():
+        while True:
+            schedule.run_pending()
+            time.sleep(60)  # Kiểm tra mỗi phút
+    
+    scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
+    scheduler_thread.start()
+    
+    # Ping ngay lần đầu
+    time.sleep(5)
+    keep_alive_ping()
+
+def warm_up_app():
+    """Làm nóng app: load products và khởi động workers ngay khi start"""
+    global APP_WARMED_UP
+    if APP_WARMED_UP:
+        return
+    
+    print(f"[WARM-UP] Đang khởi động nhanh app...")
+    
+    # 1. Load products ngay lập tức (trong thread riêng)
+    def load_products_async():
+        global PRODUCTS_LOADED_ON_STARTUP
+        try:
+            print(f"[WARM-UP] Đang load products...")
+            load_products(force=True)
+            PRODUCTS_LOADED_ON_STARTUP = True
+            print(f"[WARM-UP] Đã load {len(PRODUCTS)} products")
+        except Exception as e:
+            print(f"[WARM-UP ERROR] Lỗi load products: {e}")
+    
+    # 2. Khởi động workers
+    def start_workers_async():
+        global WORKERS_INITIALIZED
+        try:
+            print(f"[WARM-UP] Đang khởi động workers...")
+            start_message_worker()
+            start_facebook_worker()
+            
+            # Khởi động thread lưu context định kỳ
+            save_thread = threading.Thread(target=periodic_context_save_optimized, daemon=True)
+            save_thread.start()
+            
+            # Khởi động thread dọn dẹp user không hoạt động
+            cleanup_thread = threading.Thread(target=periodic_cleanup, daemon=True)
+            cleanup_thread.start()
+            
+            WORKERS_INITIALIZED = True
+            print(f"[WARM-UP] Workers đã khởi động")
+        except Exception as e:
+            print(f"[WARM-UP ERROR] Lỗi khởi động workers: {e}")
+    
+    # Chạy async để không block startup
+    threading.Thread(target=load_products_async, daemon=True).start()
+    threading.Thread(target=start_workers_async, daemon=True).start()
+    
+    # 3. Khởi tạo Google Sheets nếu cần
+    if GOOGLE_SHEET_ID and GOOGLE_SHEETS_CREDENTIALS_JSON:
+        threading.Thread(target=init_user_context_sheet, daemon=True).start()
+    
+    APP_WARMED_UP = True
+    print(f"[WARM-UP] Hoàn thành khởi động nhanh")
+
+def periodic_cleanup():
+    """Dọn dẹp định kỳ để giảm RAM"""
+    print(f"[CLEANUP THREAD] Thread dọn dẹp đã bắt đầu")
+    time.sleep(60)  # Đợi 1 phút sau khi start
+    
+    while True:
+        try:
+            # Dọn dẹp users không hoạt động
+            cleanup_inactive_users()
+            
+            # Dọn dẹp cache cũ
+            with PROCESSING_MESSAGES_LOCK:
+                now = time.time()
+                keys_to_remove = []
+                for key, timestamp in PROCESSING_MESSAGES.items():
+                    if now - timestamp > 60:  # 60 giây
+                        keys_to_remove.append(key)
+                
+                for key in keys_to_remove:
+                    del PROCESSING_MESSAGES[key]
+            
+            # Dọn dẹp processed MIDs
+            with PROCESSED_MIDS_LOCK:
+                now = time.time()
+                mids_to_remove = []
+                for mid, timestamp in PROCESSED_MIDS.items():
+                    if now - timestamp > PROCESSED_MIDS_TTL:
+                        mids_to_remove.append(mid)
+                
+                for mid in mids_to_remove:
+                    del PROCESSED_MIDS[mid]
+            
+            print(f"[CLEANUP] Đã dọn dẹp, đợi 5 phút...")
+            time.sleep(300)  # 5 phút
+            
+        except Exception as e:
+            print(f"[CLEANUP ERROR] {e}")
+            time.sleep(60)
+
+# ============================================
+# SỬA HÀM initialize_workers_once() NẾU CÓ
+# ============================================
+
+def initialize_workers_once():
+    """Khởi động workers một lần duy nhất - TỐI ƯU CHO KOYEB"""
+    global WORKERS_INITIALIZED
+    
+    if WORKERS_INITIALIZED:
+        return
+    
+    print(f"[INIT WORKERS] Đang khởi động workers...")
+    
+    # 1. Khởi động message worker
+    if not MESSAGE_WORKER_RUNNING:
+        msg_worker = start_message_worker()
+        if msg_worker:
+            print(f"[INIT WORKERS] Message worker đã khởi động")
+    
+    # 2. Khởi động Facebook CAPI worker
+    if not FACEBOOK_WORKER_RUNNING:
+        fb_worker = start_facebook_worker()
+        if fb_worker:
+            print(f"[INIT WORKERS] Facebook worker đã khởi động")
+    
+    # 3. Khởi động thread lưu context định kỳ
+    try:
+        save_thread = threading.Thread(target=periodic_context_save_optimized, daemon=True)
+        save_thread.start()
+        print(f"[INIT WORKERS] Thread lưu context đã khởi động")
+    except Exception as e:
+        print(f"[INIT WORKERS ERROR] Không thể khởi động thread lưu: {e}")
+    
+    # 4. Khởi động thread dọn dẹp
+    try:
+        cleanup_thread = threading.Thread(target=periodic_cleanup, daemon=True)
+        cleanup_thread.start()
+        print(f"[INIT WORKERS] Thread dọn dẹp đã khởi động")
+    except Exception as e:
+        print(f"[INIT WORKERS ERROR] Không thể khởi động thread dọn dẹp: {e}")
+    
+    WORKERS_INITIALIZED = True
+    print(f"[INIT WORKERS] Tất cả workers đã khởi động xong")
+    
 def message_background_worker():
     """Worker xử lý tin nhắn bất đồng bộ - KHÔNG BLOCK WEBHOOK"""
     global MESSAGE_WORKER_RUNNING
@@ -6937,6 +7152,81 @@ def webhook():
         
         # LUÔN LUÔN trả về 200 OK ngay lập tức
         return "EVENT_RECEIVED", 200
+
+# ============================================
+# KOYEB KEEP-ALIVE ENDPOINTS
+# ============================================
+
+@app.route('/ping', methods=['GET'])
+def ping():
+    """Endpoint cho keep-alive và health check"""
+    status = {
+        "status": "alive",
+        "timestamp": datetime.now().isoformat(),
+        "workers": {
+            "message_worker": MESSAGE_WORKER_RUNNING,
+            "facebook_worker": FACEBOOK_WORKER_RUNNING,
+            "workers_initialized": WORKERS_INITIALIZED
+        },
+        "resources": {
+            "products_loaded": len(PRODUCTS) if PRODUCTS else 0,
+            "users_in_memory": len(USER_CONTEXT),
+            "queue_size": MESSAGE_QUEUE.qsize(),
+            "facebook_queue_size": FACEBOOK_EVENT_QUEUE.qsize()
+        },
+        "app": {
+            "domain": DOMAIN,
+            "fanpage": get_fanpage_name_from_api(),
+            "version": "1.0"
+        }
+    }
+    return jsonify(status)
+
+@app.route('/health', methods=['GET'])
+def health():
+    """Health check đơn giản cho Koyeb"""
+    return jsonify({"status": "healthy", "timestamp": datetime.now().isoformat()})
+
+@app.route('/warmup', methods=['GET'])
+def warmup():
+    """Làm nóng app (pre-load)"""
+    warm_up_app()
+    return jsonify({
+        "status": "warming_up",
+        "message": "App đang được làm nóng...",
+        "products_loaded": len(PRODUCTS) if PRODUCTS else 0,
+        "workers": WORKERS_INITIALIZED
+    })
+
+@app.route('/stats', methods=['GET'])
+def stats():
+    """Xem thống kê app"""
+    stats_data = {
+        "products": {
+            "total": len(PRODUCTS),
+            "loaded_at": time.ctime(LAST_LOAD) if LAST_LOAD > 0 else "Never"
+        },
+        "users": {
+            "in_memory": len(USER_CONTEXT),
+            "active_last_24h": sum(1 for ctx in USER_CONTEXT.values() 
+                                 if time.time() - ctx.get("last_updated", 0) < 86400)
+        },
+        "queues": {
+            "message_queue": MESSAGE_QUEUE.qsize(),
+            "facebook_queue": FACEBOOK_EVENT_QUEUE.qsize()
+        },
+        "workers": {
+            "message_worker": MESSAGE_WORKER_RUNNING,
+            "facebook_worker": FACEBOOK_WORKER_RUNNING,
+            "initialized": WORKERS_INITIALIZED
+        },
+        "environment": {
+            "domain": DOMAIN,
+            "koyeb_keep_alive": KOYEB_KEEP_ALIVE_ENABLED,
+            "app_url": APP_URL
+        }
+    }
+    return jsonify(stats_data)
         
 # ============================================
 # START CLEANUP THREAD
@@ -7000,10 +7290,32 @@ def initialize_workers_once():
 # Khởi động workers ngay khi app start
 initialize_workers_once()
     
-if __name__ == "__main__":
-    # Khởi động workers trước khi chạy app
-    initialize_workers_once()
+# ============================================
+# STARTUP OPTIMIZATION FOR KOYEB
+# ============================================
+
+# Khởi động keep-alive scheduler khi app start
+if KOYEB_KEEP_ALIVE_ENABLED:
+    print(f"[STARTUP] Bật keep-alive cho Koyeb Free Tier")
+    print(f"[STARTUP] App URL: {APP_URL}")
+    print(f"[STARTUP] Ping interval: {KOYEB_KEEP_ALIVE_INTERVAL} phút")
     
-    # Khởi động Flask app
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    # Khởi động scheduler trong thread riêng
+    threading.Thread(target=start_keep_alive_scheduler, daemon=True).start()
+
+# Tự động warm-up khi start (trong production)
+if KOYEB_AUTO_WARMUP:
+    print(f"[STARTUP] Tự động warm-up app...")
+    threading.Thread(target=warm_up_app, daemon=True).start()
+
+# ============================================
+# RUN FLASK APP
+# ============================================
+if __name__ == '__main__':
+    # Tắt debug mode để tối ưu performance
+    app.run(
+        host='0.0.0.0',
+        port=int(os.environ.get('PORT', 5000)),
+        debug=False,
+        threaded=True  # Bật multi-threading
+    )
