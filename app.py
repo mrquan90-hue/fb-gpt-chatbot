@@ -1988,7 +1988,7 @@ Yêu cầu: {direction}"""
 
 def reply_to_facebook_comment(comment_id: str, message: str):
     """
-    Gửi trả lời bình luận lên Facebook Graph API
+    Gửi trả lời bình luận lên Facebook Graph API VỚI RETRY
     """
     if not PAGE_ACCESS_TOKEN:
         print(f"[REPLY COMMENT ERROR] Thiếu PAGE_ACCESS_TOKEN")
@@ -1998,49 +1998,67 @@ def reply_to_facebook_comment(comment_id: str, message: str):
         print(f"[REPLY COMMENT ERROR] Thiếu comment_id")
         return False
     
-    try:
-        # Graph API endpoint để trả lời comment
-        url = f"https://graph.facebook.com/v18.0/{comment_id}/comments"
-        
-        params = {
-            'access_token': PAGE_ACCESS_TOKEN,
-            'message': message
-        }
-        
-        print(f"[REPLY COMMENT] Đang gửi trả lời bình luận {comment_id}: {message[:100]}...")
-        
-        response = requests.post(url, params=params, timeout=10)
-        
-        if response.status_code == 200:
-            print(f"[REPLY COMMENT SUCCESS] Đã gửi trả lời bình luận {comment_id}")
-            return True
-        else:
-            print(f"[REPLY COMMENT ERROR] Lỗi {response.status_code}: {response.text[:200]}")
+    max_retries = 3
+    base_delay = 2  # giây
+    
+    for attempt in range(max_retries):
+        try:
+            # Graph API endpoint để trả lời comment
+            url = f"https://graph.facebook.com/v18.0/{comment_id}/comments"
             
-            # Log chi tiết lỗi để debug
-            try:
-                error_data = response.json().get('error', {})
-                error_message = error_data.get('message', '')
-                error_code = error_data.get('code', 0)
-                print(f"[REPLY COMMENT DETAIL] Lỗi Facebook API: {error_message} (code: {error_code})")
-                
-                # Kiểm tra các lỗi phổ biến
-                if "access token" in error_message.lower():
-                    print(f"[REPLY COMMENT DETAIL] CÓ THỂ PAGE_ACCESS_TOKEN ĐÃ HẾT HẠN HOẶC KHÔNG ĐỦ QUYỀN!")
-                elif "permission" in error_message.lower():
-                    print(f"[REPLY COMMENT DETAIL] THIẾU QUYỀN TRUY CẬP! Cần quyền 'pages_read_engagement' và 'pages_manage_engagement'")
-                elif "comment" in error_message.lower() and "does not exist" in error_message.lower():
-                    print(f"[REPLY COMMENT DETAIL] Comment không tồn tại hoặc đã bị xóa")
-            except:
-                pass
-                
-            return False
+            params = {
+                'access_token': PAGE_ACCESS_TOKEN,
+                'message': message
+            }
             
-    except Exception as e:
-        print(f"[REPLY COMMENT EXCEPTION] Lỗi khi gửi trả lời bình luận: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
+            print(f"[REPLY COMMENT] Attempt {attempt + 1}/{max_retries} - Đang gửi trả lời bình luận {comment_id}")
+            
+            # Giảm timeout xuống 5 giây nhưng có retry
+            response = requests.post(url, params=params, timeout=5)
+            
+            if response.status_code == 200:
+                print(f"[REPLY COMMENT SUCCESS] Đã gửi trả lời bình luận {comment_id}")
+                return True
+            else:
+                print(f"[REPLY COMMENT ERROR] Lỗi {response.status_code}: {response.text[:200]}")
+                
+                # Kiểm tra các lỗi không thể retry
+                if response.status_code in [400, 403, 404]:
+                    error_data = response.json().get('error', {})
+                    error_message = error_data.get('message', '')
+                    
+                    # Không retry với các lỗi này
+                    if "does not exist" in error_message or "permission" in error_message:
+                        print(f"[REPLY COMMENT] Comment không tồn tại hoặc không có quyền, bỏ qua")
+                        return False
+                
+                # Nếu không phải lần thử cuối, đợi rồi thử lại
+                if attempt < max_retries - 1:
+                    delay = base_delay * (2 ** attempt)  # Exponential backoff
+                    print(f"[REPLY COMMENT RETRY] Đợi {delay} giây trước khi thử lại...")
+                    time.sleep(delay)
+                    
+        except requests.exceptions.Timeout:
+            print(f"[REPLY COMMENT TIMEOUT] Timeout lần {attempt + 1}")
+            if attempt < max_retries - 1:
+                delay = base_delay * (2 ** attempt)
+                print(f"[REPLY COMMENT RETRY] Đợi {delay} giây trước khi thử lại...")
+                time.sleep(delay)
+                continue
+            else:
+                print(f"[REPLY COMMENT FINAL TIMEOUT] Đã thử {max_retries} lần nhưng vẫn timeout")
+                return False
+                
+        except Exception as e:
+            print(f"[REPLY COMMENT EXCEPTION] Lỗi khi gửi trả lời bình luận: {e}")
+            if attempt < max_retries - 1:
+                delay = base_delay * (2 ** attempt)
+                print(f"[REPLY COMMENT RETRY] Đợi {delay} giây trước khi thử lại...")
+                time.sleep(delay)
+            else:
+                return False
+    
+    return False
         
 # ============================================
 # HÀM CẬP NHẬT CONTEXT VỚI MS MỚI VÀ RESET COUNTER
