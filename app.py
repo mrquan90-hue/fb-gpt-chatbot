@@ -1660,13 +1660,15 @@ def process_facebook_message(data: dict, client_ip: str, user_agent: str):
             messaging_events = entry['messaging']
             
             for event in messaging_events:
-                # Lấy thông tin cơ bản
+                # Lấy thông tin cơ bản - QUAN TRỌNG: LẤY CẢ SENDER VÀ RECIPIENT
                 sender_id = event.get('sender', {}).get('id')
+                recipient_id = event.get('recipient', {}).get('id')
+                
                 if not sender_id:
                     continue
                 
                 # ============================================
-                # QUAN TRỌNG: XỬ LÝ ECHO CHỨA #MS TỪ PAGE
+                # QUAN TRỌNG: XỬ LÝ ECHO CHỨA #MS TỪ PAGE - ĐÃ SỬA LỖI
                 # ============================================
                 if 'message' in event and event['message'].get('is_echo'):
                     echo_text = event['message'].get('text', '')
@@ -1675,6 +1677,10 @@ def process_facebook_message(data: dict, client_ip: str, user_agent: str):
                     # KIỂM TRA NẾU ECHO CHỨA #MS
                     if echo_text and "#MS" in echo_text.upper():
                         print(f"[ECHO WITH #MS DETECTED] Xử lý echo từ page chứa #MS: {echo_text[:100]}")
+                        
+                        # QUAN TRỌNG: DÙNG recipient_id (user) THAY VÌ sender_id (page)
+                        # Nếu không có recipient_id, dùng sender_id (fallback)
+                        target_user_id = recipient_id if recipient_id else sender_id
                         
                         # Trích xuất MS từ echo_text
                         referral_match = re.search(r'#MS(\d+)', echo_text.upper())
@@ -1685,19 +1691,20 @@ def process_facebook_message(data: dict, client_ip: str, user_agent: str):
                             # Kiểm tra sản phẩm tồn tại
                             load_products()
                             if ms in PRODUCTS:
-                                # Cập nhật context với MS từ page
-                                update_context_with_new_ms(sender_id, ms, "page_echo")
+                                # CẬP NHẬT CONTEXT CHO USER THỰC, KHÔNG PHẢI PAGE
+                                update_context_with_new_ms(target_user_id, ms, "page_echo")
                                 
                                 # Lưu ngay vào Google Sheets
-                                ctx = USER_CONTEXT[sender_id]
-                                threading.Thread(
-                                    target=lambda: save_single_user_to_sheets(sender_id, ctx),
-                                    daemon=True
-                                ).start()
-                                
-                                print(f"[ECHO MS UPDATED] Đã cập nhật MS {ms} cho user {sender_id} từ page echo")
-                                
-                                # KHÔNG gửi carousel hay trả lời để tránh loop
+                                if target_user_id in USER_CONTEXT:
+                                    ctx = USER_CONTEXT[target_user_id]
+                                    threading.Thread(
+                                        target=lambda: save_single_user_to_sheets(target_user_id, ctx),
+                                        daemon=True
+                                    ).start()
+                                    
+                                    print(f"[ECHO MS UPDATED] Đã cập nhật MS {ms} cho user {target_user_id} từ page echo")
+                                else:
+                                    print(f"[ECHO MS WARNING] User {target_user_id} chưa có trong USER_CONTEXT")
                             else:
                                 print(f"[ECHO MS INVALID] MS {ms} không tồn tại trong hệ thống")
                         
@@ -1708,7 +1715,9 @@ def process_facebook_message(data: dict, client_ip: str, user_agent: str):
                         print(f"[ECHO SKIP] Bỏ qua echo message từ bot: {echo_text[:50]}")
                         continue
                 
-                # Kiểm tra postback
+                # ============================================
+                # XỬ LÝ POSTBACK TỪ USER (KHÔNG PHẢI ECHO)
+                # ============================================
                 if 'postback' in event:
                     payload = event['postback'].get('payload', '')
                     print(f"[POSTBACK PROCESS] User {sender_id}: {payload}")
@@ -1719,7 +1728,9 @@ def process_facebook_message(data: dict, client_ip: str, user_agent: str):
                         handle_postback_with_recovery(sender_id, payload)
                     continue
                 
-                # Kiểm tra referral (từ catalog, ads)
+                # ============================================
+                # XỬ LÝ REFERRAL (từ catalog, ads)
+                # ============================================
                 if 'referral' in event:
                     referral_data = event['referral']
                     print(f"[REFERRAL PROCESS] User {sender_id}: {referral_data}")
@@ -1728,7 +1739,9 @@ def process_facebook_message(data: dict, client_ip: str, user_agent: str):
                     handle_catalog_referral(sender_id, referral_data)
                     continue
                 
-                # Kiểm tra message
+                # ============================================
+                # XỬ LÝ MESSAGE TỪ USER (KHÔNG PHẢI ECHO)
+                # ============================================
                 if 'message' in event:
                     message_data = event['message']
                     mid = message_data.get('mid')
@@ -1756,7 +1769,7 @@ def process_facebook_message(data: dict, client_ip: str, user_agent: str):
                             mark_message_completed(sender_id, mid if mid else str(time.time()))
                             continue
                         
-                        # Xử lý tin nhắn văn bản
+                        # Xử lý tin nhắn văn bản từ USER
                         if 'text' in message_data:
                             text = message_data['text'].strip()
                             print(f"[TEXT PROCESS] User {sender_id}: {text[:100]}")
@@ -1781,10 +1794,10 @@ def process_facebook_message(data: dict, client_ip: str, user_agent: str):
                                 else:
                                     send_message(sender_id, "Dạ, vui lòng cung cấp mã sản phẩm hợp lệ ạ!")
                             else:
-                                # Xử lý text bình thường
+                                # Xử lý text bình thường từ USER
                                 handle_text(sender_id, text)
                         
-                        # Xử lý tin nhắn hình ảnh
+                        # Xử lý tin nhắn hình ảnh từ USER
                         elif 'attachments' in message_data:
                             for attachment in message_data['attachments']:
                                 if attachment.get('type') == 'image':
