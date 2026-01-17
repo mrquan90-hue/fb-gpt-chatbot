@@ -9,6 +9,7 @@ import threading
 import functools
 import schedule
 import atexit
+import hashlib
 from collections import defaultdict
 from urllib.parse import quote, urlencode
 from datetime import datetime
@@ -1721,28 +1722,63 @@ def process_facebook_message(data: dict, client_ip: str, user_agent: str):
                             text = message_data['text'].strip()
                             print(f"[TEXT PROCESS] User {sender_id}: {text[:100]}")
                             
-                            # Kiểm tra nếu là từ Fchat webhook
+                            # ============================================
+                            # ƯU TIÊN: XỬ LÝ TIN NHẮN FCHAT (#MS...)
+                            # ============================================
                             if text.startswith('#'):
-                                # Giả lập referral data cho Fchat
-                                referral_match = re.search(r'#MS(\d+)', text.upper())
-                                if referral_match:
-                                    ms_num = referral_match.group(1)
-                                    ms = f"MS{ms_num.zfill(6)}"
-                                    if ms in PRODUCTS:
-                                        # Cập nhật context với MS từ Fchat
-                                        update_context_with_new_ms(sender_id, ms, "fchat_referral")
-                                        # Gửi carousel
-                                        send_single_product_carousel(sender_id, ms)
-                                        # Dùng GPT trả lời nếu có câu hỏi
-                                        if len(text) > 10:  # Nếu có thêm nội dung câu hỏi
-                                            handle_text_with_function_calling(sender_id, text)
+                                print(f"[FCHAT DETECTED] User {sender_id}: {text[:50]}")
+                                
+                                # Tạo key idempotency đặc biệt cho Fchat
+                                fchat_key = f"{sender_id}_fchat_{hashlib.md5(text[:50].encode()).hexdigest()[:10]}"
+                                
+                                # Kiểm tra xem tin nhắn Fchat đang được xử lý chưa
+                                if not mark_message_processing(sender_id, fchat_key):
+                                    print(f"[FCHAT PROCESSING CONFLICT] Tin nhắn Fchat đang được xử lý, bỏ qua")
+                                    mark_message_completed(sender_id, mid if mid else str(time.time()))
+                                    continue
+                                
+                                try:
+                                    # Tìm MS với pattern #MS(\d+)
+                                    referral_match = re.search(r'#MS(\d+)', text.upper())
+                                    if referral_match:
+                                        ms_num = referral_match.group(1)
+                                        ms = f"MS{ms_num.zfill(6)}"
+                                        
+                                        if ms in PRODUCTS:
+                                            print(f"[FCHAT MS FOUND] Tìm thấy MS {ms} từ Fchat")
+                                            
+                                            # 1. Cập nhật context với MS từ Fchat (RESET COUNTER)
+                                            update_context_with_new_ms(sender_id, ms, "fchat_referral")
+                                            
+                                            # 2. Gửi carousel sản phẩm ngay
+                                            send_single_product_carousel(sender_id, ms)
+                                            
+                                            # 3. Nếu có nội dung sau #MS..., dùng GPT trả lời
+                                            if len(text) > len(f"#MS{ms_num}"):
+                                                question = text.replace(f"#MS{ms_num}", "").strip()
+                                                if question:
+                                                    print(f"[FCHAT QUESTION] Câu hỏi từ Fchat: {question}")
+                                                    handle_text_with_function_calling(sender_id, question)
+                                            
+                                            print(f"[FCHAT PROCESS COMPLETE] Đã xử lý tin nhắn Fchat cho MS {ms}")
+                                        else:
+                                            send_message(sender_id, "Dạ, mã sản phẩm không tồn tại trong hệ thống ạ!")
                                     else:
-                                        send_message(sender_id, "Dạ, mã sản phẩm không tồn tại trong hệ thống ạ!")
-                                else:
-                                    send_message(sender_id, "Dạ, vui lòng cung cấp mã sản phẩm hợp lệ ạ!")
-                            else:
-                                # Xử lý text bình thường
-                                handle_text(sender_id, text)
+                                        send_message(sender_id, "Dạ, vui lòng cung cấp mã sản phẩm hợp lệ (ví dụ: #MS123456) ạ!")
+                                
+                                except Exception as e:
+                                    print(f"[FCHAT PROCESS ERROR] Lỗi xử lý tin nhắn Fchat: {e}")
+                                
+                                finally:
+                                    # Đánh dấu tin nhắn Fchat đã xử lý xong
+                                    mark_message_completed(sender_id, fchat_key)
+                                    mark_message_completed(sender_id, mid if mid else str(time.time()))
+                                
+                                # KHÔNG xử lý tiếp logic thường
+                                continue
+                            
+                            # Xử lý text bình thường (không phải Fchat)
+                            handle_text(sender_id, text)
                         
                         # Xử lý tin nhắn hình ảnh
                         elif 'attachments' in message_data:
@@ -2769,12 +2805,17 @@ def is_bot_generated_echo(echo_text: str, app_id: str = "", attachments: list = 
     Kiểm tra xem tin nhắn có phải là echo từ bot không
     Cải tiến để phát hiện chính xác hơn
     """
-    # 1. Kiểm tra app_id (ưu tiên cao nhất)
+    # 1. ƯU TIÊN: Kiểm tra nếu là tin nhắn từ Fchat (bắt đầu bằng '#')
+    if echo_text and echo_text.startswith('#'):
+        print(f"[ECHO CHECK] Tin nhắn bắt đầu bằng '#': {echo_text[:50]} -> KHÔNG PHẢI BOT (Fchat)")
+        return False
+    
+    # 2. Kiểm tra app_id (ưu tiên cao nhất)
     if app_id and app_id in BOT_APP_IDS:
         print(f"[ECHO CHECK] Phát hiện bot app_id: {app_id}")
         return True
     
-    # 2. Kiểm tra các pattern đặc trưng của bot trong text
+    # 3. Kiểm tra các pattern đặc trưng của bot trong text
     if echo_text:
         echo_text_lower = echo_text.lower()
         
@@ -2790,9 +2831,9 @@ def is_bot_generated_echo(echo_text: str, app_id: str = "", attachments: list = 
             "📌 [ms",
             "🛒 đơn hàng mới",
             "🎉 shop đã nhận được đơn hàng",
-            "dạ em chưa biết anh/chị đang hỏi về sản phẩm nào",  # THÊM MẪU MỚI
-            "vui lòng cho em biết mã sản phẩm",  # THÊM MẪU MỚI
-            "anh/chị cần em tư vấn thêm gì không ạ",  # THÊM MẪU MỚI
+            "dạ em chưa biết anh/chị đang hỏi về sản phẩm nào",
+            "vui lòng cho em biết mã sản phẩm",
+            "anh/chị cần em tư vấn thêm gì không ạ",
         ]
         
         for phrase in bot_patterns:
@@ -2805,15 +2846,15 @@ def is_bot_generated_echo(echo_text: str, app_id: str = "", attachments: list = 
             print(f"[ECHO BOT FORMAT] Phát hiện format bot")
             return True
         
-        # Tin nhắn quá dài (>200) và có cấu trúc bot (giảm ngưỡng từ 300 xuống 200)
+        # Tin nhắn quá dài (>200) và có cấu trúc bot
         if len(echo_text) > 200 and ("dạ," in echo_text_lower or "ạ!" in echo_text_lower):
             print(f"[ECHO LONG BOT] Tin nhắn dài có cấu trúc bot: {len(echo_text)} chars")
             return True
         
-        # Các pattern khác giảm độ nhạy (chỉ nhận diện khi rất rõ)
+        # Các pattern khác giảm độ nhạy
         bot_patterns_regex = [
-            r"dạ,.*\d{1,3}[.,]?\d{0,3}\s*đ.*\d{1,3}[.,]?\d{0,3}\s*đ",  # Nhiều giá tiền (rất có thể là bot)
-            r"dạ,.*\d+\s*cm.*\d+\s*cm",  # Nhiều kích thước
+            r"dạ,.*\d{1,3}[.,]?\d{0,3}\s*đ.*\d{1,3}[.,]?\d{0,3}\s*đ",
+            r"dạ,.*\d+\s*cm.*\d+\s*cm",
         ]
         
         for pattern in bot_patterns_regex:
@@ -2821,7 +2862,7 @@ def is_bot_generated_echo(echo_text: str, app_id: str = "", attachments: list = 
                 print(f"[ECHO BOT PATTERN] Phát hiện pattern: {pattern}")
                 return True
     
-    # 3. Kiểm tra nếu là tin nhắn từ khách hàng (có #MS từ Fchat)
+    # 4. Kiểm tra nếu là tin nhắn từ khách hàng (có #MS từ Fchat) - đã xử lý ở bước 1
     if echo_text and "#MS" in echo_text.upper():
         print(f"[ECHO CHECK] Tin nhắn có #MS => KHÔNG PHẢI BOT (từ Fchat)")
         return False
@@ -3965,6 +4006,20 @@ def detect_ms_from_text(text: str) -> Optional[str]:
     
     print(f"[DETECT MS DEBUG] Input text: {text}")
     
+    # ============================================
+    # ƯU TIÊN 1: Tìm MS từ Fchat (#MS...)
+    # ============================================
+    if text.startswith('#'):
+        fchat_match = re.search(r'#MS(\d+)', text.upper())
+        if fchat_match:
+            ms_num = fchat_match.group(1)
+            clean_n = ms_num.lstrip("0")
+            
+            if clean_n and clean_n in PRODUCTS_BY_NUMBER:
+                found_ms = PRODUCTS_BY_NUMBER[clean_n]
+                print(f"[DETECT MS DEBUG] Tìm thấy từ Fchat pattern: {found_ms}")
+                return found_ms
+    
     # Chuẩn hóa text: lowercase, xóa dấu, xóa khoảng trắng thừa
     text_norm = normalize_vietnamese(text.lower().strip())
     
@@ -4015,7 +4070,7 @@ def detect_ms_from_text(text: str) -> Optional[str]:
     
     print(f"[DETECT MS DEBUG] Không tìm thấy MS trong text (chỉ tìm với tiền tố): {text}")
     return None
-
+    
 # ============================================
 # GPT FUNCTION CALLING HANDLER
 # ============================================
@@ -5273,9 +5328,14 @@ def handle_text(uid: str, text: str, referral_data: dict = None):
         
         # Gửi carousel nếu: chưa gửi carousel cho sản phẩm này VÀ tin nhắn trong 3 tin đầu tiên
         if not ctx.get("has_sent_first_carousel") and message_count <= 3:
-            print(f"🚨 [FIRST CAROUSEL FOR PRODUCT] Gửi carousel cho sản phẩm {current_ms} (tin nhắn thứ {message_count})")
-            send_single_product_carousel(uid, current_ms)
-            ctx["has_sent_first_carousel"] = True
+            # KIỂM TRA: Nếu là referral từ Fchat và đây là tin nhắn đầu tiên -> đã gửi carousel từ Fchat
+            if ctx.get("referral_source") == "fchat_referral" and message_count == 1:
+                print(f"[FCHAT CAROUSEL SKIP] Đã gửi carousel từ Fchat, không gửi lại")
+                ctx["has_sent_first_carousel"] = True  # Đánh dấu đã gửi
+            else:
+                print(f"🚨 [FIRST CAROUSEL FOR PRODUCT] Gửi carousel cho sản phẩm {current_ms} (tin nhắn thứ {message_count})")
+                send_single_product_carousel(uid, current_ms)
+                ctx["has_sent_first_carousel"] = True
         
         # Dùng GPT để trả lời theo MS HIỆN TẠI
         print(f"✅ [GPT REQUIRED] User {uid} đã có MS {current_ms}, dùng GPT trả lời")
