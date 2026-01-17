@@ -1665,10 +1665,48 @@ def process_facebook_message(data: dict, client_ip: str, user_agent: str):
                 if not sender_id:
                     continue
                 
-                # Kiểm tra echo message (tin nhắn từ chính bot)
+                # ============================================
+                # QUAN TRỌNG: XỬ LÝ ECHO CHỨA #MS TỪ PAGE
+                # ============================================
                 if 'message' in event and event['message'].get('is_echo'):
-                    print(f"[ECHO SKIP] Bỏ qua echo message từ bot")
-                    continue
+                    echo_text = event['message'].get('text', '')
+                    app_id = event['message'].get('app_id', '')
+                    
+                    # KIỂM TRA NẾU ECHO CHỨA #MS
+                    if echo_text and "#MS" in echo_text.upper():
+                        print(f"[ECHO WITH #MS DETECTED] Xử lý echo từ page chứa #MS: {echo_text[:100]}")
+                        
+                        # Trích xuất MS từ echo_text
+                        referral_match = re.search(r'#MS(\d+)', echo_text.upper())
+                        if referral_match:
+                            ms_num = referral_match.group(1)
+                            ms = f"MS{ms_num.zfill(6)}"
+                            
+                            # Kiểm tra sản phẩm tồn tại
+                            load_products()
+                            if ms in PRODUCTS:
+                                # Cập nhật context với MS từ page
+                                update_context_with_new_ms(sender_id, ms, "page_echo")
+                                
+                                # Lưu ngay vào Google Sheets
+                                ctx = USER_CONTEXT[sender_id]
+                                threading.Thread(
+                                    target=lambda: save_single_user_to_sheets(sender_id, ctx),
+                                    daemon=True
+                                ).start()
+                                
+                                print(f"[ECHO MS UPDATED] Đã cập nhật MS {ms} cho user {sender_id} từ page echo")
+                                
+                                # KHÔNG gửi carousel hay trả lời để tránh loop
+                            else:
+                                print(f"[ECHO MS INVALID] MS {ms} không tồn tại trong hệ thống")
+                        
+                        # Bỏ qua xử lý tiếp theo
+                        continue
+                    else:
+                        # Các echo khác vẫn bỏ qua như cũ
+                        print(f"[ECHO SKIP] Bỏ qua echo message từ bot: {echo_text[:50]}")
+                        continue
                 
                 # Kiểm tra postback
                 if 'postback' in event:
@@ -1706,13 +1744,15 @@ def process_facebook_message(data: dict, client_ip: str, user_agent: str):
                         continue
                     
                     try:
-                        # Kiểm tra nếu là echo từ bot
+                        # Kiểm tra nếu là echo từ bot (đã xử lý ở trên)
                         app_id = message_data.get('app_id', '')
-                        echo_text = message_data.get('text', '')
+                        text_content = message_data.get('text', '')
                         attachments = message_data.get('attachments', [])
                         
-                        if is_bot_generated_echo(echo_text, app_id, attachments):
-                            print(f"[BOT ECHO SKIP] Bỏ qua echo từ bot: {echo_text[:50]}")
+                        # KHÔNG kiểm tra is_bot_generated_echo ở đây vì đã xử lý echo ở trên
+                        # Chỉ cần kiểm tra app_id để tránh xử lý trùng
+                        if app_id and app_id in BOT_APP_IDS and "#MS" not in (text_content or "").upper():
+                            print(f"[BOT APP ID SKIP] Bỏ qua tin nhắn từ bot app_id: {app_id}")
                             mark_message_completed(sender_id, mid if mid else str(time.time()))
                             continue
                         
@@ -1721,7 +1761,7 @@ def process_facebook_message(data: dict, client_ip: str, user_agent: str):
                             text = message_data['text'].strip()
                             print(f"[TEXT PROCESS] User {sender_id}: {text[:100]}")
                             
-                            # Kiểm tra nếu là từ Fchat webhook
+                            # Kiểm tra nếu là từ Fchat webhook hoặc page echo đã xử lý
                             if text.startswith('#'):
                                 # Giả lập referral data cho Fchat
                                 referral_match = re.search(r'#MS(\d+)', text.upper())
@@ -2772,11 +2812,22 @@ def is_bot_generated_echo(echo_text: str, app_id: str = "", attachments: list = 
     # 1. Kiểm tra app_id (ưu tiên cao nhất)
     if app_id and app_id in BOT_APP_IDS:
         print(f"[ECHO CHECK] Phát hiện bot app_id: {app_id}")
+        
+        # KIỂM TRA QUAN TRỌNG: Nếu là echo từ bot nhưng CHỨA #MS thì KHÔNG coi là echo cần bỏ qua
+        if echo_text and "#MS" in echo_text.upper():
+            print(f"[ECHO WITH #MS DETECTED] Đây là echo chứa #MS, cho phép xử lý")
+            return False  # Quan trọng: Trả về False để cho phép xử lý
+            
         return True
     
     # 2. Kiểm tra các pattern đặc trưng của bot trong text
     if echo_text:
         echo_text_lower = echo_text.lower()
+        
+        # KIỂM TRA QUAN TRỌNG: Nếu tin nhắn chứa #MS, KHÔNG coi là echo (cho dù có các pattern khác)
+        if "#MS" in echo_text.upper():
+            print(f"[ECHO CHECK] Tin nhắn có #MS => KHÔNG PHẢI BOT (từ page)")
+            return False  # Quan trọng: Cho phép xử lý tin nhắn chứa #MS
         
         # Các mẫu câu đặc trưng của bot (thêm các mẫu mới)
         bot_patterns = [
@@ -2821,10 +2872,8 @@ def is_bot_generated_echo(echo_text: str, app_id: str = "", attachments: list = 
                 print(f"[ECHO BOT PATTERN] Phát hiện pattern: {pattern}")
                 return True
     
-    # 3. Kiểm tra nếu là tin nhắn từ khách hàng (có #MS từ Fchat)
-    if echo_text and "#MS" in echo_text.upper():
-        print(f"[ECHO CHECK] Tin nhắn có #MS => KHÔNG PHẢI BOT (từ Fchat)")
-        return False
+    # 3. Kiểm tra nếu là tin nhắn từ khách hàng (có #MS từ Fchat) - ĐÃ XỬ LÝ Ở TRÊN
+    # (Đoạn này đã được xử lý ở trên với kiểm tra #MS)
     
     return False
     
