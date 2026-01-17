@@ -1666,10 +1666,19 @@ def process_facebook_message(data: dict, client_ip: str, user_agent: str):
                 if not sender_id:
                     continue
                 
-                # Kiểm tra echo message (tin nhắn từ chính bot)
+                # ============================================
+                # SỬA QUAN TRỌNG: XỬ LÝ ECHO MESSAGE TỪ FCHAT
+                # ============================================
                 if 'message' in event and event['message'].get('is_echo'):
-                    print(f"[ECHO SKIP] Bỏ qua echo message từ bot")
-                    continue
+                    echo_text = event['message'].get('text', '')
+                    
+                    # KIỂM TRA: Nếu là tin nhắn từ Fchat (bắt đầu bằng #)
+                    if echo_text and echo_text.startswith('#'):
+                        print(f"[FCHAT ECHO DETECTED] User {sender_id}: {echo_text[:50]} (echo từ Fchat)")
+                        # KHÔNG bỏ qua, tiếp tục xử lý như tin nhắn bình thường
+                    else:
+                        print(f"[ECHO SKIP] Bỏ qua echo message từ bot: {echo_text[:50]}")
+                        continue
                 
                 # Kiểm tra postback
                 if 'postback' in event:
@@ -1707,77 +1716,77 @@ def process_facebook_message(data: dict, client_ip: str, user_agent: str):
                         continue
                     
                     try:
-                        # Kiểm tra nếu là echo từ bot
+                        # Kiểm tra nếu là echo từ bot (đã xử lý ở trên, nhưng kiểm tra lại cho chắc)
                         app_id = message_data.get('app_id', '')
-                        echo_text = message_data.get('text', '')
+                        text = message_data.get('text', '')
                         attachments = message_data.get('attachments', [])
                         
-                        if is_bot_generated_echo(echo_text, app_id, attachments):
-                            print(f"[BOT ECHO SKIP] Bỏ qua echo từ bot: {echo_text[:50]}")
+                        # ============================================
+                        # ƯU TIÊN: XỬ LÝ TIN NHẮN FCHAT (#MS...)
+                        # Bao gồm cả echo message từ Fchat
+                        # ============================================
+                        if text and text.startswith('#'):
+                            print(f"[FCHAT DETECTED] User {sender_id}: {text[:50]}")
+                            
+                            # Tạo key idempotency đặc biệt cho Fchat
+                            fchat_key = f"{sender_id}_fchat_{hashlib.md5(text[:50].encode()).hexdigest()[:10]}"
+                            
+                            # Kiểm tra xem tin nhắn Fchat đang được xử lý chưa
+                            if not mark_message_processing(sender_id, fchat_key):
+                                print(f"[FCHAT PROCESSING CONFLICT] Tin nhắn Fchat đang được xử lý, bỏ qua")
+                                mark_message_completed(sender_id, mid if mid else str(time.time()))
+                                continue
+                            
+                            try:
+                                # Tìm MS với pattern #MS(\d+)
+                                referral_match = re.search(r'#MS(\d+)', text.upper())
+                                if referral_match:
+                                    ms_num = referral_match.group(1)
+                                    ms = f"MS{ms_num.zfill(6)}"
+                                    
+                                    if ms in PRODUCTS:
+                                        print(f"[FCHAT MS FOUND] Tìm thấy MS {ms} từ Fchat")
+                                        
+                                        # 1. Cập nhật context với MS từ Fchat (RESET COUNTER)
+                                        update_context_with_new_ms(sender_id, ms, "fchat_referral")
+                                        
+                                        # 2. Gửi carousel sản phẩm ngay
+                                        send_single_product_carousel(sender_id, ms)
+                                        
+                                        # 3. Nếu có nội dung sau #MS..., dùng GPT trả lời
+                                        if len(text) > len(f"#MS{ms_num}"):
+                                            question = text.replace(f"#MS{ms_num}", "").strip()
+                                            if question:
+                                                print(f"[FCHAT QUESTION] Câu hỏi từ Fchat: {question}")
+                                                handle_text_with_function_calling(sender_id, question)
+                                        
+                                        print(f"[FCHAT PROCESS COMPLETE] Đã xử lý tin nhắn Fchat cho MS {ms}")
+                                    else:
+                                        send_message(sender_id, "Dạ, mã sản phẩm không tồn tại trong hệ thống ạ!")
+                                else:
+                                    send_message(sender_id, "Dạ, vui lòng cung cấp mã sản phẩm hợp lệ (ví dụ: #MS123456) ạ!")
+                            
+                            except Exception as e:
+                                print(f"[FCHAT PROCESS ERROR] Lỗi xử lý tin nhắn Fchat: {e}")
+                            
+                            finally:
+                                # Đánh dấu tin nhắn Fchat đã xử lý xong
+                                mark_message_completed(sender_id, fchat_key)
+                                mark_message_completed(sender_id, mid if mid else str(time.time()))
+                            
+                            # KHÔNG xử lý tiếp logic thường
+                            continue
+                        
+                        # Kiểm tra echo từ bot (nếu không phải Fchat)
+                        if is_bot_generated_echo(text, app_id, attachments):
+                            print(f"[BOT ECHO SKIP] Bỏ qua echo từ bot: {text[:50]}")
                             mark_message_completed(sender_id, mid if mid else str(time.time()))
                             continue
                         
-                        # Xử lý tin nhắn văn bản
+                        # Xử lý tin nhắn văn bản thông thường (không phải Fchat)
                         if 'text' in message_data:
                             text = message_data['text'].strip()
                             print(f"[TEXT PROCESS] User {sender_id}: {text[:100]}")
-                            
-                            # ============================================
-                            # ƯU TIÊN: XỬ LÝ TIN NHẮN FCHAT (#MS...)
-                            # ============================================
-                            if text.startswith('#'):
-                                print(f"[FCHAT DETECTED] User {sender_id}: {text[:50]}")
-                                
-                                # Tạo key idempotency đặc biệt cho Fchat
-                                fchat_key = f"{sender_id}_fchat_{hashlib.md5(text[:50].encode()).hexdigest()[:10]}"
-                                
-                                # Kiểm tra xem tin nhắn Fchat đang được xử lý chưa
-                                if not mark_message_processing(sender_id, fchat_key):
-                                    print(f"[FCHAT PROCESSING CONFLICT] Tin nhắn Fchat đang được xử lý, bỏ qua")
-                                    mark_message_completed(sender_id, mid if mid else str(time.time()))
-                                    continue
-                                
-                                try:
-                                    # Tìm MS với pattern #MS(\d+)
-                                    referral_match = re.search(r'#MS(\d+)', text.upper())
-                                    if referral_match:
-                                        ms_num = referral_match.group(1)
-                                        ms = f"MS{ms_num.zfill(6)}"
-                                        
-                                        if ms in PRODUCTS:
-                                            print(f"[FCHAT MS FOUND] Tìm thấy MS {ms} từ Fchat")
-                                            
-                                            # 1. Cập nhật context với MS từ Fchat (RESET COUNTER)
-                                            update_context_with_new_ms(sender_id, ms, "fchat_referral")
-                                            
-                                            # 2. Gửi carousel sản phẩm ngay
-                                            send_single_product_carousel(sender_id, ms)
-                                            
-                                            # 3. Nếu có nội dung sau #MS..., dùng GPT trả lời
-                                            if len(text) > len(f"#MS{ms_num}"):
-                                                question = text.replace(f"#MS{ms_num}", "").strip()
-                                                if question:
-                                                    print(f"[FCHAT QUESTION] Câu hỏi từ Fchat: {question}")
-                                                    handle_text_with_function_calling(sender_id, question)
-                                            
-                                            print(f"[FCHAT PROCESS COMPLETE] Đã xử lý tin nhắn Fchat cho MS {ms}")
-                                        else:
-                                            send_message(sender_id, "Dạ, mã sản phẩm không tồn tại trong hệ thống ạ!")
-                                    else:
-                                        send_message(sender_id, "Dạ, vui lòng cung cấp mã sản phẩm hợp lệ (ví dụ: #MS123456) ạ!")
-                                
-                                except Exception as e:
-                                    print(f"[FCHAT PROCESS ERROR] Lỗi xử lý tin nhắn Fchat: {e}")
-                                
-                                finally:
-                                    # Đánh dấu tin nhắn Fchat đã xử lý xong
-                                    mark_message_completed(sender_id, fchat_key)
-                                    mark_message_completed(sender_id, mid if mid else str(time.time()))
-                                
-                                # KHÔNG xử lý tiếp logic thường
-                                continue
-                            
-                            # Xử lý text bình thường (không phải Fchat)
                             handle_text(sender_id, text)
                         
                         # Xử lý tin nhắn hình ảnh
