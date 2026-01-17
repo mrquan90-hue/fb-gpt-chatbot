@@ -1721,59 +1721,28 @@ def process_facebook_message(data: dict, client_ip: str, user_agent: str):
                             text = message_data['text'].strip()
                             print(f"[TEXT PROCESS] User {sender_id}: {text[:100]}")
                             
-                            # ============================================
-                            # XỬ LÝ ĐẶC BIỆT: TIN NHẮN FCHAT (#MS)
-                            # CẦN XÁC ĐỊNH ĐÚNG USER_ID (recipient, không phải sender)
-                            # ============================================
-                            if re.search(r'#\s*MS\d+', text.upper()):
-                                print(f"[FCHAT SPECIAL] Phát hiện tin nhắn Fchat: {text[:50]}...")
-                                
-                                # QUAN TRỌNG: Xác định đúng USER_ID
-                                recipient_id = event.get('recipient', {}).get('id')
-                                
-                                # Debug thông tin
-                                print(f"[FCHAT DEBUG] Sender: {sender_id}, Recipient: {recipient_id}, PAGE_ID: {PAGE_ID}")
-                                
-                                # Logic: Nếu sender là PAGE -> tin nhắn từ Fchat, user là recipient
-                                # Nếu sender là USER -> tin nhắn từ user, user là sender
-                                if PAGE_ID and str(sender_id) == str(PAGE_ID):
-                                    # Tin nhắn từ PAGE gửi (Fchat), user là recipient
-                                    target_user_id = recipient_id
-                                    source = "fchat_from_page"
-                                    print(f"[FCHAT ID] Tin nhắn từ PAGE -> USER: {target_user_id}")
-                                else:
-                                    # Tin nhắn từ USER gửi, user là sender
-                                    target_user_id = sender_id
-                                    source = "fchat_from_user"
-                                    print(f"[FCHAT ID] Tin nhắn từ USER: {target_user_id}")
-                                
-                                # Xử lý Fchat với target_user_id ĐÚNG
+                            # Kiểm tra nếu là từ Fchat webhook
+                            if text.startswith('#'):
+                                # Giả lập referral data cho Fchat
                                 referral_match = re.search(r'#MS(\d+)', text.upper())
                                 if referral_match:
                                     ms_num = referral_match.group(1)
                                     ms = f"MS{ms_num.zfill(6)}"
                                     if ms in PRODUCTS:
-                                        # Cập nhật context với MS từ Fchat - DÙNG TARGET_USER_ID
-                                        update_context_with_new_ms(target_user_id, ms, source)
-                                        # Gửi carousel - DÙNG TARGET_USER_ID
-                                        send_single_product_carousel(target_user_id, ms)
-                                        # Dùng GPT trả lời nếu có câu hỏi - DÙNG TARGET_USER_ID
-                                        if len(text) > len(referral_match.group(0)) + 2:
-                                            handle_text_with_function_calling(target_user_id, text)
+                                        # Cập nhật context với MS từ Fchat
+                                        update_context_with_new_ms(sender_id, ms, "fchat_referral")
+                                        # Gửi carousel
+                                        send_single_product_carousel(sender_id, ms)
+                                        # Dùng GPT trả lời nếu có câu hỏi
+                                        if len(text) > 10:  # Nếu có thêm nội dung câu hỏi
+                                            handle_text_with_function_calling(sender_id, text)
                                     else:
-                                        send_message(target_user_id, "Dạ, mã sản phẩm không tồn tại trong hệ thống ạ!")
+                                        send_message(sender_id, "Dạ, mã sản phẩm không tồn tại trong hệ thống ạ!")
                                 else:
-                                    send_message(target_user_id, "Dạ, vui lòng cung cấp mã sản phẩm hợp lệ ạ!")
-                                
-                                # ĐÁNH DẤU ĐÃ XỬ LÝ XONG
-                                mark_message_completed(sender_id, mid if mid else str(time.time()))
-                                continue  # Bỏ qua xử lý tiếp theo
-                            
-                            # ============================================
-                            # XỬ LÝ TIN NHẮN THÔNG THƯỜNG (KHÔNG PHẢI FCHAT)
-                            # ============================================
-                            # Xử lý text bình thường
-                            handle_text(sender_id, text)
+                                    send_message(sender_id, "Dạ, vui lòng cung cấp mã sản phẩm hợp lệ ạ!")
+                            else:
+                                # Xử lý text bình thường
+                                handle_text(sender_id, text)
                         
                         # Xử lý tin nhắn hình ảnh
                         elif 'attachments' in message_data:
@@ -2800,16 +2769,6 @@ def is_bot_generated_echo(echo_text: str, app_id: str = "", attachments: list = 
     Kiểm tra xem tin nhắn có phải là echo từ bot không
     Cải tiến để phát hiện chính xác hơn
     """
-    # ============================================
-    # QUAN TRỌNG: TIN NHẮN FCHAT (#MSxxx) KHÔNG PHẢI ECHO
-    # ============================================
-    if echo_text:
-        # Tìm pattern #MSxxxxxx trong tin nhắn (không phân biệt hoa thường)
-        # Pattern: #MS + 1-6 chữ số, có thể có khoảng trắng sau #
-        if re.search(r'#\s*MS\d+', echo_text.upper()):
-            print(f"[ECHO CHECK] Đây là tin nhắn Fchat với #MS, KHÔNG PHẢI echo: {echo_text[:50]}...")
-            return False
-    
     # 1. Kiểm tra app_id (ưu tiên cao nhất)
     if app_id and app_id in BOT_APP_IDS:
         print(f"[ECHO CHECK] Phát hiện bot app_id: {app_id}")
@@ -2831,9 +2790,9 @@ def is_bot_generated_echo(echo_text: str, app_id: str = "", attachments: list = 
             "📌 [ms",
             "🛒 đơn hàng mới",
             "🎉 shop đã nhận được đơn hàng",
-            "dạ em chưa biết anh/chị đang hỏi về sản phẩm nào",
-            "vui lòng cho em biết mã sản phẩm",
-            "anh/chị cần em tư vấn thêm gì không ạ",
+            "dạ em chưa biết anh/chị đang hỏi về sản phẩm nào",  # THÊM MẪU MỚI
+            "vui lòng cho em biết mã sản phẩm",  # THÊM MẪU MỚI
+            "anh/chị cần em tư vấn thêm gì không ạ",  # THÊM MẪU MỚI
         ]
         
         for phrase in bot_patterns:
@@ -2845,29 +2804,6 @@ def is_bot_generated_echo(echo_text: str, app_id: str = "", attachments: list = 
         if re.search(r'^\*\*.*\*\*', echo_text) or re.search(r'^\[MS\d+\]', echo_text, re.IGNORECASE):
             print(f"[ECHO BOT FORMAT] Phát hiện format bot")
             return True
-        
-        # Tin nhắn quá dài (>200) và có cấu trúc bot
-        if len(echo_text) > 200 and ("dạ," in echo_text_lower or "ạ!" in echo_text_lower):
-            print(f"[ECHO LONG BOT] Tin nhắn dài có cấu trúc bot: {len(echo_text)} chars")
-            return True
-        
-        # Các pattern khác giảm độ nhạy (chỉ nhận diện khi rất rõ)
-        bot_patterns_regex = [
-            r"dạ,.*\d{1,3}[.,]?\d{0,3}\s*đ.*\d{1,3}[.,]?\d{0,3}\s*đ",
-            r"dạ,.*\d+\s*cm.*\d+\s*cm",
-        ]
-        
-        for pattern in bot_patterns_regex:
-            if re.search(pattern, echo_text_lower):
-                print(f"[ECHO BOT PATTERN] Phát hiện pattern: {pattern}")
-                return True
-    
-    # 3. Kiểm tra nếu là tin nhắn từ khách hàng (có #MS từ Fchat)
-    if echo_text and "#MS" in echo_text.upper():
-        print(f"[ECHO CHECK] Tin nhắn có #MS => KHÔNG PHẢI BOT (từ Fchat)")
-        return False
-    
-    return False
         
         # Tin nhắn quá dài (>200) và có cấu trúc bot (giảm ngưỡng từ 300 xuống 200)
         if len(echo_text) > 200 and ("dạ," in echo_text_lower or "ạ!" in echo_text_lower):
