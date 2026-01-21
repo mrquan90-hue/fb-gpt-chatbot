@@ -1,6 +1,4 @@
 import os
-from dotenv import load_dotenv
-load_dotenv()
 import json
 import re
 import time
@@ -78,36 +76,6 @@ FACEBOOK_API_VERSION = os.getenv("FACEBOOK_API_VERSION", "v18.0").strip()
 # Thêm biến cho tính năng trả lời bình luận
 ENABLE_COMMENT_REPLY = os.getenv("ENABLE_COMMENT_REPLY", "true").lower() == "true"
 WEBSITE_URL = os.getenv("WEBSITE_URL", "").strip()  # Link website từ Google Sheet
-
-# ============================================
-# DEBUG: In biến môi trường khi khởi động
-# ============================================
-print("=" * 60)
-print("🚀 BOT KHỞI ĐỘNG - DEBUG BIẾN MÔI TRƯỜNG")
-print("=" * 60)
-print(f"📌 DOMAIN: {DOMAIN}")
-print(f"📌 APP_URL: {os.getenv('APP_URL', 'NOT_SET')}")
-print(f"📌 PAGE_ID: {PAGE_ID}")
-print(f"📌 PAGE_ACCESS_TOKEN tồn tại: {bool(PAGE_ACCESS_TOKEN)}")
-print(f"📌 PAGE_ACCESS_TOKEN độ dài: {len(PAGE_ACCESS_TOKEN) if PAGE_ACCESS_TOKEN else 0}")
-print(f"📌 PAGE_ACCESS_TOKEN preview: {PAGE_ACCESS_TOKEN[:30] if PAGE_ACCESS_TOKEN else 'None'}...")
-print(f"📌 VERIFY_TOKEN: {VERIFY_TOKEN}")
-print(f"📌 SHEET_CSV_URL: {GOOGLE_SHEET_CSV_URL[:80] if GOOGLE_SHEET_CSV_URL else 'None'}...")
-print(f"📌 ENABLE_COMMENT_REPLY: {ENABLE_COMMENT_REPLY}")
-print("=" * 60)
-
-# Kiểm tra token Facebook
-if PAGE_ACCESS_TOKEN:
-    if not PAGE_ACCESS_TOKEN.startswith('EAA'):
-        print("⚠️  CẢNH BÁO: PAGE_ACCESS_TOKEN không bắt đầu bằng 'EAA'")
-    if len(PAGE_ACCESS_TOKEN) < 150:
-        print(f"⚠️  CẢNH BÁO: PAGE_ACCESS_TOKEN quá ngắn ({len(PAGE_ACCESS_TOKEN)} ký tự)")
-    else:
-        print(f"✅ PAGE_ACCESS_TOKEN có vẻ hợp lệ ({len(PAGE_ACCESS_TOKEN)} ký tự)")
-else:
-    print("❌ LỖI: PAGE_ACCESS_TOKEN không tồn tại!")
-
-print("=" * 60)
 
 # ============================================
 # GOOGLE SHEETS API CONFIGURATION
@@ -1692,64 +1660,17 @@ def process_facebook_message(data: dict, client_ip: str, user_agent: str):
             messaging_events = entry['messaging']
             
             for event in messaging_events:
-                # Lấy thông tin cơ bản - QUAN TRỌNG: LẤY CẢ SENDER VÀ RECIPIENT
+                # Lấy thông tin cơ bản
                 sender_id = event.get('sender', {}).get('id')
-                recipient_id = event.get('recipient', {}).get('id')
-                
                 if not sender_id:
                     continue
                 
-                # ============================================
-                # QUAN TRỌNG: XỬ LÝ ECHO CHỨA #MS TỪ PAGE - ĐÃ SỬA LỖI
-                # ============================================
+                # Kiểm tra echo message (tin nhắn từ chính bot)
                 if 'message' in event and event['message'].get('is_echo'):
-                    echo_text = event['message'].get('text', '')
-                    app_id = event['message'].get('app_id', '')
-                    
-                    # KIỂM TRA NẾU ECHO CHỨA #MS
-                    if echo_text and "#MS" in echo_text.upper():
-                        print(f"[ECHO WITH #MS DETECTED] Xử lý echo từ page chứa #MS: {echo_text[:100]}")
-                        
-                        # QUAN TRỌNG: DÙNG recipient_id (user) THAY VÌ sender_id (page)
-                        # Nếu không có recipient_id, dùng sender_id (fallback)
-                        target_user_id = recipient_id if recipient_id else sender_id
-                        
-                        # Trích xuất MS từ echo_text
-                        referral_match = re.search(r'#MS(\d+)', echo_text.upper())
-                        if referral_match:
-                            ms_num = referral_match.group(1)
-                            ms = f"MS{ms_num.zfill(6)}"
-                            
-                            # Kiểm tra sản phẩm tồn tại
-                            load_products()
-                            if ms in PRODUCTS:
-                                # CẬP NHẬT CONTEXT CHO USER THỰC, KHÔNG PHẢI PAGE
-                                update_context_with_new_ms(target_user_id, ms, "page_echo")
-                                
-                                # Lưu ngay vào Google Sheets
-                                if target_user_id in USER_CONTEXT:
-                                    ctx = USER_CONTEXT[target_user_id]
-                                    threading.Thread(
-                                        target=lambda: save_single_user_to_sheets(target_user_id, ctx),
-                                        daemon=True
-                                    ).start()
-                                    
-                                    print(f"[ECHO MS UPDATED] Đã cập nhật MS {ms} cho user {target_user_id} từ page echo")
-                                else:
-                                    print(f"[ECHO MS WARNING] User {target_user_id} chưa có trong USER_CONTEXT")
-                            else:
-                                print(f"[ECHO MS INVALID] MS {ms} không tồn tại trong hệ thống")
-                        
-                        # Bỏ qua xử lý tiếp theo
-                        continue
-                    else:
-                        # Các echo khác vẫn bỏ qua như cũ
-                        print(f"[ECHO SKIP] Bỏ qua echo message từ bot: {echo_text[:50]}")
-                        continue
+                    print(f"[ECHO SKIP] Bỏ qua echo message từ bot")
+                    continue
                 
-                # ============================================
-                # XỬ LÝ POSTBACK TỪ USER (KHÔNG PHẢI ECHO)
-                # ============================================
+                # Kiểm tra postback
                 if 'postback' in event:
                     payload = event['postback'].get('payload', '')
                     print(f"[POSTBACK PROCESS] User {sender_id}: {payload}")
@@ -1760,9 +1681,7 @@ def process_facebook_message(data: dict, client_ip: str, user_agent: str):
                         handle_postback_with_recovery(sender_id, payload)
                     continue
                 
-                # ============================================
-                # XỬ LÝ REFERRAL (từ catalog, ads)
-                # ============================================
+                # Kiểm tra referral (từ catalog, ads)
                 if 'referral' in event:
                     referral_data = event['referral']
                     print(f"[REFERRAL PROCESS] User {sender_id}: {referral_data}")
@@ -1771,9 +1690,7 @@ def process_facebook_message(data: dict, client_ip: str, user_agent: str):
                     handle_catalog_referral(sender_id, referral_data)
                     continue
                 
-                # ============================================
-                # XỬ LÝ MESSAGE TỪ USER (KHÔNG PHẢI ECHO)
-                # ============================================
+                # Kiểm tra message
                 if 'message' in event:
                     message_data = event['message']
                     mid = message_data.get('mid')
@@ -1789,24 +1706,22 @@ def process_facebook_message(data: dict, client_ip: str, user_agent: str):
                         continue
                     
                     try:
-                        # Kiểm tra nếu là echo từ bot (đã xử lý ở trên)
+                        # Kiểm tra nếu là echo từ bot
                         app_id = message_data.get('app_id', '')
-                        text_content = message_data.get('text', '')
+                        echo_text = message_data.get('text', '')
                         attachments = message_data.get('attachments', [])
                         
-                        # KHÔNG kiểm tra is_bot_generated_echo ở đây vì đã xử lý echo ở trên
-                        # Chỉ cần kiểm tra app_id để tránh xử lý trùng
-                        if app_id and app_id in BOT_APP_IDS and "#MS" not in (text_content or "").upper():
-                            print(f"[BOT APP ID SKIP] Bỏ qua tin nhắn từ bot app_id: {app_id}")
+                        if is_bot_generated_echo(echo_text, app_id, attachments):
+                            print(f"[BOT ECHO SKIP] Bỏ qua echo từ bot: {echo_text[:50]}")
                             mark_message_completed(sender_id, mid if mid else str(time.time()))
                             continue
                         
-                        # Xử lý tin nhắn văn bản từ USER
+                        # Xử lý tin nhắn văn bản
                         if 'text' in message_data:
                             text = message_data['text'].strip()
                             print(f"[TEXT PROCESS] User {sender_id}: {text[:100]}")
                             
-                            # Kiểm tra nếu là từ Fchat webhook hoặc page echo đã xử lý
+                            # Kiểm tra nếu là từ Fchat webhook
                             if text.startswith('#'):
                                 # Giả lập referral data cho Fchat
                                 referral_match = re.search(r'#MS(\d+)', text.upper())
@@ -1826,10 +1741,10 @@ def process_facebook_message(data: dict, client_ip: str, user_agent: str):
                                 else:
                                     send_message(sender_id, "Dạ, vui lòng cung cấp mã sản phẩm hợp lệ ạ!")
                             else:
-                                # Xử lý text bình thường từ USER
+                                # Xử lý text bình thường
                                 handle_text(sender_id, text)
                         
-                        # Xử lý tin nhắn hình ảnh từ USER
+                        # Xử lý tin nhắn hình ảnh
                         elif 'attachments' in message_data:
                             for attachment in message_data['attachments']:
                                 if attachment.get('type') == 'image':
@@ -2857,22 +2772,11 @@ def is_bot_generated_echo(echo_text: str, app_id: str = "", attachments: list = 
     # 1. Kiểm tra app_id (ưu tiên cao nhất)
     if app_id and app_id in BOT_APP_IDS:
         print(f"[ECHO CHECK] Phát hiện bot app_id: {app_id}")
-        
-        # KIỂM TRA QUAN TRỌNG: Nếu là echo từ bot nhưng CHỨA #MS thì KHÔNG coi là echo cần bỏ qua
-        if echo_text and "#MS" in echo_text.upper():
-            print(f"[ECHO WITH #MS DETECTED] Đây là echo chứa #MS, cho phép xử lý")
-            return False  # Quan trọng: Trả về False để cho phép xử lý
-            
         return True
     
     # 2. Kiểm tra các pattern đặc trưng của bot trong text
     if echo_text:
         echo_text_lower = echo_text.lower()
-        
-        # KIỂM TRA QUAN TRỌNG: Nếu tin nhắn chứa #MS, KHÔNG coi là echo (cho dù có các pattern khác)
-        if "#MS" in echo_text.upper():
-            print(f"[ECHO CHECK] Tin nhắn có #MS => KHÔNG PHẢI BOT (từ page)")
-            return False  # Quan trọng: Cho phép xử lý tin nhắn chứa #MS
         
         # Các mẫu câu đặc trưng của bot (thêm các mẫu mới)
         bot_patterns = [
@@ -2917,8 +2821,10 @@ def is_bot_generated_echo(echo_text: str, app_id: str = "", attachments: list = 
                 print(f"[ECHO BOT PATTERN] Phát hiện pattern: {pattern}")
                 return True
     
-    # 3. Kiểm tra nếu là tin nhắn từ khách hàng (có #MS từ Fchat) - ĐÃ XỬ LÝ Ở TRÊN
-    # (Đoạn này đã được xử lý ở trên với kiểm tra #MS)
+    # 3. Kiểm tra nếu là tin nhắn từ khách hàng (có #MS từ Fchat)
+    if echo_text and "#MS" in echo_text.upper():
+        print(f"[ECHO CHECK] Tin nhắn có #MS => KHÔNG PHẢI BOT (từ Fchat)")
+        return False
     
     return False
     
@@ -2930,34 +2836,9 @@ def get_post_content_from_facebook(post_id: str) -> Optional[dict]:
     """
     Lấy nội dung bài viết từ Facebook Graph API
     """
-    print(f"[GET POST CONTENT DEBUG] Bắt đầu lấy nội dung bài viết {post_id}")
-    
-    # DEBUG: In ra token để kiểm tra - BỔ SUNG CỰC CHI TIẾT
-    print(f"[GET POST CONTENT DEBUG] Kiểm tra biến môi trường:")
-    print(f"[GET POST CONTENT DEBUG] - PAGE_ACCESS_TOKEN tồn tại: {bool(PAGE_ACCESS_TOKEN)}")
-    print(f"[GET POST CONTENT DEBUG] - PAGE_ACCESS_TOKEN độ dài: {len(PAGE_ACCESS_TOKEN) if PAGE_ACCESS_TOKEN else 0}")
-    print(f"[GET POST CONTENT DEBUG] - PAGE_ACCESS_TOKEN 30 ký tự đầu: {PAGE_ACCESS_TOKEN[:30] if PAGE_ACCESS_TOKEN else 'None'}")
-    print(f"[GET POST CONTENT DEBUG] - PAGE_ACCESS_TOKEN 30 ký tự cuối: {PAGE_ACCESS_TOKEN[-30:] if PAGE_ACCESS_TOKEN and len(PAGE_ACCESS_TOKEN) > 30 else 'None'}")
-    print(f"[GET POST CONTENT DEBUG] - PAGE_ID: {PAGE_ID}")
-    print(f"[GET POST CONTENT DEBUG] - DOMAIN: {DOMAIN}")
-    
-    # Kiểm tra kỹ hơn PAGE_ACCESS_TOKEN
     if not PAGE_ACCESS_TOKEN:
-        print(f"[GET POST CONTENT] ❌ LỖI NGHIÊM TRỌNG: PAGE_ACCESS_TOKEN không tồn tại hoặc rỗng")
-        print(f"[GET POST CONTENT]   Kiểm tra file .env có tồn tại không?")
-        print(f"[GET POST CONTENT]   Kiểm tra biến môi trường PAGE_ACCESS_TOKEN trong .env")
+        print(f"[GET POST CONTENT] Thiếu PAGE_ACCESS_TOKEN")
         return None
-    
-    # Kiểm tra format token
-    if not PAGE_ACCESS_TOKEN.startswith('EAA'):
-        print(f"[GET POST CONTENT] ⚠️  CẢNH BÁO: Token không bắt đầu bằng 'EAA', có thể không hợp lệ")
-    
-    if len(PAGE_ACCESS_TOKEN) < 100:
-        print(f"[GET POST CONTENT] ⚠️  CẢNH BÁO: Token quá ngắn ({len(PAGE_ACCESS_TOKEN)} ký tự), có thể bị cắt")
-    
-    # Kiểm tra PAGE_ID
-    if not PAGE_ID:
-        print(f"[GET POST CONTENT] ⚠️  CẢNH BÁO: PAGE_ID không có, không thể xác định page")
     
     try:
         # Facebook Graph API endpoint để lấy nội dung bài viết
@@ -2967,20 +2848,12 @@ def get_post_content_from_facebook(post_id: str) -> Optional[dict]:
             'access_token': PAGE_ACCESS_TOKEN
         }
         
-        print(f"[GET POST CONTENT] 📡 Đang gọi Facebook Graph API cho bài viết: {post_id}")
-        print(f"[GET POST CONTENT] 📡 URL: {url}")
-        print(f"[GET POST CONTENT] 📡 Token preview: {PAGE_ACCESS_TOKEN[:30]}...")
-        
-        # Gọi API với timeout hợp lý
+        print(f"[GET POST CONTENT] Gọi Facebook Graph API: {url}")
         response = requests.get(url, params=params, timeout=10)
-        
-        print(f"[GET POST CONTENT] 📡 Facebook API trả về status code: {response.status_code}")
         
         if response.status_code == 200:
             data = response.json()
-            message_preview = data.get('message', '')[:100] + '...' if data.get('message') else '(Không có nội dung)'
-            print(f"[GET POST CONTENT] ✅ Thành công! Đã lấy nội dung bài viết")
-            print(f"[GET POST CONTENT] ✅ Nội dung preview: {message_preview}")
+            print(f"[GET POST CONTENT] Đã lấy nội dung bài viết {post_id} từ Facebook Graph API")
             
             # Chuẩn hóa dữ liệu trả về để tương thích với code cũ
             post_data = {
@@ -2991,54 +2864,30 @@ def get_post_content_from_facebook(post_id: str) -> Optional[dict]:
             }
             return post_data
         else:
-            print(f"[GET POST CONTENT] ❌ Lỗi Facebook Graph API {response.status_code}")
+            print(f"[GET POST CONTENT] Lỗi Facebook Graph API {response.status_code}: {response.text[:200]}")
             
-            # In chi tiết lỗi
-            try:
+            # Nếu token hết hạn hoặc thiếu quyền
+            if response.status_code == 400 or response.status_code == 403:
                 error_data = response.json().get('error', {})
                 error_message = error_data.get('message', '')
-                error_type = error_data.get('type', '')
                 error_code = error_data.get('code', 0)
+                print(f"[GET POST CONTENT] Lỗi Facebook API: {error_message} (code: {error_code})")
                 
-                print(f"[GET POST CONTENT] ❌ Chi tiết lỗi:")
-                print(f"[GET POST CONTENT] ❌ - Message: {error_message}")
-                print(f"[GET POST CONTENT] ❌ - Type: {error_type}")
-                print(f"[GET POST CONTENT] ❌ - Code: {error_code}")
-                
-                # Phân tích lỗi thường gặp
-                if response.status_code == 400:
-                    if "access token" in error_message.lower():
-                        print(f"[GET POST CONTENT] ❌ VẤN ĐỀ: Token truy cập không hợp lệ hoặc đã hết hạn!")
-                        print(f"[GET POST CONTENT] ❌ Giải pháp: Tạo token mới tại https://developers.facebook.com/tools/explorer/")
-                    elif "permission" in error_message.lower():
-                        print(f"[GET POST CONTENT] ❌ VẤN ĐỀ: Token không có quyền truy cập!")
-                        print(f"[GET POST CONTENT] ❌ Giải pháp: Cần thêm quyền 'pages_read_engagement' cho token")
-                    elif "does not exist" in error_message.lower():
-                        print(f"[GET POST CONTENT] ❌ VẤN ĐỀ: Bài viết không tồn tại hoặc không thể truy cập!")
-                elif response.status_code == 403:
-                    print(f"[GET POST CONTENT] ❌ VẤN ĐỀ: Không có quyền truy cập (403 Forbidden)!")
-                    print(f"[GET POST CONTENT] ❌ Token có thể đã bị thu hồi hoặc không đủ quyền.")
-                
-            except Exception as parse_error:
-                print(f"[GET POST CONTENT] ❌ Không thể phân tích lỗi: {parse_error}")
-                print(f"[GET POST CONTENT] ❌ Response text: {response.text[:200]}")
+                # Kiểm tra các lỗi phổ biến
+                if "access token" in error_message.lower():
+                    print(f"[GET POST CONTENT] CÓ THỂ PAGE_ACCESS_TOKEN ĐÃ HẾT HẠN HOẶC KHÔNG ĐỦ QUYỀN!")
+                elif "permission" in error_message.lower():
+                    print(f"[GET POST CONTENT] THIẾU QUYỀN TRUY CẬP! Cần quyền 'pages_read_engagement'")
             
             return None
             
     except requests.exceptions.Timeout:
-        print(f"[GET POST CONTENT] ⏰ Timeout khi gọi Facebook Graph API")
-        print(f"[GET POST CONTENT] ⏰ Có thể mạng chậm hoặc Facebook API bận")
-        return None
-    except requests.exceptions.ConnectionError:
-        print(f"[GET POST CONTENT] 🔌 Lỗi kết nối đến Facebook API")
-        print(f"[GET POST CONTENT] 🔌 Kiểm tra kết nối mạng của server")
+        print(f"[GET POST CONTENT] Timeout khi gọi Facebook Graph API")
         return None
     except Exception as e:
-        print(f"[GET POST CONTENT] ❌ Lỗi không xác định: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"[GET POST CONTENT] Exception: {e}")
         return None
-        
+
 # ============================================
 # HÀM TRÍCH XUẤT MS TỪ BÀI VIẾT (ĐÃ SỬA - CHỈ DÙNG REGEX)
 # ============================================
