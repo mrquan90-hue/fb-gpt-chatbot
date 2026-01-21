@@ -80,6 +80,36 @@ ENABLE_COMMENT_REPLY = os.getenv("ENABLE_COMMENT_REPLY", "true").lower() == "tru
 WEBSITE_URL = os.getenv("WEBSITE_URL", "").strip()  # Link website từ Google Sheet
 
 # ============================================
+# DEBUG: In biến môi trường khi khởi động
+# ============================================
+print("=" * 60)
+print("🚀 BOT KHỞI ĐỘNG - DEBUG BIẾN MÔI TRƯỜNG")
+print("=" * 60)
+print(f"📌 DOMAIN: {DOMAIN}")
+print(f"📌 APP_URL: {os.getenv('APP_URL', 'NOT_SET')}")
+print(f"📌 PAGE_ID: {PAGE_ID}")
+print(f"📌 PAGE_ACCESS_TOKEN tồn tại: {bool(PAGE_ACCESS_TOKEN)}")
+print(f"📌 PAGE_ACCESS_TOKEN độ dài: {len(PAGE_ACCESS_TOKEN) if PAGE_ACCESS_TOKEN else 0}")
+print(f"📌 PAGE_ACCESS_TOKEN preview: {PAGE_ACCESS_TOKEN[:30] if PAGE_ACCESS_TOKEN else 'None'}...")
+print(f"📌 VERIFY_TOKEN: {VERIFY_TOKEN}")
+print(f"📌 SHEET_CSV_URL: {GOOGLE_SHEET_CSV_URL[:80] if GOOGLE_SHEET_CSV_URL else 'None'}...")
+print(f"📌 ENABLE_COMMENT_REPLY: {ENABLE_COMMENT_REPLY}")
+print("=" * 60)
+
+# Kiểm tra token Facebook
+if PAGE_ACCESS_TOKEN:
+    if not PAGE_ACCESS_TOKEN.startswith('EAA'):
+        print("⚠️  CẢNH BÁO: PAGE_ACCESS_TOKEN không bắt đầu bằng 'EAA'")
+    if len(PAGE_ACCESS_TOKEN) < 150:
+        print(f"⚠️  CẢNH BÁO: PAGE_ACCESS_TOKEN quá ngắn ({len(PAGE_ACCESS_TOKEN)} ký tự)")
+    else:
+        print(f"✅ PAGE_ACCESS_TOKEN có vẻ hợp lệ ({len(PAGE_ACCESS_TOKEN)} ký tự)")
+else:
+    print("❌ LỖI: PAGE_ACCESS_TOKEN không tồn tại!")
+
+print("=" * 60)
+
+# ============================================
 # GOOGLE SHEETS API CONFIGURATION
 # ============================================
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "").strip()
@@ -2900,9 +2930,34 @@ def get_post_content_from_facebook(post_id: str) -> Optional[dict]:
     """
     Lấy nội dung bài viết từ Facebook Graph API
     """
+    print(f"[GET POST CONTENT DEBUG] Bắt đầu lấy nội dung bài viết {post_id}")
+    
+    # DEBUG: In ra token để kiểm tra - BỔ SUNG CỰC CHI TIẾT
+    print(f"[GET POST CONTENT DEBUG] Kiểm tra biến môi trường:")
+    print(f"[GET POST CONTENT DEBUG] - PAGE_ACCESS_TOKEN tồn tại: {bool(PAGE_ACCESS_TOKEN)}")
+    print(f"[GET POST CONTENT DEBUG] - PAGE_ACCESS_TOKEN độ dài: {len(PAGE_ACCESS_TOKEN) if PAGE_ACCESS_TOKEN else 0}")
+    print(f"[GET POST CONTENT DEBUG] - PAGE_ACCESS_TOKEN 30 ký tự đầu: {PAGE_ACCESS_TOKEN[:30] if PAGE_ACCESS_TOKEN else 'None'}")
+    print(f"[GET POST CONTENT DEBUG] - PAGE_ACCESS_TOKEN 30 ký tự cuối: {PAGE_ACCESS_TOKEN[-30:] if PAGE_ACCESS_TOKEN and len(PAGE_ACCESS_TOKEN) > 30 else 'None'}")
+    print(f"[GET POST CONTENT DEBUG] - PAGE_ID: {PAGE_ID}")
+    print(f"[GET POST CONTENT DEBUG] - DOMAIN: {DOMAIN}")
+    
+    # Kiểm tra kỹ hơn PAGE_ACCESS_TOKEN
     if not PAGE_ACCESS_TOKEN:
-        print(f"[GET POST CONTENT] Thiếu PAGE_ACCESS_TOKEN")
+        print(f"[GET POST CONTENT] ❌ LỖI NGHIÊM TRỌNG: PAGE_ACCESS_TOKEN không tồn tại hoặc rỗng")
+        print(f"[GET POST CONTENT]   Kiểm tra file .env có tồn tại không?")
+        print(f"[GET POST CONTENT]   Kiểm tra biến môi trường PAGE_ACCESS_TOKEN trong .env")
         return None
+    
+    # Kiểm tra format token
+    if not PAGE_ACCESS_TOKEN.startswith('EAA'):
+        print(f"[GET POST CONTENT] ⚠️  CẢNH BÁO: Token không bắt đầu bằng 'EAA', có thể không hợp lệ")
+    
+    if len(PAGE_ACCESS_TOKEN) < 100:
+        print(f"[GET POST CONTENT] ⚠️  CẢNH BÁO: Token quá ngắn ({len(PAGE_ACCESS_TOKEN)} ký tự), có thể bị cắt")
+    
+    # Kiểm tra PAGE_ID
+    if not PAGE_ID:
+        print(f"[GET POST CONTENT] ⚠️  CẢNH BÁO: PAGE_ID không có, không thể xác định page")
     
     try:
         # Facebook Graph API endpoint để lấy nội dung bài viết
@@ -2912,12 +2967,20 @@ def get_post_content_from_facebook(post_id: str) -> Optional[dict]:
             'access_token': PAGE_ACCESS_TOKEN
         }
         
-        print(f"[GET POST CONTENT] Gọi Facebook Graph API: {url}")
+        print(f"[GET POST CONTENT] 📡 Đang gọi Facebook Graph API cho bài viết: {post_id}")
+        print(f"[GET POST CONTENT] 📡 URL: {url}")
+        print(f"[GET POST CONTENT] 📡 Token preview: {PAGE_ACCESS_TOKEN[:30]}...")
+        
+        # Gọi API với timeout hợp lý
         response = requests.get(url, params=params, timeout=10)
+        
+        print(f"[GET POST CONTENT] 📡 Facebook API trả về status code: {response.status_code}")
         
         if response.status_code == 200:
             data = response.json()
-            print(f"[GET POST CONTENT] Đã lấy nội dung bài viết {post_id} từ Facebook Graph API")
+            message_preview = data.get('message', '')[:100] + '...' if data.get('message') else '(Không có nội dung)'
+            print(f"[GET POST CONTENT] ✅ Thành công! Đã lấy nội dung bài viết")
+            print(f"[GET POST CONTENT] ✅ Nội dung preview: {message_preview}")
             
             # Chuẩn hóa dữ liệu trả về để tương thích với code cũ
             post_data = {
@@ -2928,30 +2991,54 @@ def get_post_content_from_facebook(post_id: str) -> Optional[dict]:
             }
             return post_data
         else:
-            print(f"[GET POST CONTENT] Lỗi Facebook Graph API {response.status_code}: {response.text[:200]}")
+            print(f"[GET POST CONTENT] ❌ Lỗi Facebook Graph API {response.status_code}")
             
-            # Nếu token hết hạn hoặc thiếu quyền
-            if response.status_code == 400 or response.status_code == 403:
+            # In chi tiết lỗi
+            try:
                 error_data = response.json().get('error', {})
                 error_message = error_data.get('message', '')
+                error_type = error_data.get('type', '')
                 error_code = error_data.get('code', 0)
-                print(f"[GET POST CONTENT] Lỗi Facebook API: {error_message} (code: {error_code})")
                 
-                # Kiểm tra các lỗi phổ biến
-                if "access token" in error_message.lower():
-                    print(f"[GET POST CONTENT] CÓ THỂ PAGE_ACCESS_TOKEN ĐÃ HẾT HẠN HOẶC KHÔNG ĐỦ QUYỀN!")
-                elif "permission" in error_message.lower():
-                    print(f"[GET POST CONTENT] THIẾU QUYỀN TRUY CẬP! Cần quyền 'pages_read_engagement'")
+                print(f"[GET POST CONTENT] ❌ Chi tiết lỗi:")
+                print(f"[GET POST CONTENT] ❌ - Message: {error_message}")
+                print(f"[GET POST CONTENT] ❌ - Type: {error_type}")
+                print(f"[GET POST CONTENT] ❌ - Code: {error_code}")
+                
+                # Phân tích lỗi thường gặp
+                if response.status_code == 400:
+                    if "access token" in error_message.lower():
+                        print(f"[GET POST CONTENT] ❌ VẤN ĐỀ: Token truy cập không hợp lệ hoặc đã hết hạn!")
+                        print(f"[GET POST CONTENT] ❌ Giải pháp: Tạo token mới tại https://developers.facebook.com/tools/explorer/")
+                    elif "permission" in error_message.lower():
+                        print(f"[GET POST CONTENT] ❌ VẤN ĐỀ: Token không có quyền truy cập!")
+                        print(f"[GET POST CONTENT] ❌ Giải pháp: Cần thêm quyền 'pages_read_engagement' cho token")
+                    elif "does not exist" in error_message.lower():
+                        print(f"[GET POST CONTENT] ❌ VẤN ĐỀ: Bài viết không tồn tại hoặc không thể truy cập!")
+                elif response.status_code == 403:
+                    print(f"[GET POST CONTENT] ❌ VẤN ĐỀ: Không có quyền truy cập (403 Forbidden)!")
+                    print(f"[GET POST CONTENT] ❌ Token có thể đã bị thu hồi hoặc không đủ quyền.")
+                
+            except Exception as parse_error:
+                print(f"[GET POST CONTENT] ❌ Không thể phân tích lỗi: {parse_error}")
+                print(f"[GET POST CONTENT] ❌ Response text: {response.text[:200]}")
             
             return None
             
     except requests.exceptions.Timeout:
-        print(f"[GET POST CONTENT] Timeout khi gọi Facebook Graph API")
+        print(f"[GET POST CONTENT] ⏰ Timeout khi gọi Facebook Graph API")
+        print(f"[GET POST CONTENT] ⏰ Có thể mạng chậm hoặc Facebook API bận")
+        return None
+    except requests.exceptions.ConnectionError:
+        print(f"[GET POST CONTENT] 🔌 Lỗi kết nối đến Facebook API")
+        print(f"[GET POST CONTENT] 🔌 Kiểm tra kết nối mạng của server")
         return None
     except Exception as e:
-        print(f"[GET POST CONTENT] Exception: {e}")
+        print(f"[GET POST CONTENT] ❌ Lỗi không xác định: {e}")
+        import traceback
+        traceback.print_exc()
         return None
-
+        
 # ============================================
 # HÀM TRÍCH XUẤT MS TỪ BÀI VIẾT (ĐÃ SỬA - CHỈ DÙNG REGEX)
 # ============================================
